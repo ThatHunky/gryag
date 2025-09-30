@@ -76,6 +76,9 @@ class ContextStore:
         self._db_path = Path(db_path)
         self._init_lock = asyncio.Lock()
         self._initialized = False
+        self._prune_lock = asyncio.Lock()
+        self._last_prune_ts = 0
+        self._prune_interval = 900  # seconds between automatic pruning tasks
 
     async def init(self) -> None:
         async with self._init_lock:
@@ -134,7 +137,20 @@ class ContextStore:
             )
             await db.commit()
         if retention_days:
+            await self._maybe_prune(retention_days)
+
+    async def _maybe_prune(self, retention_days: int) -> None:
+        now = int(time.time())
+        if self._prune_interval <= 0:
             await self.prune_old(retention_days)
+            return
+        if now - self._last_prune_ts < self._prune_interval:
+            return
+        async with self._prune_lock:
+            if now - self._last_prune_ts < self._prune_interval:
+                return
+            await self.prune_old(retention_days)
+            self._last_prune_ts = int(time.time())
 
     async def ban_user(self, chat_id: int, user_id: int) -> None:
         await self.init()
@@ -244,23 +260,27 @@ class ContextStore:
         thread_id: int | None,
         query_embedding: list[float],
         limit: int = 5,
+        max_candidates: int = 500,
     ) -> list[dict[str, Any]]:
         await self.init()
         if not query_embedding:
             return []
 
+        candidate_cap = max(1, max_candidates)
         if thread_id is None:
             query = (
                 "SELECT id, role, text, media, embedding FROM messages "
-                "WHERE chat_id = ? AND embedding IS NOT NULL"
+                "WHERE chat_id = ? AND embedding IS NOT NULL "
+                "ORDER BY id DESC LIMIT ?"
             )
-            params: tuple[Any, ...] = (chat_id,)
+            params: tuple[Any, ...] = (chat_id, candidate_cap)
         else:
             query = (
                 "SELECT id, role, text, media, embedding FROM messages "
-                "WHERE chat_id = ? AND thread_id = ? AND embedding IS NOT NULL"
+                "WHERE chat_id = ? AND thread_id = ? AND embedding IS NOT NULL "
+                "ORDER BY id DESC LIMIT ?"
             )
-            params = (chat_id, thread_id)
+            params = (chat_id, thread_id, candidate_cap)
 
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -405,3 +425,4 @@ class ContextStore:
             await db.execute("DELETE FROM bans WHERE ts < ?", (cutoff,))
             await db.execute("DELETE FROM notices WHERE ts < ?", (cutoff,))
             await db.commit()
+        self._last_prune_ts = int(time.time())

@@ -1,28 +1,22 @@
 from __future__ import annotations
 
-from typing import Any
-
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
 from app.config import Settings
 from app.services.context_store import ContextStore
-
-try:  # Optional dependency for redis quota resets.
-    from redis.asyncio import Redis
-except ImportError:  # pragma: no cover - redis optional.
-    Redis = Any  # type: ignore
+from app.services.redis_types import RedisLike
 
 router = Router()
 
 ADMIN_ONLY = "Ця команда лише для своїх. І явно не для тебе."
-BAN_SUCCESS = "Готово: користувача прибрано від гряга."
-UNBAN_SUCCESS = "Ок, розбанила. Нехай знову пищить."
+BAN_SUCCESS = "Готово: користувача кувалдіровано."
+UNBAN_SUCCESS = "Ок, розбанив. Нехай знову пиздить."
 ALREADY_BANNED = "Та він і так у бані сидів."
 NOT_BANNED = "Нема кого розбанювати — список чистий."
 MISSING_TARGET = "Покажи, кого саме прибрати: зроби реплай або передай ID."
-RESET_DONE = "Все, обнулила ліміти. Можна знову розганяти балачки."
+RESET_DONE = "Все, обнулив ліміти. Можна знову розганяти балачки."
 
 
 def _is_admin(message: Message, settings: Settings) -> bool:
@@ -48,7 +42,9 @@ def _extract_target(message: Message) -> tuple[int, str] | None:
 
 
 @router.message(Command("gryagban"))
-async def ban_user_command(message: Message, settings: Settings, store: ContextStore) -> None:
+async def ban_user_command(
+    message: Message, settings: Settings, store: ContextStore
+) -> None:
     if not _is_admin(message, settings):
         await message.reply(ADMIN_ONLY)
         return
@@ -70,7 +66,9 @@ async def ban_user_command(message: Message, settings: Settings, store: ContextS
 
 
 @router.message(Command("gryagunban"))
-async def unban_user_command(message: Message, settings: Settings, store: ContextStore) -> None:
+async def unban_user_command(
+    message: Message, settings: Settings, store: ContextStore
+) -> None:
     if not _is_admin(message, settings):
         await message.reply(ADMIN_ONLY)
         return
@@ -96,7 +94,7 @@ async def reset_quotas_command(
     message: Message,
     settings: Settings,
     store: ContextStore,
-    redis_client: Redis | None = None,
+    redis_client: RedisLike | None = None,
 ) -> None:
     if not _is_admin(message, settings):
         await message.reply(ADMIN_ONLY)
@@ -110,7 +108,9 @@ async def reset_quotas_command(
         cursor = 0
         try:
             while True:
-                cursor, keys = await redis_client.scan(cursor=cursor, match=pattern, count=100)
+                cursor, keys = await redis_client.scan(
+                    cursor=cursor, match=pattern, count=100
+                )
                 if keys:
                     await redis_client.delete(*keys)
                 if cursor == 0:

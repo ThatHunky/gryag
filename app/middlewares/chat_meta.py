@@ -1,19 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
-
 from aiogram import BaseMiddleware, Bot
 from aiogram.types import Message
 
 from app.config import Settings
 from app.services.context_store import ContextStore
 from app.services.gemini import GeminiClient
-
-try:  # Optional dependency for Redis support.
-    from redis.asyncio import Redis
-except ImportError:  # pragma: no cover - redis optional.
-    Redis = Any  # type: ignore
+from app.services.redis_types import RedisLike
 
 
 class ChatMetaMiddleware(BaseMiddleware):
@@ -25,7 +19,7 @@ class ChatMetaMiddleware(BaseMiddleware):
         settings: Settings,
         store: ContextStore,
         gemini: GeminiClient,
-        redis_client: Redis | None = None,
+        redis_client: RedisLike | None = None,
     ) -> None:
         self._bot = bot
         self._settings = settings
@@ -33,20 +27,24 @@ class ChatMetaMiddleware(BaseMiddleware):
         self._gemini = gemini
         self._redis = redis_client
         self._bot_username: str | None = None
+        self._bot_id: int | None = None
         self._lock = asyncio.Lock()
 
-    async def _ensure_bot_username(self) -> str:
-        if self._bot_username:
-            return self._bot_username
+    async def _ensure_bot_identity(self) -> tuple[str, int | None]:
+        if self._bot_username is not None and self._bot_id is not None:
+            return self._bot_username, self._bot_id
         async with self._lock:
-            if not self._bot_username:
+            if self._bot_username is None or self._bot_id is None:
                 me = await self._bot.get_me()
                 self._bot_username = me.username or ""
-        return self._bot_username or ""
+                self._bot_id = me.id
+        return self._bot_username or "", self._bot_id
 
     async def __call__(self, handler, event: Message, data):  # type: ignore[override]
         if isinstance(event, Message):
-            data["bot_username"] = await self._ensure_bot_username()
+            bot_username, bot_id = await self._ensure_bot_identity()
+            data["bot_username"] = bot_username
+            data["bot_id"] = bot_id
         data["settings"] = self._settings
         data["store"] = self._store
         data["gemini_client"] = self._gemini

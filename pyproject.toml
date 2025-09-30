@@ -23,3 +23,6 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/example/gryag"
+
+[project.scripts]
+gryag = "app.main:run"

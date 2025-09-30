@@ -3,11 +3,14 @@ from __future__ import annotations
 import base64
 import asyncio
 import json
+import time
 from typing import Any, Awaitable, Callable, Iterable
 import logging
 
 import google.generativeai as genai
 from google.generativeai.types import HarmBlockThreshold, HarmCategory
+
+from app.services import telemetry
 
 
 class GeminiError(Exception):
@@ -23,6 +26,13 @@ class GeminiClient:
         self._embed_model = embed_model
         self._logger = logging.getLogger(__name__)
         self._search_grounding_supported = True
+        self._system_instruction_supported = True
+        self._generate_timeout = 45.0
+        self._max_failures = 3
+        self._cooldown_seconds = 60.0
+        self._failure_count = 0
+        self._circuit_open_until = 0.0
+        self._embed_semaphore = asyncio.Semaphore(8)
         # Gemini 1.5 renamed some safety categories and dropped the SafetySetting class
         categories = []
         for name in (
@@ -68,6 +78,52 @@ class GeminiClient:
             return True
         return False
 
+    def _ensure_circuit(self) -> None:
+        if self._circuit_open_until and time.time() < self._circuit_open_until:
+            telemetry.increment_counter("gemini.circuit_block")
+            raise GeminiError("Gemini temporarily unavailable (cooling down)")
+
+    def _record_failure(self) -> None:
+        self._failure_count += 1
+        telemetry.increment_counter("gemini.failure")
+        if self._failure_count >= self._max_failures:
+            self._circuit_open_until = time.time() + self._cooldown_seconds
+            self._failure_count = 0
+            telemetry.increment_counter("gemini.circuit_open")
+            self._logger.warning(
+                "Gemini circuit opened for %.0f seconds after repeated failures",
+                self._cooldown_seconds,
+            )
+
+    def _record_success(self) -> None:
+        self._failure_count = 0
+        self._circuit_open_until = 0.0
+        telemetry.increment_counter("gemini.success")
+
+    async def _invoke_model(
+        self,
+        contents: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        system_instruction: str | None,
+    ) -> Any:
+        kwargs: dict[str, Any] = {
+            "safety_settings": self._safety_settings,
+        }
+        if tools:
+            kwargs["tools"] = tools
+        if system_instruction:
+            kwargs["system_instruction"] = system_instruction
+        try:
+            return await asyncio.wait_for(
+                self._model.generate_content_async(
+                    contents,
+                    **kwargs,
+                ),
+                timeout=self._generate_timeout,
+            )
+        except asyncio.TimeoutError as exc:
+            raise GeminiError("Gemini request timed out") from exc
+
     @staticmethod
     def build_media_parts(
         media_items: Iterable[dict[str, Any]],
@@ -92,64 +148,103 @@ class GeminiClient:
             dict[str, Callable[[dict[str, Any]], Awaitable[str]]] | None
         ) = None,
     ) -> str:
-        contents: list[dict[str, Any]] = []
-        if system_prompt:
-            contents.append({"role": "user", "parts": [{"text": system_prompt}]})
-        if history:
-            contents.extend(list(history))
-        contents.append({"role": "user", "parts": list(user_parts)})
+        self._ensure_circuit()
 
+        def assemble(include_prompt: bool) -> list[dict[str, Any]]:
+            payload: list[dict[str, Any]] = []
+            if include_prompt and system_prompt:
+                payload.append({"role": "user", "parts": [{"text": system_prompt}]})
+            if history:
+                payload.extend(list(history))
+            payload.append({"role": "user", "parts": list(user_parts)})
+            return payload
+
+        use_system_instruction = (
+            bool(system_prompt) and self._system_instruction_supported
+        )
         filtered_tools = self._filter_tools(tools)
+        system_instruction = system_prompt if use_system_instruction else None
+        contents = assemble(not use_system_instruction)
+        call_contents = contents
         response: Any | None = None
+
         try:
-            response = await self._model.generate_content_async(
-                contents,
-                tools=filtered_tools,
-                safety_settings=self._safety_settings,
+            response = await self._invoke_model(
+                call_contents,
+                filtered_tools,
+                system_instruction,
             )
+        except TypeError as exc:
+            if system_instruction and "system_instruction" in str(exc):
+                self._system_instruction_supported = False
+                self._logger.warning("Disabling system_instruction: %s", exc)
+                use_system_instruction = False
+                system_instruction = None
+                contents = assemble(True)
+                call_contents = contents
+                response = await self._invoke_model(call_contents, filtered_tools, None)
+            else:
+                self._record_failure()
+                raise
+        except GeminiError:
+            self._record_failure()
+            raise
         except Exception as exc:  # pragma: no cover - network failure paths
             err_text = str(exc)
             self._logger.exception(
-                "Gemini request failed with tools; retrying without tools"
+                "Gemini request failed with tools; applying fallbacks"
             )
+            if system_instruction and "system_instruction" in err_text:
+                self._system_instruction_supported = False
+                system_instruction = None
+                use_system_instruction = False
+                contents = assemble(True)
+                call_contents = contents
+
             retried = False
             if self._maybe_disable_search_grounding(err_text):
                 filtered_tools = self._filter_tools(tools)
+            try:
+                response = await self._invoke_model(
+                    call_contents,
+                    filtered_tools,
+                    system_instruction,
+                )
+                retried = True
+            except Exception as fallback_exc:
                 if filtered_tools:
                     try:
-                        response = await self._model.generate_content_async(
-                            contents,
-                            tools=filtered_tools,
-                            safety_settings=self._safety_settings,
+                        response = await self._invoke_model(
+                            call_contents,
+                            None,
+                            system_instruction,
                         )
                         retried = True
-                    except Exception:
-                        self._logger.exception(
-                            "Gemini retry with filtered tools failed"
-                        )
-            if not retried:
-                if filtered_tools:
-                    try:
-                        response = await self._model.generate_content_async(
-                            contents,
-                            safety_settings=self._safety_settings,
-                        )
-                    except Exception as fallback_exc:  # pragma: no cover
-                        self._logger.exception("Gemini retry without tools also failed")
-                        raise GeminiError("Gemini request failed") from fallback_exc
-                else:
-                    raise GeminiError("Gemini request failed") from exc
+                    except Exception as final_exc:  # pragma: no cover
+                        self._record_failure()
+                        raise GeminiError("Gemini request failed") from final_exc
+                if not retried:
+                    self._record_failure()
+                    raise GeminiError("Gemini request failed") from fallback_exc
 
-        if tool_callbacks:
-            response = await self._handle_tools(
-                initial_contents=contents,
-                response=response,
-                tools=tools,
-                callbacks=tool_callbacks,
-            )
+        if tool_callbacks and response is not None:
+            try:
+                response = await self._handle_tools(
+                    initial_contents=call_contents,
+                    response=response,
+                    tools=tools,
+                    callbacks=tool_callbacks,
+                    system_instruction=system_instruction,
+                )
+            except GeminiError:
+                self._record_failure()
+                raise
 
         if response is None:
+            self._record_failure()
             raise GeminiError("Gemini request returned no response")
+
+        self._record_success()
 
         return self._extract_text(response)
 
@@ -180,10 +275,12 @@ class GeminiClient:
         response: Any,
         tools: list[dict[str, Any]] | None,
         callbacks: dict[str, Callable[[dict[str, Any]], Awaitable[str]]],
+        system_instruction: str | None,
     ) -> Any:
         contents = list(initial_contents)
         attempt = 0
         current_response = response
+        filtered_tools = self._filter_tools(tools)
         while attempt < 2:  # allow one round-trip
             attempt += 1
             candidates = getattr(current_response, "candidates", None) or []
@@ -268,12 +365,11 @@ class GeminiClient:
             if not function_called:
                 break
 
-            filtered_tools = self._filter_tools(tools)
             try:
-                current_response = await self._model.generate_content_async(
+                current_response = await self._invoke_model(
                     contents,
-                    tools=filtered_tools,
-                    safety_settings=self._safety_settings,
+                    filtered_tools,
+                    system_instruction,
                 )
             except Exception as exc:  # pragma: no cover
                 err_text = str(exc)
@@ -284,10 +380,10 @@ class GeminiClient:
                     filtered_tools = self._filter_tools(tools)
                     if filtered_tools:
                         try:
-                            current_response = await self._model.generate_content_async(
+                            current_response = await self._invoke_model(
                                 contents,
-                                tools=filtered_tools,
-                                safety_settings=self._safety_settings,
+                                filtered_tools,
+                                system_instruction,
                             )
                             continue
                         except Exception:
@@ -295,9 +391,10 @@ class GeminiClient:
                                 "Gemini follow-up retry with filtered tools failed"
                             )
                 try:
-                    current_response = await self._model.generate_content_async(
+                    current_response = await self._invoke_model(
                         contents,
-                        safety_settings=self._safety_settings,
+                        None,
+                        system_instruction,
                     )
                 except Exception as fallback_exc:  # pragma: no cover
                     self._logger.exception("Gemini fallback follow-up failed")
@@ -314,4 +411,5 @@ class GeminiClient:
             embedding = result.get("embedding") if isinstance(result, dict) else None
             return list(embedding) if embedding else []
 
-        return await asyncio.to_thread(_embed)
+        async with self._embed_semaphore:
+            return await asyncio.to_thread(_embed)

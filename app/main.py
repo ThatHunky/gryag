@@ -29,7 +29,9 @@ async def main() -> None:
 
     settings = get_settings()
 
-    bot = Bot(token=settings.telegram_token, default=DefaultBotProperties(parse_mode="HTML"))
+    bot = Bot(
+        token=settings.telegram_token, default=DefaultBotProperties(parse_mode="HTML")
+    )
     dispatcher = Dispatcher()
 
     store = ContextStore(settings.db_path)
@@ -53,7 +55,9 @@ async def main() -> None:
             logging.warning("Не вдалося під'єднати Redis: %s", exc)
 
     dispatcher.message.middleware(
-        ChatMetaMiddleware(bot, settings, store, gemini_client, redis_client=redis_client)
+        ChatMetaMiddleware(
+            bot, settings, store, gemini_client, redis_client=redis_client
+        )
     )
     dispatcher.message.middleware(
         ThrottleMiddleware(store, settings, redis_client=redis_client)
@@ -73,8 +77,14 @@ async def main() -> None:
                 pass
 
 
-if __name__ == "__main__":
+def run() -> None:
+    """Synchronous entry point for console_scripts and python -m."""
+
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logging.info("Bot stopped")
+
+
+if __name__ == "__main__":
+    run()

@@ -5,6 +5,7 @@ import re
 import time
 from collections import deque
 from typing import Any
+import logging
 
 from aiogram import Bot, Router
 from aiogram.types import Message
@@ -14,18 +15,18 @@ from app.persona import SYSTEM_PERSONA
 from app.services.context_store import ContextStore, format_metadata
 from app.services.gemini import GeminiClient, GeminiError
 from app.services.media import collect_media_parts
+from app.services.redis_types import RedisLike
 from app.services.triggers import addressed_to_bot
-
-try:  # Optional dependency for redis throttling metadata.
-    from redis.asyncio import Redis
-except ImportError:  # pragma: no cover - redis optional.
-    Redis = Any  # type: ignore
+from app.services import telemetry
 
 router = Router()
 
-ERROR_FALLBACK = "Ґеміні знову туплять. Спробуй пізніше."
+ERROR_FALLBACK = "Ґеміні знову тупить. Спробуй пізніше."
 EMPTY_REPLY = "Скажи конкретніше, бо зараз з цього нічого не зробити."
 BANNED_REPLY = "Ти для гряга в бані. Йди погуляй."
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 _META_PREFIX_RE = re.compile(
@@ -50,6 +51,25 @@ def _extract_text(message: Message | None) -> str | None:
         return None
     cleaned = " ".join(text.strip().split())
     return cleaned if cleaned else None
+
+
+def _summarize_media(media_items: list[dict[str, Any]] | None) -> str | None:
+    if not media_items:
+        return None
+    labels: list[str] = []
+    seen: set[str] = set()
+    for item in media_items:
+        kind = str(item.get("kind") or "media")
+        mime = item.get("mime")
+        label = kind
+        if isinstance(mime, str) and mime:
+            label = f"{kind} ({mime})"
+        if label not in seen:
+            labels.append(label)
+            seen.add(label)
+    if not labels:
+        return None
+    return "Прикріплення: " + ", ".join(labels)
 
 
 def _get_recent_context(chat_id: int, thread_id: int | None) -> dict[str, Any] | None:
@@ -80,11 +100,14 @@ async def _remember_context_message(
 
     try:
         media_raw = await collect_media_parts(bot, message)
-    except Exception:
+    except Exception:  # pragma: no cover - defensive logging
+        LOGGER.exception("Failed to collect media for message %s", message.message_id)
         media_raw = []
 
     if media_raw:
         media_parts = gemini_client.build_media_parts(media_raw)
+
+    media_summary = _summarize_media(media_raw)
 
     if not text and not media_parts:
         return
@@ -98,8 +121,8 @@ async def _remember_context_message(
             "user_id": message.from_user.id,
             "name": message.from_user.full_name,
             "username": _normalize_username(message.from_user.username),
-            "excerpt": text[:200] if text else None,
-            "text": text,
+            "excerpt": (text or media_summary or "")[:200] or None,
+            "text": text or media_summary,
             "media_parts": media_parts,
         }
     )
@@ -187,24 +210,31 @@ async def handle_group_message(
     store: ContextStore,
     gemini_client: GeminiClient,
     bot_username: str,
-    redis_client: Redis | None = None,
+    bot_id: int | None,
+    redis_client: RedisLike | None = None,
     redis_quota: tuple[str, int] | None = None,
     throttle_blocked: bool | None = None,
+    throttle_reason: dict[str, Any] | None = None,
 ):
     if message.from_user is None or message.from_user.is_bot:
         return
 
+    telemetry.increment_counter("chat.incoming")
+
     chat_id = message.chat.id
     thread_id = message.message_thread_id
-    if not addressed_to_bot(message, bot_username):
+    if not addressed_to_bot(message, bot_username, bot_id):
+        telemetry.increment_counter("chat.unaddressed")
         await _remember_context_message(message, bot, gemini_client)
         return
+    telemetry.increment_counter("chat.addressed")
     user_id = message.from_user.id
     blocked = bool(throttle_blocked)
 
     is_admin = user_id in settings.admin_user_ids
 
     if not is_admin and await store.is_banned(chat_id, user_id):
+        telemetry.increment_counter("chat.banned_user")
         await message.reply(BANNED_REPLY)
         return
 
@@ -229,7 +259,8 @@ async def handle_group_message(
     media_raw = await collect_media_parts(bot, message)
     media_parts = gemini_client.build_media_parts(media_raw)
 
-    text_content = message.text or message.caption or ""
+    raw_text = (message.text or message.caption or "").strip()
+
     reply_context = None
     if message.reply_to_message:
         reply = message.reply_to_message
@@ -241,6 +272,9 @@ async def handle_group_message(
                     reply_context = item
                     break
     fallback_context = reply_context or _get_recent_context(chat_id, thread_id)
+    fallback_text = fallback_context.get("text") if fallback_context else None
+    media_summary = _summarize_media(media_raw)
+
     user_meta = _build_user_metadata(
         message,
         chat_id,
@@ -248,10 +282,12 @@ async def handle_group_message(
         fallback_context=fallback_context,
     )
     user_parts: list[dict[str, Any]] = [{"text": format_metadata(user_meta)}]
-    if text_content:
-        user_parts.append({"text": text_content})
-    elif fallback_context and fallback_context.get("text"):
-        user_parts.append({"text": fallback_context["text"]})
+    if raw_text:
+        user_parts.append({"text": raw_text})
+    elif media_summary:
+        user_parts.append({"text": media_summary})
+    elif fallback_text:
+        user_parts.append({"text": fallback_text})
 
     if media_parts:
         user_parts.extend(media_parts)
@@ -263,6 +299,8 @@ async def handle_group_message(
             user_parts.extend(context_media)
     if not user_parts:
         user_parts.append({"text": ""})
+
+    text_content = raw_text or media_summary or fallback_text or ""
 
     user_embedding = await gemini_client.embed_text(text_content)
 
@@ -279,6 +317,14 @@ async def handle_group_message(
     )
 
     if blocked:
+        if throttle_reason:
+            LOGGER.debug(
+                "Skipping reply due to throttle: chat=%s user=%s details=%s",
+                chat_id,
+                user_id,
+                throttle_reason,
+            )
+        telemetry.increment_counter("chat.throttled")
         return
 
     async def search_messages_tool(params: dict[str, Any]) -> str:
@@ -366,7 +412,9 @@ async def handle_group_message(
             tools=tool_definitions,
             tool_callbacks={"search_messages": search_messages_tool},
         )
+        telemetry.increment_counter("chat.reply_success")
     except GeminiError:
+        telemetry.increment_counter("chat.reply_failure")
         if not await store.should_send_notice(
             chat_id, user_id, "api_limit", ttl_seconds=1800
         ):

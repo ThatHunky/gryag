@@ -3,24 +3,56 @@ description: AI rules derived by SpecStory from the project AI interaction histo
 globs: *
 ---
 
-## HEADERS
+## Quick map
 
-## TECH STACK
-*   Python
-*   aiogram (latest versions)
-*   Docker
-*   Gemini API (prepare logic)
-*   aiohttp
-*   google-generative-ai (if using official Google SDK)
+- Entry point: `python -m app.main` (or script `gryag`) wires aiogram v3 dispatcher, applies middlewares, and starts long polling after purging pending updates.
+- Core layout: `app/handlers` for user and admin routers, `app/middlewares` for context+throttle wiring, `app/services` for persistence, Gemini, triggers, telemetry, and media support, with settings in `app/config.py`.
+- Root `main.py` exists only as a shim—always import/run through `app.main` to avoid stale code.
 
-## PROJECT DOCUMENTATION & CONTEXT SYSTEM
+## Message lifecycle
 
-## CODING STANDARDS
+- `ChatMetaMiddleware` fetches bot identity once and injects `settings`, `ContextStore`, `GeminiClient`, and optional `redis_client` so handlers never instantiate dependencies themselves.
+- `ThrottleMiddleware` guards addressed traffic: it answers with `SNARKY_REPLY` when limits hit, sets `throttle_blocked`/`throttle_reason` in handler data, and records passes vs. blocks in telemetry.
+- `handlers.chat.handle_group_message` ignores small talk but caches it via `_remember_context_message`; addressed turns get fallback context, metadata, and media parts assembled before Gemini is called.
+- User turns are logged with embeddings (`ContextStore.add_turn`) before generation so throttle decisions are auditable even if Gemini fails.
+- Admin IDs from `settings.admin_user_ids` bypass bans and quotas; reuse `_is_admin` in `handlers.admin` for consistency.
 
-*   All configurable variables must be stored in `.env` files. This includes the Telegram group ID, admin ID, Gemini API Key and Gemini API URL.
+## Data & quotas
 
-## WORKFLOW & RELEASE RULES
+- Persistence is SQLite (`gryag.db`) managed by `ContextStore`; `init()` applies `db/schema.sql` and adds the `embedding` column if missing (keep docker volume mounted at `/app`).
+- Messages store `[meta]` payloads (see `format_metadata`) plus optional media JSON; `ContextStore.recent()` rebuilds Gemini-ready `parts`—use it instead of crafting history manually.
+- Semantic search uses cosine similarity over stored embeddings; always persist embeddings as JSON arrays of floats and expect `semantic_search` to cap candidates per chat/thread.
+- Rate limits log to `quotas` table and, if Redis is on, share the `gryag:quota:{chat_id}:{user_id}` namespace so `/gryagreset` can purge both stores.
 
-## DEBUGGING
+## Gemini integration
 
-## STYLE & FORMATTING
+- `GeminiClient.generate` wraps `google-generativeai` async API, handles safety settings, tool arbitration, system-instruction fallbacks, and a simple circuit breaker—propagate `GeminiError` so callers can send friendly fallbacks.
+- Media ingestion flows through `services.media.collect_media_parts`, then `GeminiClient.build_media_parts` base64-encodes content before embedding in the request.
+- Tooling: `search_messages_tool` returns JSON strings; additional tools should follow that pattern so `_handle_tools` can merge follow-up calls. Toggle Google Search Grounding via `ENABLE_SEARCH_GROUNDING`.
+- Embeddings are rate-limited with an async semaphore; prefer `gemini_client.embed_text` for all similarity work to reuse backoff logic.
+
+## Persona & replies
+
+- System persona in `app/persona.py` enforces a terse, sarcastic Ukrainian voice—inject it as `system_prompt` and never echo its raw text to users.
+- Reply wrappers in `handlers.chat` reuse constants like `ERROR_FALLBACK`, `EMPTY_REPLY`, `BANNED_REPLY`; extend this module when adding new canned responses.
+- Metadata-first user parts (`format_metadata`) must remain the first chunk for each turn so Gemini can reference chat/user IDs reliably.
+
+## Admin & moderation
+
+- `/gryagban` and `/gryagunban` operate on message replies or numeric IDs; they refuse `@username` strings because Telegram lacks ID lookup without an extra call.
+- `/gryagreset` clears quotas in SQLite and, when Redis is active, scans `gryag:quota:{chat_id}:*` keys—reuse that prefix for any new quota-like data.
+- `ContextStore.should_send_notice` throttles how often throttle warnings fire; check it before emitting new rate-limit messages.
+
+## Dev workflows
+
+- Local setup: create a venv, `pip install -r requirements.txt`, copy `.env.example`, fill in `TELEGRAM_TOKEN` + `GEMINI_API_KEY`, then `python -m app.main`. Docker path: `docker-compose up bot` (installs deps each boot).
+- Set `LOGLEVEL=DEBUG` to see telemetry counters emitted via `app.services.telemetry`; use `telemetry.snapshot()` in REPLs for quick sanity checks.
+- SQLite file is created automatically; delete `gryag.db` to reset chat history. Redis is optional—set `USE_REDIS=true` and ensure the URL resolves before boot.
+- No formal tests exist; exercise flows against a staging chat and inspect counters/logs when validating behaviour.
+
+## Extending patterns
+
+- Add new routers under `app/handlers` and register them in `app/main.py`; rely on middleware-injected deps instead of creating new clients in handlers.
+- When introducing new stored fields, update `db/schema.sql` and extend `ContextStore.init()` to backfill or `ALTER TABLE`, keeping migrations idempotent for Docker volume reuse.
+- Expand media support via `services.media.collect_media_parts`; return dicts with `bytes`, `mime`, and a descriptive `kind` so `build_media_parts` just works.
+- For new telemetry, call `telemetry.increment_counter` with clear labels; DEBUG logs render counters as structured extras for scraping.

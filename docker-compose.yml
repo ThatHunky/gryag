@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  bot:
+    image: python:3.11-slim
+    working_dir: /app
+    env_file:
+      - .env
+    volumes:
+      - ./:/app
+    restart: unless-stopped
+    command: >
+      bash -lc "set -euo pipefail; cd /app; pip install --no-cache-dir -r requirements.txt; python -m app.main"

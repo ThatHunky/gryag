@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gryag"
+version = "0.1.0"
+description = "Телеграм-бот «гряг»: дотепний груповий асистент на Gemini."
+readme = "README.md"
+authors = [{ name = "gryag maintainers" }]
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "aiogram>=3.5",
+    "google-generativeai>=0.8",
+    "aiosqlite>=0.20",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "redis>=5.0",
+    "aiohttp>=3.9",
+    "python-dotenv>=1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/example/gryag"

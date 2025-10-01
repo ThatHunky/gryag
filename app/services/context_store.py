@@ -62,11 +62,25 @@ def format_metadata(meta: dict[str, Any]) -> str:
         if value is None or value == "":
             continue
         if isinstance(value, str):
-            sanitized = value.replace("\n", " ").replace('"', '\\"')
+            # More aggressive sanitization to prevent leakage
+            sanitized = (
+                value.replace("\n", " ")
+                .replace('"', '\\"')
+                .replace("[", "")
+                .replace("]", "")
+            )
+            # Truncate very long values
+            if len(sanitized) > 50:
+                sanitized = sanitized[:47] + "..."
             pieces.append(f'{key}="{sanitized}"')
         else:
             pieces.append(f"{key}={value}")
-    return "[meta] " + " ".join(pieces) if pieces else "[meta]"
+
+    # Create a more compact and less intrusive metadata format
+    if pieces:
+        return "[meta] " + " ".join(pieces)
+    else:
+        return "[meta]"
 
 
 class ContextStore:

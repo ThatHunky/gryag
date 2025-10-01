@@ -14,6 +14,7 @@ from app.middlewares.chat_meta import ChatMetaMiddleware
 from app.middlewares.throttle import ThrottleMiddleware
 from app.services.context_store import ContextStore
 from app.services.gemini import GeminiClient
+from app.services.user_profile import UserProfileStore, FactExtractor
 
 try:  # Optional dependency
     import redis.asyncio as redis
@@ -43,6 +44,12 @@ async def main() -> None:
         settings.gemini_embed_model,
     )
 
+    # Initialize user profiling system
+    profile_store = UserProfileStore(settings.db_path)
+    await profile_store.init()
+
+    fact_extractor = FactExtractor(gemini_client)
+
     redis_client: Optional[Any] = None
     if settings.use_redis and redis is not None:
         try:
@@ -56,7 +63,13 @@ async def main() -> None:
 
     dispatcher.message.middleware(
         ChatMetaMiddleware(
-            bot, settings, store, gemini_client, redis_client=redis_client
+            bot,
+            settings,
+            store,
+            gemini_client,
+            profile_store,
+            fact_extractor,
+            redis_client=redis_client,
         )
     )
     dispatcher.message.middleware(

@@ -8,6 +8,7 @@ from app.config import Settings
 from app.services.context_store import ContextStore
 from app.services.gemini import GeminiClient
 from app.services.redis_types import RedisLike
+from app.services.user_profile import UserProfileStore, FactExtractor
 
 
 class ChatMetaMiddleware(BaseMiddleware):
@@ -19,12 +20,16 @@ class ChatMetaMiddleware(BaseMiddleware):
         settings: Settings,
         store: ContextStore,
         gemini: GeminiClient,
+        profile_store: UserProfileStore,
+        fact_extractor: FactExtractor,
         redis_client: RedisLike | None = None,
     ) -> None:
         self._bot = bot
         self._settings = settings
         self._store = store
         self._gemini = gemini
+        self._profile_store = profile_store
+        self._fact_extractor = fact_extractor
         self._redis = redis_client
         self._bot_username: str | None = None
         self._bot_id: int | None = None
@@ -48,6 +53,8 @@ class ChatMetaMiddleware(BaseMiddleware):
         data["settings"] = self._settings
         data["store"] = self._store
         data["gemini_client"] = self._gemini
+        data["profile_store"] = self._profile_store
+        data["fact_extractor"] = self._fact_extractor
         if self._redis is not None:
             data["redis_client"] = self._redis
         return await handler(event, data)

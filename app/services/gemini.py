@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import asyncio
+import inspect
 import json
 import time
 from typing import Any, Awaitable, Callable, Iterable
@@ -26,7 +27,13 @@ class GeminiClient:
         self._embed_model = embed_model
         self._logger = logging.getLogger(__name__)
         self._search_grounding_supported = True
-        self._system_instruction_supported = True
+        try:
+            signature = inspect.signature(self._model.generate_content_async)
+        except (AttributeError, ValueError, TypeError):
+            signature = None
+        self._system_instruction_supported = bool(
+            signature and "system_instruction" in signature.parameters
+        )
         self._generate_timeout = 45.0
         self._max_failures = 3
         self._cooldown_seconds = 60.0
@@ -111,7 +118,7 @@ class GeminiClient:
         }
         if tools:
             kwargs["tools"] = tools
-        if system_instruction:
+        if system_instruction and self._system_instruction_supported:
             kwargs["system_instruction"] = system_instruction
         try:
             return await asyncio.wait_for(
@@ -264,7 +271,17 @@ class GeminiClient:
                 if isinstance(text_value, str) and text_value:
                     text_fragments.append(text_value)
             if text_fragments:
-                return "".join(text_fragments).strip()
+                result = "".join(text_fragments).strip()
+                # Basic cleaning at the API level to prevent metadata leakage
+                if result.startswith("[meta]"):
+                    # Try to extract just the content after metadata
+                    lines = result.split("\n")
+                    non_meta_lines = [
+                        line for line in lines if not line.strip().startswith("[meta")
+                    ]
+                    if non_meta_lines:
+                        result = "\n".join(non_meta_lines).strip()
+                return result
 
         text = getattr(response, "text", None)
         return text.strip() if isinstance(text, str) else ""

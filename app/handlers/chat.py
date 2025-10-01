@@ -24,7 +24,8 @@ from app.services.gemini import GeminiClient, GeminiError
 from app.services.media import collect_media_parts
 from app.services.redis_types import RedisLike
 from app.services.triggers import addressed_to_bot
-from app.services.user_profile import UserProfileStore, FactExtractor
+from app.services.user_profile import UserProfileStore
+from app.services.fact_extractors import FactExtractor
 from app.services import telemetry
 
 router = Router()
@@ -372,7 +373,7 @@ async def _update_user_profile_background(
         if not user_message or len(user_message) < 10:
             return
 
-        facts = await fact_extractor.extract_user_facts(
+        facts = await fact_extractor.extract_facts(
             message=user_message,
             user_id=user_id,
             username=username,

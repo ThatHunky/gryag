@@ -8,7 +8,8 @@ from app.config import Settings
 from app.services.context_store import ContextStore
 from app.services.gemini import GeminiClient
 from app.services.redis_types import RedisLike
-from app.services.user_profile import UserProfileStore, FactExtractor
+from app.services.user_profile import UserProfileStore
+from app.services.fact_extractors import FactExtractor
 
 
 class ChatMetaMiddleware(BaseMiddleware):

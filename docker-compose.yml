@@ -2,12 +2,16 @@ version: "3.9"
 
 services:
   bot:
-    image: python:3.11-slim
-    working_dir: /app
+    build:
+      context: .
+      dockerfile: Dockerfile
     env_file:
       - .env
     volumes:
       - ./:/app
+      - models:/app/models # Persistent volume for local models
     restart: unless-stopped
-    command: >
-      bash -lc "set -euo pipefail; cd /app; pip install --no-cache-dir -r requirements.txt; python -m app.main"
+
+volumes:
+  models:
+    driver: local

@@ -207,6 +207,19 @@ class UserProfileStore:
             if self._initialized:
                 return
             # Schema is applied by ContextStore.init()
+
+            # Add summary_updated_at column if missing (for Phase 2 summarization)
+            async with aiosqlite.connect(self._db_path) as db:
+                try:
+                    await db.execute(
+                        "ALTER TABLE user_profiles ADD COLUMN summary_updated_at INTEGER"
+                    )
+                    await db.commit()
+                    LOGGER.info("Added summary_updated_at column to user_profiles")
+                except aiosqlite.OperationalError:
+                    # Column already exists
+                    pass
+
             self._initialized = True
 
     async def get_or_create_profile(
@@ -288,12 +301,59 @@ class UserProfileStore:
                 row = await cursor.fetchone()
                 return dict(row) if row else {}
 
-    async def get_profile(self, user_id: int, chat_id: int) -> dict[str, Any] | None:
-        """Get profile for a user in a chat, or None if not exists."""
+    async def get_profile(
+        self, user_id: int, chat_id: int | None = None, limit: int | None = None
+    ) -> dict[str, Any] | None:
+        """Get profile for a user in a chat, or None if not exists.
+
+        Args:
+            user_id: Telegram user ID
+            chat_id: Chat ID (optional for summarization which aggregates across chats)
+            limit: Max number of facts to include (for memory optimization)
+
+        Returns:
+            Profile dict with metadata and facts, or None if not found
+        """
         await self.init()
 
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
+
+            # If chat_id is None, aggregate across all chats for this user
+            if chat_id is None:
+                # Get user's most recent profile as base
+                async with db.execute(
+                    """
+                    SELECT * FROM user_profiles 
+                    WHERE user_id = ?
+                    ORDER BY last_seen DESC
+                    LIMIT 1
+                    """,
+                    (user_id,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    if not row:
+                        return None
+                    profile = dict(row)
+
+                # Get facts across all chats
+                query = """
+                    SELECT * FROM user_facts 
+                    WHERE user_id = ? AND is_active = 1
+                    ORDER BY confidence DESC, created_at DESC
+                """
+                params: list[Any] = [user_id]
+                if limit:
+                    query += " LIMIT ?"
+                    params.append(limit)
+
+                async with db.execute(query, params) as cursor:
+                    facts = [dict(row) for row in await cursor.fetchall()]
+
+                profile["facts"] = facts
+                return profile
+
+            # Original behavior: get profile for specific chat
             async with db.execute(
                 "SELECT * FROM user_profiles WHERE user_id = ? AND chat_id = ?",
                 (user_id, chat_id),
@@ -514,15 +574,24 @@ class UserProfileStore:
 
         LOGGER.info(f"Deactivated fact {fact_id}")
 
-    async def delete_fact(self, fact_id: int) -> None:
-        """Permanently delete a fact."""
+    async def delete_fact(self, fact_id: int) -> bool:
+        """
+        Permanently delete a fact.
+
+        Returns True if fact was deleted, False if not found.
+        """
         await self.init()
 
         async with aiosqlite.connect(self._db_path) as db:
-            await db.execute("DELETE FROM user_facts WHERE id = ?", (fact_id,))
+            cursor = await db.execute("DELETE FROM user_facts WHERE id = ?", (fact_id,))
+            deleted = cursor.rowcount or 0
             await db.commit()
 
-        LOGGER.info(f"Deleted fact {fact_id}")
+        if deleted > 0:
+            LOGGER.info(f"Deleted fact {fact_id}")
+            return True
+
+        return False
 
     async def record_relationship(
         self,
@@ -735,3 +804,99 @@ class UserProfileStore:
             ) as cursor:
                 row = await cursor.fetchone()
                 return row[0] if row else 0
+
+    async def clear_user_facts(self, user_id: int, chat_id: int) -> int:
+        """
+        Mark all facts for a user as inactive (soft delete).
+
+        Returns count of facts cleared.
+        """
+        await self.init()
+        now = int(time.time())
+
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute(
+                """
+                UPDATE user_facts 
+                SET is_active = 0, updated_at = ?
+                WHERE user_id = ? AND chat_id = ? AND is_active = 1
+                """,
+                (now, user_id, chat_id),
+            )
+            count = cursor.rowcount or 0
+            await db.commit()
+
+        if count > 0:
+            LOGGER.info(
+                f"Cleared {count} facts for user {user_id} in chat {chat_id}",
+                extra={"user_id": user_id, "chat_id": chat_id, "count": count},
+            )
+
+        return count
+
+    async def get_profiles_needing_summarization(self, limit: int = 50) -> list[int]:
+        """Get list of user IDs whose profiles need summarization.
+
+        Profiles need summarization if:
+        - They have active facts
+        - Summary is NULL or last_seen > summary_updated_at (profile changed)
+        - Ordered by message_count DESC (most active users first)
+
+        Args:
+            limit: Maximum number of profiles to return
+
+        Returns:
+            List of user IDs needing summarization
+        """
+        await self.init()
+
+        async with aiosqlite.connect(self._db_path) as db:
+            async with db.execute(
+                """
+                SELECT DISTINCT p.user_id
+                FROM user_profiles p
+                WHERE EXISTS (
+                    SELECT 1 FROM user_facts f 
+                    WHERE f.user_id = p.user_id AND f.is_active = 1
+                )
+                AND (
+                    p.summary IS NULL 
+                    OR p.last_seen > COALESCE(p.summary_updated_at, 0)
+                )
+                ORDER BY p.message_count DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [row[0] for row in rows]
+
+    async def update_summary(self, user_id: int, summary: str) -> None:
+        """Update the summary for a user's profile.
+
+        Updates all profiles for this user across all chats to keep them in sync.
+        Sets summary_updated_at to current timestamp.
+
+        Args:
+            user_id: Telegram user ID
+            summary: Generated summary text
+        """
+        await self.init()
+        now = int(time.time())
+
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                """
+                UPDATE user_profiles 
+                SET summary = ?, summary_updated_at = ?
+                WHERE user_id = ?
+                """,
+                (summary, now, user_id),
+            )
+            await db.commit()
+
+        LOGGER.info(
+            f"Updated summary for user {user_id}",
+            extra={"user_id": user_id, "summary_length": len(summary)},
+        )
+        telemetry.increment_counter("profile_summaries_updated")

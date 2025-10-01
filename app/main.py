@@ -10,11 +10,15 @@ from aiogram.client.default import DefaultBotProperties
 from app.config import get_settings
 from app.handlers.admin import router as admin_router
 from app.handlers.chat import router as chat_router
+from app.handlers.profile_admin import router as profile_admin_router
 from app.middlewares.chat_meta import ChatMetaMiddleware
 from app.middlewares.throttle import ThrottleMiddleware
 from app.services.context_store import ContextStore
 from app.services.gemini import GeminiClient
-from app.services.user_profile import UserProfileStore, FactExtractor
+from app.services.user_profile import UserProfileStore
+from app.services.fact_extractors import create_hybrid_extractor
+from app.services.profile_summarization import ProfileSummarizer
+from app.services.resource_monitor import get_resource_monitor
 
 try:  # Optional dependency
     import redis.asyncio as redis
@@ -48,7 +52,48 @@ async def main() -> None:
     profile_store = UserProfileStore(settings.db_path)
     await profile_store.init()
 
-    fact_extractor = FactExtractor(gemini_client)
+    # Create hybrid fact extractor based on configuration
+    fact_extractor = await create_hybrid_extractor(
+        extraction_method=settings.fact_extraction_method,
+        local_model_path=settings.local_model_path,
+        local_model_threads=settings.local_model_threads,
+        enable_gemini_fallback=settings.enable_gemini_fallback,
+        gemini_client=gemini_client if settings.enable_gemini_fallback else None,
+    )
+
+    # Initialize profile summarization (Phase 2)
+    profile_summarizer = ProfileSummarizer(settings, profile_store, gemini_client)
+    await profile_summarizer.start()
+
+    # Phase 3: Initialize resource monitoring
+    resource_monitor = get_resource_monitor()
+    if resource_monitor.is_available():
+        logging.info("Resource monitoring enabled")
+        # Log initial stats
+        resource_monitor.log_resource_summary()
+    else:
+        logging.warning(
+            "Resource monitoring unavailable (psutil not installed). "
+            "Install with: pip install psutil"
+        )
+
+    # Phase 3: Create background task for periodic resource monitoring
+    async def monitor_resources() -> None:
+        """Periodically check and log resource usage."""
+        while True:
+            await asyncio.sleep(60)  # Check every 60 seconds
+            if resource_monitor.is_available():
+                resource_monitor.check_memory_pressure()
+                resource_monitor.check_cpu_pressure()
+                # Log detailed summary every 10 minutes
+                import time
+
+                if int(time.time()) % 600 < 60:  # Within first minute of 10-min window
+                    resource_monitor.log_resource_summary()
+
+    monitor_task: asyncio.Task[None] | None = None
+    if resource_monitor.is_available():
+        monitor_task = asyncio.create_task(monitor_resources())
 
     redis_client: Optional[Any] = None
     if settings.use_redis and redis is not None:
@@ -77,12 +122,24 @@ async def main() -> None:
     )
 
     dispatcher.include_router(admin_router)
+    dispatcher.include_router(profile_admin_router)
     dispatcher.include_router(chat_router)
 
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await dispatcher.start_polling(bot, skip_updates=True)
     finally:
+        # Cleanup phase 3: cancel resource monitoring task
+        if monitor_task is not None:
+            monitor_task.cancel()
+            try:
+                await monitor_task
+            except asyncio.CancelledError:
+                pass
+
+        # Cleanup profile summarizer
+        await profile_summarizer.stop()
+
         if redis_client is not None:
             try:
                 await redis_client.close()

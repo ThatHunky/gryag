@@ -65,6 +65,28 @@ class Settings(BaseSettings):
         5, alias="MIN_MESSAGES_FOR_EXTRACTION", ge=1
     )
 
+    # Profile summarization configuration (optimized for i5-6500)
+    enable_profile_summarization: bool = Field(
+        False, alias="ENABLE_PROFILE_SUMMARIZATION"
+    )
+    profile_summarization_hour: int = Field(
+        3, alias="PROFILE_SUMMARIZATION_HOUR", ge=0, le=23
+    )  # Run at 3 AM to avoid peak usage
+    profile_summarization_batch_size: int = Field(
+        30, alias="PROFILE_SUMMARIZATION_BATCH_SIZE", ge=10, le=100
+    )  # Conservative for i5-6500
+    max_profiles_per_day: int = Field(
+        50, alias="MAX_PROFILES_PER_DAY", ge=1
+    )  # Limit to avoid overload
+
+    # Fact extraction method configuration
+    fact_extraction_method: str = Field(
+        "hybrid", alias="FACT_EXTRACTION_METHOD"
+    )  # rule_based, local_model, hybrid, gemini
+    local_model_path: str | None = Field(None, alias="LOCAL_MODEL_PATH")
+    local_model_threads: int | None = Field(None, alias="LOCAL_MODEL_THREADS")
+    enable_gemini_fallback: bool = Field(False, alias="ENABLE_GEMINI_FALLBACK")
+
     @property
     def db_path_str(self) -> str:
         return str(self.db_path)

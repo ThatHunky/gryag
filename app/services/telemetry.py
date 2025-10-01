@@ -31,6 +31,19 @@ def increment_counter(name: str, amount: int = 1, **labels: Any) -> None:
         _LOGGER.debug("metric_increment", extra={"telemetry": payload})
 
 
+def set_gauge(name: str, value: int, **labels: Any) -> None:
+    """Set a gauge value (overwrites previous value) and emit a debug log entry."""
+
+    key = (name, _normalize_labels(labels))
+    with _LOCK:
+        _METRICS[key] = value
+    if _LOGGER.isEnabledFor(logging.DEBUG):
+        payload: dict[str, Any] = {"metric": name, "value": value}
+        if labels:
+            payload["labels"] = labels
+        _LOGGER.debug("metric_set", extra={"telemetry": payload})
+
+
 def snapshot() -> dict[str, int]:
     """Return a snapshot of all counters for diagnostics/testing."""
 
@@ -53,3 +66,16 @@ def _render_key(name: str, labels: Tuple[tuple[str, Any], ...]) -> str:
         return name
     label_str = ",".join(f"{key}={value}" for key, value in labels)
     return f"{name}{{{label_str}}}"
+
+
+# Module-level telemetry API object for imports
+class _Telemetry:
+    """Simple telemetry API wrapper for module-level access."""
+
+    increment_counter = staticmethod(increment_counter)
+    set_gauge = staticmethod(set_gauge)
+    snapshot = staticmethod(snapshot)
+    reset = staticmethod(reset)
+
+
+telemetry = _Telemetry()

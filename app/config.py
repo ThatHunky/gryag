@@ -87,6 +87,58 @@ class Settings(BaseSettings):
     local_model_threads: int | None = Field(None, alias="LOCAL_MODEL_THREADS")
     enable_gemini_fallback: bool = Field(False, alias="ENABLE_GEMINI_FALLBACK")
 
+    # Continuous monitoring configuration (Phase 1+)
+    enable_continuous_monitoring: bool = Field(
+        True, alias="ENABLE_CONTINUOUS_MONITORING"
+    )
+    enable_message_filtering: bool = Field(
+        False, alias="ENABLE_MESSAGE_FILTERING"
+    )  # Phase 1: False, Phase 3: True
+    enable_async_processing: bool = Field(
+        False, alias="ENABLE_ASYNC_PROCESSING"
+    )  # Phase 1: False, Phase 3: True
+
+    # Conversation window settings
+    conversation_window_size: int = Field(
+        8, alias="CONVERSATION_WINDOW_SIZE", ge=3, le=20
+    )  # Number of messages per window
+    conversation_window_timeout: int = Field(
+        180, alias="CONVERSATION_WINDOW_TIMEOUT", ge=60, le=600
+    )  # Seconds before window closes
+    max_concurrent_windows: int = Field(
+        100, alias="MAX_CONCURRENT_WINDOWS", ge=10, le=500
+    )
+
+    # Event queue settings
+    monitoring_workers: int = Field(
+        3, alias="MONITORING_WORKERS", ge=1, le=10
+    )  # Number of async workers
+    max_queue_size: int = Field(1000, alias="MAX_QUEUE_SIZE", ge=100, le=10000)
+    enable_circuit_breaker: bool = Field(True, alias="ENABLE_CIRCUIT_BREAKER")
+    circuit_breaker_threshold: int = Field(
+        5, alias="CIRCUIT_BREAKER_THRESHOLD", ge=3, le=20
+    )  # Failures before opening
+    circuit_breaker_timeout: int = Field(
+        60, alias="CIRCUIT_BREAKER_TIMEOUT", ge=30, le=300
+    )  # Seconds before retry
+
+    # Proactive response settings (Phase 4)
+    enable_proactive_responses: bool = Field(
+        False, alias="ENABLE_PROACTIVE_RESPONSES"
+    )  # Phase 1-3: False, Phase 4: True
+    proactive_confidence_threshold: float = Field(
+        0.75, alias="PROACTIVE_CONFIDENCE_THRESHOLD", ge=0.5, le=1.0
+    )
+    proactive_cooldown_seconds: int = Field(
+        300, alias="PROACTIVE_COOLDOWN_SECONDS", ge=60, le=1800
+    )  # Minimum time between proactive responses
+
+    # System health monitoring
+    enable_health_metrics: bool = Field(True, alias="ENABLE_HEALTH_METRICS")
+    health_check_interval: int = Field(
+        300, alias="HEALTH_CHECK_INTERVAL", ge=60, le=3600
+    )  # Seconds between health checks
+
     @property
     def db_path_str(self) -> str:
         return str(self.db_path)

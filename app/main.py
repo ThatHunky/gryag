@@ -19,6 +19,7 @@ from app.services.user_profile import UserProfileStore
 from app.services.fact_extractors import create_hybrid_extractor
 from app.services.profile_summarization import ProfileSummarizer
 from app.services.resource_monitor import get_resource_monitor
+from app.services.monitoring import ContinuousMonitor
 
 try:  # Optional dependency
     import redis.asyncio as redis
@@ -64,6 +65,29 @@ async def main() -> None:
     # Initialize profile summarization (Phase 2)
     profile_summarizer = ProfileSummarizer(settings, profile_store, gemini_client)
     await profile_summarizer.start()
+
+    # Phase 1+: Initialize continuous monitoring system
+    continuous_monitor = ContinuousMonitor(
+        settings=settings,
+        context_store=store,
+        gemini_client=gemini_client,
+        user_profile_store=profile_store,
+        fact_extractor=fact_extractor,
+        enable_monitoring=settings.enable_continuous_monitoring,
+        enable_filtering=settings.enable_message_filtering,
+        enable_async_processing=settings.enable_async_processing,
+    )
+
+    # Start async processing if enabled (Phase 3+)
+    await continuous_monitor.start()
+    logging.info(
+        "Continuous monitoring initialized",
+        extra={
+            "enabled": settings.enable_continuous_monitoring,
+            "filtering": settings.enable_message_filtering,
+            "async_processing": settings.enable_async_processing,
+        },
+    )
 
     # Phase 3: Initialize resource monitoring
     resource_monitor = get_resource_monitor()
@@ -114,6 +138,7 @@ async def main() -> None:
             gemini_client,
             profile_store,
             fact_extractor,
+            continuous_monitor=continuous_monitor,
             redis_client=redis_client,
         )
     )
@@ -129,6 +154,10 @@ async def main() -> None:
         await bot.delete_webhook(drop_pending_updates=True)
         await dispatcher.start_polling(bot, skip_updates=True)
     finally:
+        # Cleanup: Stop continuous monitoring
+        await continuous_monitor.stop()
+        logging.info("Continuous monitoring stopped")
+
         # Cleanup phase 3: cancel resource monitoring task
         if monitor_task is not None:
             monitor_task.cancel()

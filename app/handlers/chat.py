@@ -461,6 +461,7 @@ async def handle_group_message(
     fact_extractor: FactExtractor,
     bot_username: str,
     bot_id: int | None,
+    continuous_monitor: Any | None = None,
     redis_client: RedisLike | None = None,
     redis_quota: tuple[str, int] | None = None,
     throttle_blocked: bool | None = None,
@@ -473,6 +474,25 @@ async def handle_group_message(
 
     chat_id = message.chat.id
     thread_id = message.message_thread_id
+
+    # Phase 1+: Process message through continuous monitoring
+    # This runs for ALL messages (addressed and unaddressed)
+    if continuous_monitor is not None:
+        is_addressed = addressed_to_bot(message, bot_username, bot_id)
+        try:
+            monitor_result = await continuous_monitor.process_message(
+                message, is_addressed=is_addressed
+            )
+            LOGGER.debug(
+                "Continuous monitoring processed message", extra=monitor_result
+            )
+        except Exception as e:
+            LOGGER.error(
+                "Error in continuous monitoring",
+                exc_info=e,
+                extra={"chat_id": chat_id, "message_id": message.message_id},
+            )
+
     if not addressed_to_bot(message, bot_username, bot_id):
         telemetry.increment_counter("chat.unaddressed")
         await _remember_context_message(message, bot, gemini_client)

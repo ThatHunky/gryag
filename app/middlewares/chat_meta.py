@@ -10,6 +10,7 @@ from app.services.gemini import GeminiClient
 from app.services.redis_types import RedisLike
 from app.services.user_profile import UserProfileStore
 from app.services.fact_extractors import FactExtractor
+from app.services.monitoring.continuous_monitor import ContinuousMonitor
 
 
 class ChatMetaMiddleware(BaseMiddleware):
@@ -23,6 +24,7 @@ class ChatMetaMiddleware(BaseMiddleware):
         gemini: GeminiClient,
         profile_store: UserProfileStore,
         fact_extractor: FactExtractor,
+        continuous_monitor: ContinuousMonitor | None = None,
         redis_client: RedisLike | None = None,
     ) -> None:
         self._bot = bot
@@ -31,6 +33,7 @@ class ChatMetaMiddleware(BaseMiddleware):
         self._gemini = gemini
         self._profile_store = profile_store
         self._fact_extractor = fact_extractor
+        self._continuous_monitor = continuous_monitor
         self._redis = redis_client
         self._bot_username: str | None = None
         self._bot_id: int | None = None
@@ -44,6 +47,9 @@ class ChatMetaMiddleware(BaseMiddleware):
                 me = await self._bot.get_me()
                 self._bot_username = me.username or ""
                 self._bot_id = me.id
+                # Set bot ID in continuous monitor
+                if self._continuous_monitor and self._bot_id:
+                    self._continuous_monitor.set_bot_user_id(self._bot_id)
         return self._bot_username or "", self._bot_id
 
     async def __call__(self, handler, event: Message, data):  # type: ignore[override]
@@ -56,6 +62,7 @@ class ChatMetaMiddleware(BaseMiddleware):
         data["gemini_client"] = self._gemini
         data["profile_store"] = self._profile_store
         data["fact_extractor"] = self._fact_extractor
+        data["continuous_monitor"] = self._continuous_monitor
         if self._redis is not None:
             data["redis_client"] = self._redis
         return await handler(event, data)

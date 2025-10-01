@@ -95,8 +95,9 @@ class ContinuousMonitor:
         )
 
         self.proactive_trigger = ProactiveTrigger(
-            confidence_threshold=0.75,
-            cooldown_seconds=300,
+            context_store=context_store,
+            gemini_client=gemini_client,
+            settings=settings,
         )
 
         self.event_queue = EventQueue(
@@ -111,6 +112,7 @@ class ContinuousMonitor:
         )
 
         self._bot_user_id: int | None = None
+        self._bot_instance = None  # For sending proactive responses
 
         self._stats = {
             "messages_monitored": 0,
@@ -132,6 +134,16 @@ class ContinuousMonitor:
         """Set bot's user ID for filtering bot messages."""
         self._bot_user_id = bot_user_id
         LOGGER.info(f"Bot user ID set to {bot_user_id}")
+
+    def set_bot_instance(self, bot) -> None:
+        """
+        Set bot instance for sending proactive responses.
+
+        Args:
+            bot: Aiogram Bot instance
+        """
+        self._bot_instance = bot
+        LOGGER.info("Bot instance attached to ContinuousMonitor")
 
     async def start(self) -> None:
         """Start async processing."""
@@ -257,24 +269,40 @@ class ContinuousMonitor:
         self._stats["windows_processed"] += 1
 
         try:
-            # Check if bot should proactively respond
-            if self._bot_user_id:
-                should_respond, reason, confidence = (
-                    await self.proactive_trigger.should_respond(
-                        window, self._bot_user_id
-                    )
+            # Phase 4: Check if bot should proactively respond
+            if (
+                self._bot_user_id
+                and self._bot_instance
+                and self.settings.enable_proactive_responses
+            ):
+                decision = await self.proactive_trigger.should_respond(
+                    window,
+                    bot_user_id=self._bot_user_id,
+                    bot_capabilities=["weather", "currency", "search", "calculations"],
                 )
 
-                if should_respond:
+                if decision.should_respond:
                     LOGGER.info(
-                        f"Proactive response triggered: {reason}",
+                        f"Proactive response triggered: {decision.reason}",
                         extra={
                             "chat_id": window.chat_id,
-                            "confidence": confidence,
+                            "confidence": decision.confidence,
+                            "intent": (
+                                decision.intent.intent_type.value
+                                if decision.intent
+                                else None
+                            ),
                         },
                     )
+
+                    # Send proactive response
+                    await self._send_proactive_response(window, decision)
                     self._stats["proactive_responses"] += 1
-                    # TODO: Actually send proactive response (Phase 4)
+                else:
+                    LOGGER.debug(
+                        f"Proactive response blocked: {decision.reason}",
+                        extra={"chat_id": window.chat_id},
+                    )
 
             # Extract facts from window (Phase 3)
             facts = await self._extract_facts_from_window(window)
@@ -300,6 +328,84 @@ class ContinuousMonitor:
         except Exception as e:
             LOGGER.error(
                 "Error processing conversation window",
+                exc_info=e,
+                extra={"chat_id": window.chat_id},
+            )
+
+    async def _send_proactive_response(
+        self, window: ConversationWindow, decision
+    ) -> None:
+        """
+        Send proactive response to conversation.
+
+        Args:
+            window: Conversation window
+            decision: ProactiveDecision with intent and suggested response
+        """
+        if not self._bot_instance or not decision.intent:
+            return
+
+        try:
+            # Generate response using Gemini
+            conversation_text = "\n".join(
+                f"User{msg.user_id}: {msg.text}" for msg in window.messages[-5:]
+            )
+
+            prompt = f"""Based on this conversation, provide a helpful proactive response:
+
+{conversation_text}
+
+Intent detected: {decision.intent.intent_type.value}
+Context: {decision.intent.context_summary}
+
+Your response should:
+1. Be natural and conversational
+2. Address the detected intent
+3. Be brief (1-2 sentences)
+4. Add value without being intrusive
+
+Response:"""
+
+            response_text = await self.gemini_client.generate(
+                system_prompt="You are a helpful bot joining a conversation proactively. Be brief, natural, and valuable.",
+                history=[],
+                user_parts=[{"text": prompt}],
+            )
+
+            if not response_text:
+                LOGGER.warning("Empty proactive response from Gemini")
+                return
+
+            # Send message to chat
+            sent_message = await self._bot_instance.send_message(
+                chat_id=window.chat_id,
+                text=response_text,
+                message_thread_id=window.thread_id,
+            )
+
+            # Record proactive response
+            # Note: window doesn't have an id field, so we pass 0 for now
+            # This should be updated when conversation_windows table is used
+            await self.proactive_trigger.record_proactive_response(
+                chat_id=window.chat_id,
+                window_id=0,  # TODO: Use actual window_id when available
+                intent=decision.intent,
+                response_text=response_text,
+                response_message_id=sent_message.message_id,
+            )
+
+            LOGGER.info(
+                "Proactive response sent successfully",
+                extra={
+                    "chat_id": window.chat_id,
+                    "message_id": sent_message.message_id,
+                    "intent": decision.intent.intent_type.value,
+                },
+            )
+
+        except Exception as e:
+            LOGGER.error(
+                "Failed to send proactive response",
                 exc_info=e,
                 extra={"chat_id": window.chat_id},
             )

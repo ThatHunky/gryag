@@ -50,6 +50,8 @@ class ChatMetaMiddleware(BaseMiddleware):
                 # Set bot ID in continuous monitor
                 if self._continuous_monitor and self._bot_id:
                     self._continuous_monitor.set_bot_user_id(self._bot_id)
+                    # Phase 4: Set bot instance for proactive responses
+                    self._continuous_monitor.set_bot_instance(self._bot)
         return self._bot_username or "", self._bot_id
 
     async def __call__(self, handler, event: Message, data):  # type: ignore[override]

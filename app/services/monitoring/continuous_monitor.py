@@ -276,19 +276,26 @@ class ContinuousMonitor:
                     self._stats["proactive_responses"] += 1
                     # TODO: Actually send proactive response (Phase 4)
 
-            # Extract facts from window
-            # For Phase 1, we just log the intent
-            LOGGER.info(
-                "Would extract facts from window (not implemented yet)",
-                extra={
-                    "chat_id": window.chat_id,
-                    "message_count": len(window.messages),
-                },
-            )
+            # Extract facts from window (Phase 3)
+            facts = await self._extract_facts_from_window(window)
 
-            # TODO: Phase 3 - Actually extract facts
-            # facts = await self._extract_facts_from_window(window)
-            # await self._store_facts(facts)
+            if facts:
+                LOGGER.info(
+                    f"Extracted {len(facts)} facts from window",
+                    extra={
+                        "chat_id": window.chat_id,
+                        "message_count": len(window.messages),
+                    },
+                )
+
+                # Store facts with quality processing (Phase 3)
+                await self._store_facts(facts, window)
+
+            else:
+                LOGGER.debug(
+                    "No facts extracted from window",
+                    extra={"chat_id": window.chat_id},
+                )
 
         except Exception as e:
             LOGGER.error(
@@ -303,19 +310,198 @@ class ContinuousMonitor:
         """
         Extract facts from a conversation window.
 
-        Phase 3 implementation.
-        """
-        # TODO: Implement in Phase 3
-        return []
+        Phase 3 implementation: Uses fact extractor to analyze conversation context.
 
-    async def _store_facts(self, facts: list[dict[str, Any]]) -> None:
+        Args:
+            window: Closed conversation window
+
+        Returns:
+            List of extracted facts with metadata
+        """
+        try:
+            # Build conversation context from window messages
+            messages_text = []
+            participants = set()
+            user_names = {}
+
+            for msg_ctx in window.messages:
+                participants.add(msg_ctx.user_id)
+
+                # Build message representation
+                if msg_ctx.text:
+                    # Try to get username from first message for each user
+                    if msg_ctx.user_id not in user_names:
+                        user_names[msg_ctx.user_id] = f"User{msg_ctx.user_id}"
+
+                    messages_text.append(
+                        f"{user_names[msg_ctx.user_id]}: {msg_ctx.text}"
+                    )
+
+            if not messages_text:
+                LOGGER.debug("No text content in window, skipping fact extraction")
+                return []
+
+            # Join into conversation
+            conversation = "\n".join(messages_text)
+
+            LOGGER.debug(
+                f"Extracting facts from window with {len(messages_text)} messages",
+                extra={
+                    "chat_id": window.chat_id,
+                    "participants": len(participants),
+                },
+            )
+
+            # Extract facts for each participant
+            all_facts = []
+
+            for user_id in participants:
+                # Skip bot's own messages
+                if user_id == self._bot_user_id:
+                    continue
+
+                try:
+                    # Use existing fact extractor
+                    # Pass full conversation as context
+                    facts = await self.fact_extractor.extract_facts(
+                        message=conversation,
+                        user_id=user_id,
+                        username=user_names.get(user_id),
+                        context=[],  # Window IS the context
+                        min_confidence=0.6,  # Lower threshold for window-based
+                    )
+
+                    # Add window metadata to each fact
+                    for fact in facts:
+                        fact["extracted_from_window"] = True
+                        fact["window_message_count"] = len(window.messages)
+                        fact["window_has_high_value"] = window.has_high_value
+
+                    all_facts.extend(facts)
+
+                    LOGGER.info(
+                        f"Extracted {len(facts)} facts from window for user {user_id}",
+                        extra={"chat_id": window.chat_id, "user_id": user_id},
+                    )
+
+                except Exception as e:
+                    LOGGER.error(
+                        f"Failed to extract facts for user {user_id}: {e}",
+                        extra={"chat_id": window.chat_id, "user_id": user_id},
+                    )
+
+            self._stats["facts_extracted"] += len(all_facts)
+            return all_facts
+
+        except Exception as e:
+            LOGGER.error(
+                f"Error extracting facts from window: {e}",
+                exc_info=True,
+                extra={"chat_id": window.chat_id},
+            )
+            return []
+
+    async def _store_facts(
+        self, facts: list[dict[str, Any]], window: ConversationWindow
+    ) -> None:
         """
         Store extracted facts with quality processing.
 
-        Phase 3 implementation.
+        Phase 3 implementation: Apply deduplication, conflict resolution, and decay
+        before storing facts.
+
+        Args:
+            facts: Extracted facts from window
+            window: Conversation window (for context)
         """
-        # TODO: Implement in Phase 3
-        pass
+        if not facts:
+            return
+
+        try:
+            # Group facts by user
+            facts_by_user: dict[int, list[dict[str, Any]]] = {}
+
+            for fact in facts:
+                user_id = fact.get("user_id")
+                if not user_id:
+                    LOGGER.warning("Fact missing user_id, skipping")
+                    continue
+
+                facts_by_user.setdefault(user_id, []).append(fact)
+
+            # Process and store facts for each user
+            for user_id, user_facts in facts_by_user.items():
+                try:
+                    # Get existing facts for this user
+                    existing_facts = await self.user_profile_store.get_facts(
+                        user_id=user_id,
+                        chat_id=window.chat_id,
+                        limit=1000,  # Get recent facts for dedup
+                    )
+
+                    LOGGER.debug(
+                        f"Processing {len(user_facts)} new facts against {len(existing_facts)} existing",
+                        extra={"user_id": user_id},
+                    )
+
+                    # Apply quality processing (Phase 2 integration)
+                    processed_facts = await self.fact_quality_manager.process_facts(
+                        facts=user_facts,
+                        user_id=user_id,
+                        chat_id=window.chat_id,
+                        existing_facts=existing_facts,
+                    )
+
+                    LOGGER.info(
+                        f"Quality processing: {len(user_facts)} → {len(processed_facts)} facts",
+                        extra={
+                            "user_id": user_id,
+                            "duplicates_removed": len(user_facts)
+                            - len(processed_facts),
+                        },
+                    )
+
+                    # Store processed facts
+                    for fact in processed_facts:
+                        try:
+                            await self.user_profile_store.add_fact(
+                                user_id=user_id,
+                                chat_id=window.chat_id,
+                                fact_type=fact.get("fact_type", "personal"),
+                                fact_key=fact.get("fact_key", ""),
+                                fact_value=fact.get("fact_value", ""),
+                                confidence=fact.get("confidence", 0.7),
+                                evidence_text=fact.get("evidence_text"),
+                                source_message_id=fact.get("source_message_id"),
+                            )
+
+                        except Exception as e:
+                            LOGGER.error(
+                                f"Failed to store fact: {e}",
+                                extra={
+                                    "user_id": user_id,
+                                    "fact_key": fact.get("fact_key"),
+                                },
+                            )
+
+                    LOGGER.info(
+                        f"Stored {len(processed_facts)} facts for user {user_id}",
+                        extra={"chat_id": window.chat_id},
+                    )
+
+                except Exception as e:
+                    LOGGER.error(
+                        f"Failed to process facts for user {user_id}: {e}",
+                        exc_info=True,
+                        extra={"chat_id": window.chat_id},
+                    )
+
+        except Exception as e:
+            LOGGER.error(
+                f"Error storing facts: {e}",
+                exc_info=True,
+                extra={"chat_id": window.chat_id},
+            )
 
     def get_stats(self) -> dict[str, Any]:
         """Get monitoring statistics."""

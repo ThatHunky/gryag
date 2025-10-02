@@ -137,8 +137,8 @@ class ResourceMonitor:
             import time
 
             now = time.time()
-            # Throttle warnings to once per 5 minutes
-            if now - self._last_memory_warning_time > 300:
+            # Throttle warnings to once per 10 minutes to reduce noise
+            if now - self._last_memory_warning_time > 600:
                 msg = (
                     f"WARNING: Memory usage at {stats.memory_percent:.1f}% "
                     f"({stats.memory_used_mb:.0f}MB / {stats.memory_total_mb:.0f}MB)"
@@ -172,8 +172,8 @@ class ResourceMonitor:
             import time
 
             now = time.time()
-            # Throttle warnings to once per 5 minutes
-            if now - self._last_cpu_warning_time > 300:
+            # Throttle warnings to once per 10 minutes to reduce noise
+            if now - self._last_cpu_warning_time > 600:
                 msg = f"WARNING: CPU usage at {stats.cpu_percent:.1f}%"
                 logger.warning(msg)
                 telemetry.increment_counter("cpu_pressure_warning")

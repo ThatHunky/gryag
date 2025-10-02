@@ -19,7 +19,11 @@ from app.services.user_profile import UserProfileStore
 from app.services.fact_extractors import create_hybrid_extractor
 from app.services.profile_summarization import ProfileSummarizer
 from app.services.resource_monitor import get_resource_monitor
-from app.services.monitoring import ContinuousMonitor
+from app.services.resource_optimizer import (
+    get_resource_optimizer,
+    periodic_optimization_check,
+)
+from app.services.monitoring.continuous_monitor import ContinuousMonitor
 
 try:  # Optional dependency
     import redis.asyncio as redis
@@ -101,19 +105,48 @@ async def main() -> None:
             "Install with: pip install psutil"
         )
 
-    # Phase 3: Create background task for periodic resource monitoring
-    async def monitor_resources() -> None:
-        """Periodically check and log resource usage."""
-        while True:
-            await asyncio.sleep(60)  # Check every 60 seconds
-            if resource_monitor.is_available():
-                resource_monitor.check_memory_pressure()
-                resource_monitor.check_cpu_pressure()
-                # Log detailed summary every 10 minutes
-                import time
+    # Phase 3: Create background task for periodic resource monitoring with optimization
+    resource_optimizer = get_resource_optimizer()
 
-                if int(time.time()) % 600 < 60:  # Within first minute of 10-min window
-                    resource_monitor.log_resource_summary()
+    async def monitor_resources() -> None:
+        """Periodically check and log resource usage with auto-optimization."""
+        while True:
+            try:
+                # Check and apply optimizations
+                optimization_result = await resource_optimizer.check_and_optimize()
+
+                if optimization_result.get("level_changed"):
+                    logging.info(
+                        "Resource optimization applied", extra=optimization_result
+                    )
+
+                # Regular resource monitoring
+                if resource_monitor.is_available():
+                    resource_monitor.check_memory_pressure()
+                    resource_monitor.check_cpu_pressure()
+
+                    # Log detailed summary every 10 minutes
+                    import time
+
+                    if (
+                        int(time.time()) % 600 < 60
+                    ):  # Within first minute of 10-min window
+                        resource_monitor.log_resource_summary()
+
+                        # Also log optimization stats
+                        opt_stats = resource_optimizer.get_stats()
+                        if opt_stats["current_optimization_level"] > 0:
+                            logging.info("Resource optimizer active", extra=opt_stats)
+
+            except Exception as e:
+                logging.error(f"Error in resource monitoring: {e}", exc_info=True)
+
+            # Adaptive sleep based on optimization level
+            sleep_time = 60
+            if resource_optimizer.is_emergency_mode():
+                sleep_time = 30  # Check more frequently in emergency mode
+
+            await asyncio.sleep(sleep_time)
 
     monitor_task: asyncio.Task[None] | None = None
     if resource_monitor.is_available():

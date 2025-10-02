@@ -77,6 +77,13 @@ files/
 temp/
 tmp/
 
+# Redis data (local storage)
+redis-data/
+
+# Local AI models
+models/
+*.gguf
+
 # IDEs & editors
 .vscode/
 .idea/

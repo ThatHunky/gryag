@@ -73,10 +73,38 @@ class ThrottleMiddleware(BaseMiddleware):
                 if redis_times:
                     recent_times = redis_times
                     quota_source = "redis"
-            except Exception:  # pragma: no cover - network/runtime failures
-                LOGGER.exception(
-                    "Redis quota lookup failed for chat=%s user=%s", chat_id, user_id
+            except Exception as exc:  # pragma: no cover - network/runtime failures
+                # Log less frequently to reduce noise during Redis outages
+                import time as time_mod
+
+                error_key = f"redis_error_{chat_id}_{user_id}"
+                last_error_time = getattr(self, "_last_redis_errors", {}).get(
+                    error_key, 0
                 )
+
+                if (
+                    time_mod.time() - last_error_time > 300
+                ):  # Log once per 5 minutes per user
+                    LOGGER.error(
+                        "Redis quota lookup failed for chat=%s user=%s: %s",
+                        chat_id,
+                        user_id,
+                        type(exc).__name__,
+                    )
+                    if not hasattr(self, "_last_redis_errors"):
+                        self._last_redis_errors = {}
+                    self._last_redis_errors[error_key] = time_mod.time()
+
+                # Disable Redis for this middleware instance if errors persist
+                if not hasattr(self, "_redis_error_count"):
+                    self._redis_error_count = 0
+                self._redis_error_count += 1
+
+                if self._redis_error_count > 10:  # Disable after 10 consecutive errors
+                    LOGGER.warning(
+                        "Disabling Redis due to persistent connection errors"
+                    )
+                    self._redis = None
         if not recent_times:
             recent_times = await self._store.recent_request_times(
                 chat_id=chat_id,

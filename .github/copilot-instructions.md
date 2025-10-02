@@ -56,3 +56,33 @@ globs: *
 - When introducing new stored fields, update `db/schema.sql` and extend `ContextStore.init()` to backfill or `ALTER TABLE`, keeping migrations idempotent for Docker volume reuse.
 - Expand media support via `services.media.collect_media_parts`; return dicts with `bytes`, `mime`, and a descriptive `kind` so `build_media_parts` just works.
 - For new telemetry, call `telemetry.increment_counter` with clear labels; DEBUG logs render counters as structured extras for scraping.
+
+## Docs, repo organization, and agent behavior
+
+This repository adopts a small, consistent docs layout under `docs/` and keeps a concise top-level `README.md` for quick setup. Automated agents and humans should follow these conventions when creating, moving, or editing documentation:
+
+- Recommended docs tree under `docs/`:
+
+  - `docs/overview/` — high-level project and architecture overviews (e.g. `PROJECT_OVERVIEW.md`).
+  - `docs/plans/` — technical plans and roadmaps (`IMPLEMENTATION_PLAN_SUMMARY.md`, `INTELLIGENT_CONTINUOUS_LEARNING_PLAN.md`).
+  - `docs/phases/` — phase-level status and test guides (`PHASE_*_COMPLETE.md`).
+  - `docs/features/` — feature specs and design notes (`USER_PROFILING_PLAN.md`, `LOCAL_FACT_EXTRACTION_PLAN.md`).
+  - `docs/guides/` — operational guides and runbooks (`TOOL_LOGGING_GUIDE.md`).
+  - `docs/history/` — optional archived notes or exports (keep small).
+
+- When reorganizing docs:
+
+  - Create or update `docs/README.md` describing the change and listing moved/added files.
+  - Prefer `git mv` for renames to preserve history. If moving without `git mv`, add a brief redirect note in the original file pointing to the new path.
+  - Preserve relative links inside moved files and update cross-links where necessary.
+  - If many files are touched in one commit, add a `docs/CHANGELOG.md` entry summarizing the edits.
+
+- Guidance for automated agents editing docs/code:
+  - Read `AGENTS.md` at the repo root first — it contains the short contract for doc edits and migration rules.
+  - Make minimal, targeted edits. Avoid bulk rewrites unless explicitly requested by a maintainer.
+  - Preserve the original author's voice and technical intent when possible.
+  - When adding new documentation, include a short "How to verify" section with simple commands or expected outcomes.
+
+These guidelines keep the repository organized and make human review easier.
+
+Note: On 2025-10-02 many top-level documentation files were reorganized into the `docs/` tree. See `docs/CHANGELOG.md` for the full list and verification steps.

@@ -27,6 +27,11 @@ from app.services.triggers import addressed_to_bot
 from app.services.user_profile import UserProfileStore
 from app.services.fact_extractors import FactExtractor
 from app.services import telemetry
+from app.services.context import (
+    MultiLevelContextManager,
+    HybridSearchEngine,
+    EpisodicMemoryStore,
+)
 
 router = Router()
 
@@ -78,22 +83,42 @@ def _extract_text(message: Message | None) -> str | None:
 
 
 def _summarize_media(media_items: list[dict[str, Any]] | None) -> str | None:
+    """Create a Ukrainian summary of attached media."""
     if not media_items:
         return None
-    labels: list[str] = []
-    seen: set[str] = set()
+
+    # Count by type
+    images = 0
+    audio = 0
+    videos = 0
+    youtube = 0
+
     for item in media_items:
-        kind = str(item.get("kind") or "media")
-        mime = item.get("mime")
-        label = kind
-        if isinstance(mime, str) and mime:
-            label = f"{kind} ({mime})"
-        if label not in seen:
-            labels.append(label)
-            seen.add(label)
-    if not labels:
+        if "file_uri" in item and "youtube.com" in item.get("file_uri", ""):
+            youtube += 1
+        else:
+            kind = item.get("kind", "")
+            if kind == "image":
+                images += 1
+            elif kind == "audio":
+                audio += 1
+            elif kind == "video":
+                videos += 1
+
+    parts = []
+    if images > 0:
+        parts.append(f"{images} фото" if images > 1 else "фото")
+    if videos > 0:
+        parts.append(f"{videos} відео" if videos > 1 else "відео")
+    if audio > 0:
+        parts.append(f"{audio} аудіо" if audio > 1 else "аудіо")
+    if youtube > 0:
+        parts.append(f"{youtube} YouTube" if youtube > 1 else "YouTube відео")
+
+    if not parts:
         return None
-    return "Прикріплення: " + ", ".join(labels)
+
+    return "Прикріплення: " + ", ".join(parts)
 
 
 def _get_recent_context(chat_id: int, thread_id: int | None) -> dict[str, Any] | None:
@@ -114,7 +139,10 @@ async def _remember_context_message(
     message: Message,
     bot: Bot,
     gemini_client: GeminiClient,
+    store: ContextStore,
+    settings: Settings,
 ) -> None:
+    """Cache and persist unaddressed messages for potential context use."""
     if message.from_user is None or message.from_user.is_bot:
         return
 
@@ -124,12 +152,22 @@ async def _remember_context_message(
 
     try:
         media_raw = await collect_media_parts(bot, message)
+
+        # Also check for YouTube URLs in unaddressed messages
+        from app.services.media import extract_youtube_urls
+
+        youtube_urls = extract_youtube_urls(text)
+        if youtube_urls:
+            for url in youtube_urls:
+                media_raw.append(
+                    {"file_uri": url, "kind": "video", "mime": "video/mp4"}
+                )
     except Exception:  # pragma: no cover - defensive logging
         LOGGER.exception("Failed to collect media for message %s", message.message_id)
         media_raw = []
 
     if media_raw:
-        media_parts = gemini_client.build_media_parts(media_raw)
+        media_parts = gemini_client.build_media_parts(media_raw, logger=LOGGER)
 
     media_summary = _summarize_media(media_raw)
 
@@ -150,6 +188,53 @@ async def _remember_context_message(
             "media_parts": media_parts,
         }
     )
+
+    # Persist unaddressed messages to database so they can be retrieved later
+    # This is critical for multi-level context to see images in past messages
+    try:
+        text_content = text or media_summary or ""
+
+        # Generate embedding for semantic search
+        user_embedding = None
+        if text_content:
+            user_embedding = await gemini_client.embed_text(text_content)
+
+        # Build metadata
+        user_meta = {
+            "chat_id": message.chat.id,
+            "thread_id": message.message_thread_id,
+            "message_id": message.message_id,
+            "user_id": message.from_user.id,
+            "name": message.from_user.full_name,
+            "username": _normalize_username(message.from_user.username),
+        }
+
+        # Store in database for later retrieval
+        await store.add_turn(
+            chat_id=message.chat.id,
+            thread_id=message.message_thread_id,
+            user_id=message.from_user.id,
+            role="user",
+            text=text_content,
+            media=media_parts,
+            metadata=user_meta,
+            embedding=user_embedding,
+            retention_days=settings.retention_days,
+        )
+
+        LOGGER.debug(
+            "Persisted unaddressed message %s with %d media part(s)",
+            message.message_id,
+            len(media_parts),
+        )
+    except Exception as e:
+        # Don't fail the whole flow if persistence fails
+        LOGGER.error(
+            "Failed to persist unaddressed message %s: %s",
+            message.message_id,
+            e,
+            exc_info=True,
+        )
 
 
 def _build_user_metadata(
@@ -409,12 +494,27 @@ async def _update_user_profile_background(
 
 
 def _escape_markdown(text: str) -> str:
-    """Escape characters that break Telegram Markdown parsing."""
+    """
+    Clean up text that might break Telegram Markdown parsing.
+
+    Since the bot is instructed to never use markdown formatting,
+    we remove formatting characters instead of escaping them.
+    """
     if not text:
         return text
 
+    # Remove asterisks and underscores used for emphasis (bot shouldn't use these)
+    # Keep them if they appear to be part of actual content (e.g., math expressions)
+    text = re.sub(r"\*+", "", text)  # Remove all asterisks
+    text = re.sub(r"_+", "", text)  # Remove all underscores
+
+    # Escape special Telegram markdown characters that might break rendering
+    # but keep the actual useful punctuation
     text = text.replace("\\", "\\\\")
-    return _TELEGRAM_MARKDOWN_ESCAPE_RE.sub(lambda match: "\\" + match.group(1), text)
+    # Only escape brackets and backticks that could break formatting
+    text = re.sub(r"([`\[\]])", r"\\\1", text)
+
+    return text
 
 
 def _summarize_long_context(
@@ -461,6 +561,9 @@ async def handle_group_message(
     fact_extractor: FactExtractor,
     bot_username: str,
     bot_id: int | None,
+    hybrid_search: HybridSearchEngine | None = None,
+    episodic_memory: EpisodicMemoryStore | None = None,
+    episode_monitor: Any | None = None,
     continuous_monitor: Any | None = None,
     redis_client: RedisLike | None = None,
     redis_quota: tuple[str, int] | None = None,
@@ -468,9 +571,20 @@ async def handle_group_message(
     throttle_reason: dict[str, Any] | None = None,
 ):
     if message.from_user is None or message.from_user.is_bot:
+        LOGGER.debug("Ignoring message: no from_user or is_bot")
         return
 
     telemetry.increment_counter("chat.incoming")
+
+    LOGGER.info(
+        "Processing message",
+        extra={
+            "chat_id": message.chat.id,
+            "message_id": message.message_id,
+            "user_id": message.from_user.id,
+            "text": (message.text or message.caption or "")[:50],
+        },
+    )
 
     chat_id = message.chat.id
     thread_id = message.message_thread_id
@@ -493,15 +607,34 @@ async def handle_group_message(
                 extra={"chat_id": chat_id, "message_id": message.message_id},
             )
 
-    if not addressed_to_bot(message, bot_username, bot_id):
+    is_addressed = addressed_to_bot(message, bot_username, bot_id)
+    if not is_addressed:
         telemetry.increment_counter("chat.unaddressed")
-        await _remember_context_message(message, bot, gemini_client)
+        LOGGER.debug(
+            "Message not addressed to bot",
+            extra={
+                "chat_id": message.chat.id,
+                "message_id": message.message_id,
+                "text": (message.text or message.caption or "")[:50],
+            },
+        )
+        await _remember_context_message(message, bot, gemini_client, store, settings)
         return
+
     telemetry.increment_counter("chat.addressed")
+    LOGGER.info(
+        "Message addressed to bot - processing",
+        extra={
+            "chat_id": message.chat.id,
+            "message_id": message.message_id,
+            "user_id": message.from_user.id,
+            "throttle_blocked": throttle_blocked,
+        },
+    )
     user_id = message.from_user.id
     blocked = bool(throttle_blocked)
 
-    is_admin = user_id in settings.admin_user_ids
+    is_admin = user_id in settings.admin_user_ids_list
 
     if not is_admin and await store.is_banned(chat_id, user_id):
         telemetry.increment_counter("chat.banned_user")
@@ -517,22 +650,123 @@ async def handle_group_message(
         try:
             await redis_client.zadd(key, {member: ts})
             await redis_client.expire(key, 3600)
-        except Exception:
-            pass
+        except Exception as e:
+            LOGGER.warning(
+                "Failed to update Redis quota for chat %s user %s: %s",
+                chat_id,
+                user_id,
+                e,
+                exc_info=True,
+            )
 
-    history = await store.recent(
-        chat_id=chat_id,
-        thread_id=thread_id,
-        max_turns=settings.max_turns,
+    # Build multi-level context if services are available
+    use_multi_level = (
+        settings.enable_multi_level_context
+        and hybrid_search is not None
+        and episodic_memory is not None
     )
 
-    # Summarize context if it's getting too long to prevent confusion
-    history = _summarize_long_context(history, settings.context_summary_threshold)
+    context_manager = None
+    context_assembly = None
 
+    if use_multi_level:
+        # Phase 3: Use multi-level context manager
+        context_manager = MultiLevelContextManager(
+            db_path=settings.db_path,
+            settings=settings,
+            context_store=store,
+            profile_store=profile_store,
+            hybrid_search=hybrid_search,
+            episode_store=episodic_memory,
+        )
+
+        # Get query text for context retrieval
+        text_content = (message.text or message.caption or "").strip()
+
+        # Build multi-level context
+        try:
+            context_assembly = await context_manager.build_context(
+                chat_id=chat_id,
+                thread_id=thread_id,
+                user_id=user_id,
+                query_text=text_content or "conversation",
+                max_tokens=settings.context_token_budget,
+            )
+
+            LOGGER.info(
+                "Multi-level context assembled",
+                extra={
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "total_tokens": context_assembly.total_tokens,
+                    "immediate_count": len(context_assembly.immediate.messages),
+                    "recent_count": (
+                        len(context_assembly.recent.messages)
+                        if context_assembly.recent
+                        else 0
+                    ),
+                    "relevant_count": (
+                        len(context_assembly.relevant.snippets)
+                        if context_assembly.relevant
+                        else 0
+                    ),
+                    "episodic_count": (
+                        len(context_assembly.episodes.episodes)
+                        if context_assembly.episodes
+                        else 0
+                    ),
+                },
+            )
+        except Exception as e:
+            LOGGER.error(
+                "Multi-level context assembly failed, falling back to simple history",
+                exc_info=e,
+                extra={"chat_id": chat_id, "user_id": user_id},
+            )
+            use_multi_level = False
+            context_manager = None
+            context_assembly = None
+
+    if not use_multi_level:
+        # Fallback: Use simple history retrieval
+        history = await store.recent(
+            chat_id=chat_id,
+            thread_id=thread_id,
+            max_turns=settings.max_turns,
+        )
+        # Summarize context if it's getting too long to prevent confusion
+        history = _summarize_long_context(history, settings.context_summary_threshold)
+    else:
+        # Multi-level context will be formatted later
+        history = []
+
+    # Collect media from message (photos, videos, audio, etc.)
     media_raw = await collect_media_parts(bot, message)
-    media_parts = gemini_client.build_media_parts(media_raw)
 
     raw_text = (message.text or message.caption or "").strip()
+
+    # Check for YouTube URLs in the text
+    from app.services.media import extract_youtube_urls
+
+    youtube_urls = extract_youtube_urls(raw_text)
+    if youtube_urls:
+        LOGGER.info(
+            "Detected %d YouTube URL(s) in message %s",
+            len(youtube_urls),
+            message.message_id,
+        )
+        # Add YouTube URLs as file_uri media items
+        for url in youtube_urls:
+            media_raw.append(
+                {
+                    "file_uri": url,
+                    "kind": "video",
+                    "mime": "video/mp4",  # YouTube videos
+                }
+            )
+
+    # Build Gemini-compatible media parts
+    media_parts = gemini_client.build_media_parts(media_raw, logger=LOGGER)
 
     # Check for poll voting (numbers like "1", "2", "1,3", etc.)
     poll_vote_result = await _handle_poll_vote_attempt(
@@ -552,6 +786,57 @@ async def handle_group_message(
                 if item.get("message_id") == reply.message_id:
                     reply_context = item
                     break
+
+        # If we have a reply but no cached context, or cached context has no media,
+        # try to collect media directly from the reply message
+        if not reply_context or not reply_context.get("media_parts"):
+            try:
+                reply_media_raw = await collect_media_parts(bot, reply)
+                if reply_media_raw:
+                    reply_media_parts = gemini_client.build_media_parts(
+                        reply_media_raw, logger=LOGGER
+                    )
+                    if reply_media_parts:
+                        # Create or update reply_context with media
+                        if not reply_context:
+                            reply_text = _extract_text(reply)
+                            reply_context = {
+                                "ts": (
+                                    int(reply.date.timestamp())
+                                    if reply.date
+                                    else int(time.time())
+                                ),
+                                "message_id": reply.message_id,
+                                "user_id": (
+                                    reply.from_user.id if reply.from_user else None
+                                ),
+                                "name": (
+                                    reply.from_user.full_name
+                                    if reply.from_user
+                                    else None
+                                ),
+                                "username": _normalize_username(
+                                    reply.from_user.username
+                                    if reply.from_user
+                                    else None
+                                ),
+                                "text": reply_text or _summarize_media(reply_media_raw),
+                                "excerpt": (reply_text or "")[:200] or None,
+                                "media_parts": reply_media_parts,
+                            }
+                        else:
+                            # Update existing context with media
+                            reply_context["media_parts"] = reply_media_parts
+                        LOGGER.debug(
+                            "Collected %d media part(s) from reply message %s",
+                            len(reply_media_parts),
+                            reply.message_id,
+                        )
+            except Exception:
+                LOGGER.exception(
+                    "Failed to collect media from reply message %s", reply.message_id
+                )
+
     fallback_context = reply_context or _get_recent_context(chat_id, thread_id)
     fallback_text = fallback_context.get("text") if fallback_context else None
     media_summary = _summarize_media(media_raw)
@@ -591,13 +876,40 @@ async def handle_group_message(
         retention_days=settings.retention_days,
     )
 
+    # Phase 4.2: Track message for episode creation
+    if settings.auto_create_episodes and episode_monitor is not None:
+        try:
+            await episode_monitor.track_message(
+                chat_id=chat_id,
+                thread_id=thread_id,
+                message={
+                    "id": message.message_id,
+                    "user_id": user_id,
+                    "text": text_content,
+                    "timestamp": int(time.time()),
+                    "chat_id": chat_id,
+                },
+            )
+            LOGGER.debug(
+                "Message tracked for episode creation",
+                extra={"chat_id": chat_id, "message_id": message.message_id},
+            )
+        except Exception as e:
+            LOGGER.error(
+                "Failed to track message for episodes",
+                exc_info=e,
+                extra={"chat_id": chat_id, "message_id": message.message_id},
+            )
+
     if blocked:
         if throttle_reason:
-            LOGGER.debug(
-                "Skipping reply due to throttle: chat=%s user=%s details=%s",
-                chat_id,
-                user_id,
-                throttle_reason,
+            LOGGER.info(
+                "Message throttled - skipping Gemini call",
+                extra={
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "reason": throttle_reason,
+                },
             )
         telemetry.increment_counter("chat.throttled")
         return
@@ -692,16 +1004,44 @@ async def handle_group_message(
     tool_definitions.append(POLLS_TOOL_DEFINITION)
 
     # Enrich with user profile context
-    profile_context = await _enrich_with_user_profile(
-        profile_store=profile_store,
-        user_id=user_id,
-        chat_id=chat_id,
-        settings=settings,
-    )
+    # Note: If using multi-level context, profile is already included
+    if not use_multi_level:
+        profile_context = await _enrich_with_user_profile(
+            profile_store=profile_store,
+            user_id=user_id,
+            chat_id=chat_id,
+            settings=settings,
+        )
+    else:
+        profile_context = None
 
     # If we have profile context, inject it into the system prompt
     system_prompt_with_profile = SYSTEM_PERSONA
-    if profile_context:
+
+    # Format context for Gemini
+    if use_multi_level and context_manager and context_assembly:
+        # Use multi-level formatted context
+        formatted_context = context_manager.format_for_gemini(context_assembly)
+        history = formatted_context["history"]
+
+        # Append multi-level system context
+        if formatted_context.get("system_context"):
+            system_prompt_with_profile = (
+                SYSTEM_PERSONA + "\n\n" + formatted_context["system_context"]
+            )
+
+        LOGGER.debug(
+            "Using multi-level context for Gemini",
+            extra={
+                "history_length": len(history),
+                "system_context_length": (
+                    len(formatted_context.get("system_context") or "")
+                ),
+                "total_tokens": formatted_context.get("token_count", 0),
+            },
+        )
+    elif profile_context:
+        # Fallback: Simple history + profile context
         system_prompt_with_profile = SYSTEM_PERSONA + profile_context
 
     try:

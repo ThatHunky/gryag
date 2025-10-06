@@ -1,14 +1,34 @@
 from __future__ import annotations
 
-from aiogram import Router
+import logging
+
+from aiogram import Bot, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import BotCommand, Message
 
 from app.config import Settings
 from app.services.context_store import ContextStore
 from app.services.redis_types import RedisLike
 
 router = Router()
+
+LOGGER = logging.getLogger(__name__)
+
+# Command descriptions for bot menu
+ADMIN_COMMANDS = [
+    BotCommand(
+        command="gryagban",
+        description="🔒 Забанити користувача (тільки адміни, у відповідь або ID)",
+    ),
+    BotCommand(
+        command="gryagunban",
+        description="🔒 Розбанити користувача (тільки адміни, у відповідь або ID)",
+    ),
+    BotCommand(
+        command="gryagreset",
+        description="🔒 Скинути ліміти повідомлень у чаті (тільки адміни)",
+    ),
+]
 
 ADMIN_ONLY = "Ця команда лише для своїх. І явно не для тебе."
 BAN_SUCCESS = "Готово: користувача кувалдіровано."
@@ -20,7 +40,9 @@ RESET_DONE = "Все, обнулив ліміти. Можна знову роз�
 
 
 def _is_admin(message: Message, settings: Settings) -> bool:
-    return bool(message.from_user and message.from_user.id in settings.admin_user_ids)
+    return bool(
+        message.from_user and message.from_user.id in settings.admin_user_ids_list
+    )
 
 
 def _extract_target(message: Message) -> tuple[int, str] | None:
@@ -115,7 +137,12 @@ async def reset_quotas_command(
                     await redis_client.delete(*keys)
                 if cursor == 0:
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            LOGGER.warning(
+                "Failed to clear Redis quotas for chat %s: %s",
+                chat_id,
+                e,
+                exc_info=True,
+            )
 
     await message.reply(RESET_DONE)

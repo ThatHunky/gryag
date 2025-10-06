@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     per_user_per_hour: int = Field(5, alias="PER_USER_PER_HOUR", ge=1)
     use_redis: bool = Field(False, alias="USE_REDIS")
     redis_url: str | None = Field("redis://localhost:6379/0", alias="REDIS_URL")
-    admin_user_ids: list[int] = Field(default_factory=list, alias="ADMIN_USER_IDS")
+    admin_user_ids: str = Field("", alias="ADMIN_USER_IDS")
     retention_days: int = Field(30, alias="RETENTION_DAYS", ge=1)
     enable_search_grounding: bool = Field(False, alias="ENABLE_SEARCH_GROUNDING")
 
@@ -139,23 +139,168 @@ class Settings(BaseSettings):
         300, alias="HEALTH_CHECK_INTERVAL", ge=60, le=3600
     )  # Seconds between health checks
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Memory and Context Improvements (Phase 1+)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # Multi-Level Context
+    enable_multi_level_context: bool = Field(True, alias="ENABLE_MULTI_LEVEL_CONTEXT")
+    immediate_context_size: int = Field(5, alias="IMMEDIATE_CONTEXT_SIZE", ge=1, le=20)
+    recent_context_size: int = Field(30, alias="RECENT_CONTEXT_SIZE", ge=5, le=100)
+    relevant_context_size: int = Field(10, alias="RELEVANT_CONTEXT_SIZE", ge=1, le=50)
+    context_token_budget: int = Field(
+        8000, alias="CONTEXT_TOKEN_BUDGET", ge=1000, le=30000
+    )
+
+    # Hybrid Search
+    enable_hybrid_search: bool = Field(True, alias="ENABLE_HYBRID_SEARCH")
+    enable_keyword_search: bool = Field(True, alias="ENABLE_KEYWORD_SEARCH")
+    enable_temporal_boosting: bool = Field(True, alias="ENABLE_TEMPORAL_BOOSTING")
+    temporal_half_life_days: int = Field(
+        7, alias="TEMPORAL_HALF_LIFE_DAYS", ge=1, le=90
+    )
+    max_search_candidates: int = Field(
+        500, alias="MAX_SEARCH_CANDIDATES", ge=50, le=2000
+    )
+    semantic_weight: float = Field(
+        0.5, alias="SEMANTIC_WEIGHT", ge=0.0, le=1.0
+    )  # Weight for semantic similarity in hybrid search
+    keyword_weight: float = Field(
+        0.3, alias="KEYWORD_WEIGHT", ge=0.0, le=1.0
+    )  # Weight for keyword matching
+    temporal_weight: float = Field(
+        0.2, alias="TEMPORAL_WEIGHT", ge=0.0, le=1.0
+    )  # Weight for recency
+
+    # Episodic Memory
+    enable_episodic_memory: bool = Field(True, alias="ENABLE_EPISODIC_MEMORY")
+    episode_min_importance: float = Field(
+        0.6, alias="EPISODE_MIN_IMPORTANCE", ge=0.0, le=1.0
+    )
+    episode_min_messages: int = Field(5, alias="EPISODE_MIN_MESSAGES", ge=3, le=50)
+    auto_create_episodes: bool = Field(True, alias="AUTO_CREATE_EPISODES")
+    episode_detection_interval: int = Field(
+        300, alias="EPISODE_DETECTION_INTERVAL", ge=60, le=3600
+    )  # Seconds
+
+    # Episode Boundary Detection (Phase 4.1)
+    episode_boundary_threshold: float = Field(
+        0.6, alias="EPISODE_BOUNDARY_THRESHOLD", ge=0.0, le=1.0
+    )  # Combined score threshold for creating boundary
+    episode_short_gap_seconds: int = Field(
+        120, alias="EPISODE_SHORT_GAP_SECONDS", ge=30, le=600
+    )  # 2 minutes
+    episode_medium_gap_seconds: int = Field(
+        900, alias="EPISODE_MEDIUM_GAP_SECONDS", ge=300, le=3600
+    )  # 15 minutes
+    episode_long_gap_seconds: int = Field(
+        3600, alias="EPISODE_LONG_GAP_SECONDS", ge=600, le=86400
+    )  # 1 hour
+    episode_low_similarity_threshold: float = Field(
+        0.3, alias="EPISODE_LOW_SIMILARITY_THRESHOLD", ge=0.0, le=1.0
+    )
+    episode_medium_similarity_threshold: float = Field(
+        0.5, alias="EPISODE_MEDIUM_SIMILARITY_THRESHOLD", ge=0.0, le=1.0
+    )
+    episode_high_similarity_threshold: float = Field(
+        0.7, alias="EPISODE_HIGH_SIMILARITY_THRESHOLD", ge=0.0, le=1.0
+    )
+
+    # Episode Monitoring (Phase 4.2)
+    episode_window_timeout: int = Field(
+        1800, alias="EPISODE_WINDOW_TIMEOUT", ge=300, le=7200
+    )  # Seconds before window closes (30 minutes)
+    episode_window_max_messages: int = Field(
+        50, alias="EPISODE_WINDOW_MAX_MESSAGES", ge=10, le=200
+    )  # Max messages per window
+    episode_monitor_interval: int = Field(
+        300, alias="EPISODE_MONITOR_INTERVAL", ge=60, le=3600
+    )  # Background check interval (5 minutes)
+
+    # Fact Graphs
+    enable_fact_graphs: bool = Field(True, alias="ENABLE_FACT_GRAPHS")
+    auto_infer_relationships: bool = Field(True, alias="AUTO_INFER_RELATIONSHIPS")
+    max_graph_hops: int = Field(2, alias="MAX_GRAPH_HOPS", ge=1, le=5)
+    semantic_similarity_threshold: float = Field(
+        0.7, alias="SEMANTIC_SIMILARITY_THRESHOLD", ge=0.0, le=1.0
+    )
+    fact_relationship_min_weight: float = Field(
+        0.3, alias="FACT_RELATIONSHIP_MIN_WEIGHT", ge=0.0, le=1.0
+    )
+
+    # Temporal Awareness
+    enable_fact_versioning: bool = Field(True, alias="ENABLE_FACT_VERSIONING")
+    track_fact_changes: bool = Field(True, alias="TRACK_FACT_CHANGES")
+    recency_weight: float = Field(
+        0.3, alias="RECENCY_WEIGHT", ge=0.0, le=1.0
+    )  # Overall recency importance
+
+    # Adaptive Memory
+    enable_adaptive_retention: bool = Field(True, alias="ENABLE_ADAPTIVE_RETENTION")
+    enable_memory_consolidation: bool = Field(True, alias="ENABLE_MEMORY_CONSOLIDATION")
+    consolidation_interval_hours: int = Field(
+        24, alias="CONSOLIDATION_INTERVAL_HOURS", ge=1, le=168
+    )
+    min_retention_days: int = Field(30, alias="MIN_RETENTION_DAYS", ge=7, le=90)
+    max_retention_days: int = Field(365, alias="MAX_RETENTION_DAYS", ge=30, le=3650)
+    base_retention_days: int = Field(
+        90, alias="BASE_RETENTION_DAYS", ge=30, le=365
+    )  # Base for adaptive calculation
+
+    # Performance & Caching
+    enable_result_caching: bool = Field(True, alias="ENABLE_RESULT_CACHING")
+    cache_ttl_seconds: int = Field(3600, alias="CACHE_TTL_SECONDS", ge=60, le=86400)
+    max_cache_size_mb: int = Field(100, alias="MAX_CACHE_SIZE_MB", ge=10, le=1000)
+    enable_embedding_cache: bool = Field(True, alias="ENABLE_EMBEDDING_CACHE")
+
     @property
     def db_path_str(self) -> str:
         return str(self.db_path)
 
+    @property
+    def admin_user_ids_list(self) -> list[int]:
+        """Parse admin user IDs from string to list."""
+        if not self.admin_user_ids:
+            return []
+        parts = [part.strip() for part in self.admin_user_ids.split(",")]
+        return [int(part) for part in parts if part]
+
     @field_validator("admin_user_ids", mode="before")
     @classmethod
-    def _parse_admins(cls, value: object) -> list[int]:
+    def _parse_admins(cls, value: object) -> str:
         if value in (None, ""):
-            return []
+            return ""
         if isinstance(value, str):
-            parts = [part.strip() for part in value.split(",")]
-            return [int(part) for part in parts if part]
+            return value
         if isinstance(value, (list, tuple, set)):
-            return [int(item) for item in value]
+            return ",".join(str(item) for item in value)
         if isinstance(value, int):
-            return [value]
+            return str(value)
         raise ValueError("Invalid ADMIN_USER_IDS value")
+
+    @field_validator("semantic_weight", "keyword_weight", "temporal_weight")
+    @classmethod
+    def _validate_search_weights(cls, v: float, info) -> float:
+        """Validate that search weights are reasonable and will be checked for sum."""
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"{info.field_name} must be between 0.0 and 1.0, got {v}")
+        return v
+
+    def model_post_init(self, __context) -> None:
+        """Validate interdependent fields after initialization."""
+        # Check that hybrid search weights sum to approximately 1.0
+        if self.enable_hybrid_search:
+            total_weight = (
+                self.semantic_weight + self.keyword_weight + self.temporal_weight
+            )
+            # Allow small floating-point tolerance
+            if not (0.99 <= total_weight <= 1.01):
+                raise ValueError(
+                    f"Hybrid search weights must sum to 1.0 (got {total_weight:.4f}). "
+                    f"semantic_weight={self.semantic_weight}, "
+                    f"keyword_weight={self.keyword_weight}, "
+                    f"temporal_weight={self.temporal_weight}"
+                )
 
 
 @lru_cache(maxsize=1)

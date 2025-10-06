@@ -134,15 +134,52 @@ class GeminiClient:
     @staticmethod
     def build_media_parts(
         media_items: Iterable[dict[str, Any]],
+        logger: logging.Logger | None = None,
     ) -> list[dict[str, Any]]:
+        """
+        Convert media items to Gemini API format.
+
+        Supports:
+        - Inline data (base64 encoded bytes) for files <20MB
+        - File URIs for YouTube URLs
+
+        Args:
+            media_items: List of dicts with either:
+                - 'bytes' + 'mime': Regular file content
+                - 'file_uri': YouTube URL or uploaded file reference
+            logger: Optional logger for debugging
+
+        Returns:
+            List of parts in Gemini API format
+        """
         parts: list[dict[str, Any]] = []
         for item in media_items:
+            # YouTube URLs or Files API references
+            if "file_uri" in item:
+                file_uri = item["file_uri"]
+                if file_uri:
+                    parts.append({"file_data": {"file_uri": file_uri}})
+                    if logger:
+                        logger.debug("Added file_uri media: %s", file_uri)
+                continue
+
+            # Regular inline data (base64 encoded)
             blob = item.get("bytes")
             mime = item.get("mime")
+            kind = item.get("kind", "unknown")
+            size = item.get("size", 0)
             if not blob or not mime:
                 continue
             data = base64.b64encode(blob).decode("ascii")
             parts.append({"inline_data": {"mime_type": mime, "data": data}})
+            if logger:
+                logger.debug(
+                    "Added inline media: mime=%s, kind=%s, size=%d bytes, base64_len=%d",
+                    mime,
+                    kind,
+                    size,
+                    len(data),
+                )
         return parts
 
     async def generate(
@@ -198,6 +235,20 @@ class GeminiClient:
             raise
         except Exception as exc:  # pragma: no cover - network failure paths
             err_text = str(exc)
+
+            # Check if it's a media-related error
+            is_media_error = any(
+                keyword in err_text.lower()
+                for keyword in ["image", "video", "audio", "media", "inline_data"]
+            )
+
+            if is_media_error:
+                self._logger.error(
+                    "Gemini media processing failed: %s. "
+                    "This may be due to unsupported format or corrupted media.",
+                    err_text,
+                )
+
             self._logger.exception(
                 "Gemini request failed with tools; applying fallbacks"
             )

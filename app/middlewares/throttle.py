@@ -47,7 +47,7 @@ class ThrottleMiddleware(BaseMiddleware):
         user_id = event.from_user.id
         base_limit = self._settings.per_user_per_hour
 
-        if user_id in self._settings.admin_user_ids:
+        if user_id in self._settings.admin_user_ids_list:
             telemetry.increment_counter("throttle.admin_bypass")
             data["throttle_passed"] = True
             return await handler(event, data)

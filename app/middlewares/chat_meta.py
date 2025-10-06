@@ -11,6 +11,8 @@ from app.services.redis_types import RedisLike
 from app.services.user_profile import UserProfileStore
 from app.services.fact_extractors import FactExtractor
 from app.services.monitoring.continuous_monitor import ContinuousMonitor
+from app.services.context import HybridSearchEngine, EpisodicMemoryStore
+from app.services.context.episode_monitor import EpisodeMonitor
 
 
 class ChatMetaMiddleware(BaseMiddleware):
@@ -24,6 +26,9 @@ class ChatMetaMiddleware(BaseMiddleware):
         gemini: GeminiClient,
         profile_store: UserProfileStore,
         fact_extractor: FactExtractor,
+        hybrid_search: HybridSearchEngine | None = None,
+        episodic_memory: EpisodicMemoryStore | None = None,
+        episode_monitor: EpisodeMonitor | None = None,
         continuous_monitor: ContinuousMonitor | None = None,
         redis_client: RedisLike | None = None,
     ) -> None:
@@ -33,6 +38,9 @@ class ChatMetaMiddleware(BaseMiddleware):
         self._gemini = gemini
         self._profile_store = profile_store
         self._fact_extractor = fact_extractor
+        self._hybrid_search = hybrid_search
+        self._episodic_memory = episodic_memory
+        self._episode_monitor = episode_monitor
         self._continuous_monitor = continuous_monitor
         self._redis = redis_client
         self._bot_username: str | None = None
@@ -64,6 +72,9 @@ class ChatMetaMiddleware(BaseMiddleware):
         data["gemini_client"] = self._gemini
         data["profile_store"] = self._profile_store
         data["fact_extractor"] = self._fact_extractor
+        data["hybrid_search"] = self._hybrid_search
+        data["episodic_memory"] = self._episodic_memory
+        data["episode_monitor"] = self._episode_monitor
         data["continuous_monitor"] = self._continuous_monitor
         if self._redis is not None:
             data["redis_client"] = self._redis

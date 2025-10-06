@@ -7,9 +7,9 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from aiogram import Router
+from aiogram import Bot, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import BotCommand, BotCommandScopeChat, Message
 
 from app.config import Settings
 from app.services.user_profile import UserProfileStore
@@ -17,6 +17,48 @@ from app.services import telemetry
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+# Command descriptions for bot menu
+PROFILE_COMMANDS = [
+    BotCommand(
+        command="gryagprofile",
+        description="Показати профіль користувача (свій або у відповідь)",
+    ),
+    BotCommand(
+        command="gryagfacts",
+        description="Список фактів про користувача (свої або у відповідь)",
+    ),
+    BotCommand(
+        command="gryagremovefact",
+        description="🔒 Видалити конкретний факт за ID (тільки адміни)",
+    ),
+    BotCommand(
+        command="gryagforget",
+        description="🔒 Видалити всі факти про користувача (тільки адміни, потребує підтвердження)",
+    ),
+    BotCommand(
+        command="gryagexport",
+        description="🔒 Експортувати профіль у JSON (тільки адміни)",
+    ),
+]
+
+
+async def setup_profile_commands(bot: Bot, chat_id: int) -> None:
+    """
+    Set up profile management commands in bot menu for a specific chat.
+
+    Args:
+        bot: Bot instance
+        chat_id: Chat ID to set commands for
+    """
+    try:
+        await bot.set_my_commands(
+            commands=PROFILE_COMMANDS, scope=BotCommandScopeChat(chat_id=chat_id)
+        )
+        logger.info(f"Profile commands registered for chat {chat_id}")
+    except Exception as e:
+        logger.warning(f"Failed to set profile commands for chat {chat_id}: {e}")
+
 
 # Store confirmation requests for /gryagforget
 _forget_confirmations: dict[str, tuple[int, int, float]] = (
@@ -26,7 +68,7 @@ _forget_confirmations: dict[str, tuple[int, int, float]] = (
 
 def _is_admin(user_id: int, settings: Settings) -> bool:
     """Check if user is an admin."""
-    return user_id in settings.admin_user_ids
+    return user_id in settings.admin_user_ids_list
 
 
 def _format_fact_type(fact_type: str) -> str:
@@ -238,7 +280,7 @@ async def cmd_facts(
 
     await message.reply(response, parse_mode="HTML")
     telemetry.increment_counter(
-        "profile_admin.facts_viewed", labels={"filtered": bool(fact_type_filter)}
+        "profile_admin.facts_viewed", filtered=str(bool(fact_type_filter))
     )
 
 
@@ -330,7 +372,7 @@ async def cmd_forget(
 
         await message.reply(f"🗑 Забув {count} фактів про користувача {user_id}.")
         telemetry.increment_counter(
-            "profile_admin.user_forgotten", labels={"fact_count": str(count)}
+            "profile_admin.user_forgotten", fact_count=str(count)
         )
         logger.info(
             f"Admin {admin_id} cleared {count} facts for user {user_id}",

@@ -292,4 +292,150 @@ CREATE INDEX IF NOT EXISTS idx_proactive_events_created
 CREATE INDEX IF NOT EXISTS idx_system_health_metric
     ON system_health(metric_name, timestamp);
 
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- Phase 1: Memory and Context Improvements - Foundation
+-- Added: October 6, 2025
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+-- Full-Text Search for keyword-based retrieval (complement to semantic search)
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    text,
+    content='messages',
+    content_rowid='id',
+    tokenize='porter unicode61'
+);
+
+-- Triggers to keep FTS in sync with messages table
+CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, text) VALUES (new.id, new.text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE ON messages BEGIN
+    UPDATE messages_fts SET text = new.text WHERE rowid = old.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
+    DELETE FROM messages_fts WHERE rowid = old.id;
+END;
+
+-- Message importance tracking for adaptive memory management
+CREATE TABLE IF NOT EXISTS message_importance (
+    message_id INTEGER PRIMARY KEY,
+    importance_score REAL NOT NULL DEFAULT 0.5,
+    access_count INTEGER DEFAULT 0,
+    last_accessed INTEGER,
+    retention_days INTEGER,
+    consolidated INTEGER DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_message_importance_score 
+    ON message_importance(importance_score DESC);
+CREATE INDEX IF NOT EXISTS idx_message_importance_retention 
+    ON message_importance(retention_days ASC);
+CREATE INDEX IF NOT EXISTS idx_message_importance_consolidated
+    ON message_importance(consolidated);
+
+-- Episodic memory for significant conversation events
+CREATE TABLE IF NOT EXISTS episodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    thread_id INTEGER,
+    topic TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    summary_embedding TEXT,  -- JSON array of floats
+    importance REAL DEFAULT 0.5,
+    emotional_valence TEXT CHECK(emotional_valence IN ('positive', 'negative', 'neutral', 'mixed')),
+    message_ids TEXT NOT NULL,  -- JSON array of message IDs
+    participant_ids TEXT NOT NULL,  -- JSON array of user IDs
+    tags TEXT,  -- JSON array of keywords/tags
+    created_at INTEGER NOT NULL,
+    last_accessed INTEGER,
+    access_count INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_episodes_chat ON episodes(chat_id, importance DESC);
+CREATE INDEX IF NOT EXISTS idx_episodes_created ON episodes(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_episodes_importance ON episodes(importance DESC);
+
+-- Episode access log (for importance adjustment)
+CREATE TABLE IF NOT EXISTS episode_accesses (
+    episode_id INTEGER NOT NULL,
+    accessed_at INTEGER NOT NULL,
+    access_type TEXT CHECK(access_type IN ('retrieval', 'reference', 'update')),
+    FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_episode_accesses ON episode_accesses(episode_id, accessed_at DESC);
+
+-- Fact relationships for knowledge graph construction
+CREATE TABLE IF NOT EXISTS fact_relationships (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fact1_id INTEGER NOT NULL,
+    fact2_id INTEGER NOT NULL,
+    relationship_type TEXT NOT NULL,
+    weight REAL DEFAULT 0.5,
+    inferred INTEGER DEFAULT 1,  -- 0 = explicit, 1 = inferred
+    evidence TEXT,  -- JSON metadata
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (fact1_id) REFERENCES user_facts(id) ON DELETE CASCADE,
+    FOREIGN KEY (fact2_id) REFERENCES user_facts(id) ON DELETE CASCADE,
+    UNIQUE (fact1_id, fact2_id, relationship_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fact_relationships_fact1 
+    ON fact_relationships(fact1_id, weight DESC);
+CREATE INDEX IF NOT EXISTS idx_fact_relationships_fact2 
+    ON fact_relationships(fact2_id, weight DESC);
+CREATE INDEX IF NOT EXISTS idx_fact_relationships_type
+    ON fact_relationships(relationship_type);
+
+-- Fact versions for temporal tracking
+CREATE TABLE IF NOT EXISTS fact_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fact_id INTEGER NOT NULL,
+    previous_version_id INTEGER,
+    version_number INTEGER NOT NULL,
+    change_type TEXT CHECK(change_type IN ('creation', 'reinforcement', 'evolution', 'correction', 'contradiction')),
+    confidence_delta REAL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (fact_id) REFERENCES user_facts(id) ON DELETE CASCADE,
+    FOREIGN KEY (previous_version_id) REFERENCES user_facts(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_fact_versions_fact 
+    ON fact_versions(fact_id, version_number);
+CREATE INDEX IF NOT EXISTS idx_fact_versions_previous 
+    ON fact_versions(previous_version_id);
+
+-- Fact clusters for topic-based organization
+CREATE TABLE IF NOT EXISTS fact_clusters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    chat_id INTEGER NOT NULL,
+    cluster_name TEXT NOT NULL,
+    fact_ids TEXT NOT NULL,  -- JSON array
+    centroid_embedding TEXT,  -- JSON array
+    coherence_score REAL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_fact_clusters_user 
+    ON fact_clusters(user_id, chat_id);
+CREATE INDEX IF NOT EXISTS idx_fact_clusters_coherence
+    ON fact_clusters(coherence_score DESC);
+
+-- Additional indexes for performance optimization
+CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_user_ts ON messages(user_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_chat_ts ON messages(chat_id, ts DESC);
+
+-- Context retrieval performance indexes
+CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role);
+CREATE INDEX IF NOT EXISTS idx_messages_embedding_not_null ON messages(embedding) WHERE embedding IS NOT NULL;
+
 

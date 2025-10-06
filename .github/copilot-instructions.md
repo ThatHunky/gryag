@@ -1,88 +1,259 @@
 ---
-description: AI rules derived by SpecStory from the project AI interaction history
+description: AI coding guide for gryag - Ukrainian Telegram bot with smart memory
 globs: *
 ---
 
-## Quick map
+## Architecture Overview
 
-- Entry point: `python -m app.main` (or script `gryag`) wires aiogram v3 dispatcher, applies middlewares, and starts long polling after purging pending updates.
-- Core layout: `app/handlers` for user and admin routers, `app/middlewares` for context+throttle wiring, `app/services` for persistence, Gemini, triggers, telemetry, and media support, with settings in `app/config.py`.
-- Root `main.py` exists only as a shim—always import/run through `app.main` to avoid stale code.
+**gryag** is a Telegram group bot with a sarcastic Ukrainian personality, powered by Google Gemini 2.5 Flash. It features multi-level context management, user profiling, episodic memory, and hybrid fact extraction (local LLM + regex patterns).
 
-## Message lifecycle
+**Tech stack**: aiogram v3, SQLite (with FTS5), optional Redis, Google Generative AI SDK, llama-cpp-python (optional local model)
 
-- `ChatMetaMiddleware` fetches bot identity once and injects `settings`, `ContextStore`, `GeminiClient`, and optional `redis_client` so handlers never instantiate dependencies themselves.
-- `ThrottleMiddleware` guards addressed traffic: it answers with `SNARKY_REPLY` when limits hit, sets `throttle_blocked`/`throttle_reason` in handler data, and records passes vs. blocks in telemetry.
-- `handlers.chat.handle_group_message` ignores small talk but caches it via `_remember_context_message`; addressed turns get fallback context, metadata, and media parts assembled before Gemini is called.
-- User turns are logged with embeddings (`ContextStore.add_turn`) before generation so throttle decisions are auditable even if Gemini fails.
-- Admin IDs from `settings.admin_user_ids` bypass bans and quotas; reuse `_is_admin` in `handlers.admin` for consistency.
+**Entry point**: `python -m app.main` or script `gryag`
 
-## Data & quotas
+- Root `main.py` is a **deprecated shim** - always use `app.main`
+- Main initializes all services and wires aiogram dispatcher with middlewares
 
-- Persistence is SQLite (`gryag.db`) managed by `ContextStore`; `init()` applies `db/schema.sql` and adds the `embedding` column if missing (keep docker volume mounted at `/app`).
-- Messages store `[meta]` payloads (see `format_metadata`) plus optional media JSON; `ContextStore.recent()` rebuilds Gemini-ready `parts`—use it instead of crafting history manually.
-- Semantic search uses cosine similarity over stored embeddings; always persist embeddings as JSON arrays of floats and expect `semantic_search` to cap candidates per chat/thread.
-- Rate limits log to `quotas` table and, if Redis is on, share the `gryag:quota:{chat_id}:{user_id}` namespace so `/gryagreset` can purge both stores.
+**Core directories**:
 
-## Gemini integration
+- `app/handlers/` - Message routers (chat, admin, profile_admin)
+- `app/middlewares/` - ChatMetaMiddleware (DI), ThrottleMiddleware (rate limiting)
+- `app/services/` - Business logic (context, gemini, user_profile, fact_extractors, media, tools)
+- `app/services/context/` - Multi-level context, hybrid search, episodic memory
+- `app/services/monitoring/` - Continuous monitoring, event system, message classification
+- `db/schema.sql` - **Single source of truth** for SQLite schema (FTS5, user profiles, episodes, fact graphs)
 
-- `GeminiClient.generate` wraps `google-generativeai` async API, handles safety settings, tool arbitration, system-instruction fallbacks, and a simple circuit breaker—propagate `GeminiError` so callers can send friendly fallbacks.
-- Media ingestion flows through `services.media.collect_media_parts`, then `GeminiClient.build_media_parts` base64-encodes content before embedding in the request.
-- Tooling: `search_messages_tool` returns JSON strings; additional tools should follow that pattern so `_handle_tools` can merge follow-up calls. Toggle Google Search Grounding via `ENABLE_SEARCH_GROUNDING`.
-- Embeddings are rate-limited with an async semaphore; prefer `gemini_client.embed_text` for all similarity work to reuse backoff logic.
+## Message Flow (Critical Path)
 
-## Persona & replies
+1. **Middleware injection** (`ChatMetaMiddleware`):
 
-- System persona in `app/persona.py` enforces a terse, sarcastic Ukrainian voice—inject it as `system_prompt` and never echo its raw text to users.
-- Reply wrappers in `handlers.chat` reuse constants like `ERROR_FALLBACK`, `EMPTY_REPLY`, `BANNED_REPLY`; extend this module when adding new canned responses.
-- Metadata-first user parts (`format_metadata`) must remain the first chunk for each turn so Gemini can reference chat/user IDs reliably.
+   - Fetches bot identity once, injects into handler data: `settings`, `store` (ContextStore), `gemini_client`, `profile_store`, `fact_extractor`, `hybrid_search`, `episodic_memory`, `episode_monitor`, `continuous_monitor`, optional `redis_client`
+   - **Never instantiate these services in handlers** - always use injected instances
 
-## Admin & moderation
+2. **Throttle check** (`ThrottleMiddleware`):
 
-- `/gryagban` and `/gryagunban` operate on message replies or numeric IDs; they refuse `@username` strings because Telegram lacks ID lookup without an extra call.
-- `/gryagreset` clears quotas in SQLite and, when Redis is active, scans `gryag:quota:{chat_id}:*` keys—reuse that prefix for any new quota-like data.
-- `ContextStore.should_send_notice` throttles how often throttle warnings fire; check it before emitting new rate-limit messages.
+   - Adaptive rate limiting (base + dynamic adjustment based on user behavior)
+   - Uses Redis if available, falls back to SQLite `quotas` table
+   - Admins (from `ADMIN_USER_IDS`) bypass all limits
+   - Sets `throttle_blocked`/`throttle_reason` in handler data
+   - Replies with `SNARKY_REPLY` when limit hit (once per hour via `should_send_notice`)
 
-## Dev workflows
+3. **Message classification** (`handlers.chat.handle_group_message`):
 
-- Local setup: create a venv, `pip install -r requirements.txt`, copy `.env.example`, fill in `TELEGRAM_TOKEN` + `GEMINI_API_KEY`, then `python -m app.main`. Docker path: `docker-compose up bot` (installs deps each boot).
-- Set `LOGLEVEL=DEBUG` to see telemetry counters emitted via `app.services.telemetry`; use `telemetry.snapshot()` in REPLs for quick sanity checks.
-- SQLite file is created automatically; delete `gryag.db` to reset chat history. Redis is optional—set `USE_REDIS=true` and ensure the URL resolves before boot.
-- No formal tests exist; exercise flows against a staging chat and inspect counters/logs when validating behaviour.
+   - **All messages** processed by `continuous_monitor.process_message()` for learning
+   - **Unaddressed messages**: cached via `_remember_context_message()` for fallback context (5 messages per chat/thread in-memory TTL cache)
+   - **Addressed messages** (mentions, replies, `/gryag`): proceed to generation
 
-## Extending patterns
+4. **Context assembly** (when `ENABLE_MULTI_LEVEL_CONTEXT=true`):
 
-- Add new routers under `app/handlers` and register them in `app/main.py`; rely on middleware-injected deps instead of creating new clients in handlers.
-- When introducing new stored fields, update `db/schema.sql` and extend `ContextStore.init()` to backfill or `ALTER TABLE`, keeping migrations idempotent for Docker volume reuse.
-- Expand media support via `services.media.collect_media_parts`; return dicts with `bytes`, `mime`, and a descriptive `kind` so `build_media_parts` just works.
-- For new telemetry, call `telemetry.increment_counter` with clear labels; DEBUG logs render counters as structured extras for scraping.
+   - Uses `MultiLevelContextManager.build_context()` to assemble 5 layers:
+     - **Immediate** (last 5 messages) - always included
+     - **Recent** (last 30 messages) - recent conversation flow
+     - **Relevant** (10 hybrid-search results) - semantic + keyword + temporal
+     - **Background** (user profile summary) - facts about the user
+     - **Episodic** (3 similar past episodes) - significant past conversations
+   - Token budget: 8000 tokens default (`CONTEXT_TOKEN_BUDGET`)
+   - Formats into Gemini-ready history + system context string
+   - **Fallback**: Simple history via `store.recent()` if multi-level fails
 
-## Docs, repo organization, and agent behavior
+5. **User turn persistence**:
 
-This repository adopts a small, consistent docs layout under `docs/` and keeps a concise top-level `README.md` for quick setup. Automated agents and humans should follow these conventions when creating, moving, or editing documentation:
+   - `store.add_turn()` **before** Gemini call (for audit trail even on API failures)
+   - Stores: text, media JSON, metadata (`format_metadata`), embedding (768-dim vector as JSON array)
+   - Embedding via `gemini_client.embed_text()` (rate-limited semaphore)
 
-- Recommended docs tree under `docs/`:
+6. **Gemini generation**:
 
-  - `docs/overview/` — high-level project and architecture overviews (e.g. `PROJECT_OVERVIEW.md`).
-  - `docs/plans/` — technical plans and roadmaps (`IMPLEMENTATION_PLAN_SUMMARY.md`, `INTELLIGENT_CONTINUOUS_LEARNING_PLAN.md`).
-  - `docs/phases/` — phase-level status and test guides (`PHASE_*_COMPLETE.md`).
-  - `docs/features/` — feature specs and design notes (`USER_PROFILING_PLAN.md`, `LOCAL_FACT_EXTRACTION_PLAN.md`).
-  - `docs/guides/` — operational guides and runbooks (`TOOL_LOGGING_GUIDE.md`).
-  - `docs/history/` — optional archived notes or exports (keep small).
+   - `gemini_client.generate()` with system prompt, history, user parts, tools
+   - Tools: `search_messages`, `calculator`, `weather`, `currency`, `polls` (all return JSON strings)
+   - Google Search Grounding (if `ENABLE_SEARCH_GROUNDING=true`) - 500 req/day limit
+   - Circuit breaker: 3 failures → 60s cooldown
+   - Safety settings: `BLOCK_NONE` for all categories
 
-- When reorganizing docs:
+7. **Response cleaning**:
 
-  - Create or update `docs/README.md` describing the change and listing moved/added files.
-  - Prefer `git mv` for renames to preserve history. If moving without `git mv`, add a brief redirect note in the original file pointing to the new path.
-  - Preserve relative links inside moved files and update cross-links where necessary.
-  - If many files are touched in one commit, add a `docs/CHANGELOG.md` entry summarizing the edits.
+   - `_clean_response_text()` strips `[meta]` blocks, technical IDs, extra whitespace
+   - `_escape_markdown()` removes formatting chars (bot persona forbids markdown)
+   - Truncate to 4096 chars (Telegram limit)
 
-- Guidance for automated agents editing docs/code:
-  - Read `AGENTS.md` at the repo root first — it contains the short contract for doc edits and migration rules.
-  - Make minimal, targeted edits. Avoid bulk rewrites unless explicitly requested by a maintainer.
-  - Preserve the original author's voice and technical intent when possible.
-  - When adding new documentation, include a short "How to verify" section with simple commands or expected outcomes.
+8. **Background tasks**:
+   - User profiling (`_update_user_profile_background()`) - fire-and-forget asyncio task
+   - Episode tracking (`episode_monitor.track_message()`) - for automatic episode creation
+   - Model turn persistence (`store.add_turn()` for bot's response)
 
-These guidelines keep the repository organized and make human review easier.
+## Data Layer Conventions
 
-Note: On 2025-10-02 many top-level documentation files were reorganized into the `docs/` tree. See `docs/CHANGELOG.md` for the full list and verification steps.
+**SQLite (`gryag.db`)** via `ContextStore`:
+
+- Schema applied via `db/schema.sql` in `init()` - **always edit schema.sql**, not raw queries
+- `messages` table: chat_id, thread_id, user_id, role, text, media (JSON), embedding (JSON array), ts
+- `messages_fts` virtual table (FTS5) for keyword search - **auto-synced via triggers**
+- `user_facts` table: fact_type, fact_key, fact_value, confidence, evidence_text
+- `episodes` table: topic, summary, summary_embedding, importance, message_ids (JSON), participant_ids (JSON)
+- Retention: 30 days default (`RETENTION_DAYS`), adaptive for important messages
+
+**Metadata format** (`format_metadata`):
+
+- Compact string: `[meta] chat_id=123 user_id=456 name="Alice" reply_to_message_id=789`
+- **Always first part** in user message for Gemini context
+- Sanitized (no newlines, quotes escaped, truncated to 50 chars per value)
+- **Never echo metadata in responses** - cleaned via `_clean_response_text()`
+
+**Embeddings**:
+
+- Model: `text-embedding-004` (768 dimensions)
+- Stored as JSON arrays: `"[0.123, -0.456, ...]"`
+- Cosine similarity for semantic search (dot product of normalized vectors)
+- Rate-limited via `gemini_client._embed_semaphore` (8 concurrent)
+
+**Redis (optional)**:
+
+- Namespace: `gryag:quota:{chat_id}:{user_id}` (sorted sets with timestamps)
+- Only for throttling - SQLite remains source of truth for history
+- Admin commands like `/gryagreset` clear both Redis and SQLite
+
+## User Profiling & Fact Extraction
+
+**Hybrid extraction** (`FACT_EXTRACTION_METHOD=hybrid`, recommended):
+
+1. **Rule-based** (instant, 70% coverage): Regex patterns in `services/fact_extractors/patterns/`
+   - Location: "я з Києва", "я живу в..."
+   - Language: "я вивчаю англійську", multilingual detection
+   - Skills: "я програміст", "я вмію малювати"
+2. **Local model** (100-500ms, 85% coverage): Phi-3-mini-4k-instruct (llama.cpp)
+   - Path: `LOCAL_MODEL_PATH=models/phi-3-mini-q4.gguf`
+   - Threads: `LOCAL_MODEL_THREADS=4` (tune for CPU)
+   - Download: `bash download_model.sh` (~2.2GB)
+3. **Gemini fallback** (if `ENABLE_GEMINI_FALLBACK=true`): For complex cases
+
+**Fact storage**:
+
+- Deduplication via `fact_quality_metrics` table (semantic similarity)
+- Confidence threshold: 0.7 default (`FACT_CONFIDENCE_THRESHOLD`)
+- Max facts per user: 100 (`MAX_FACTS_PER_USER`)
+- Versioning via `fact_versions` table (tracks changes: creation, reinforcement, evolution, correction, contradiction)
+
+**Profile summarization** (optional, `ENABLE_PROFILE_SUMMARIZATION=true`):
+
+- Runs at 3 AM daily (`PROFILE_SUMMARIZATION_HOUR=3`)
+- Batch size: 30 profiles/run (`PROFILE_SUMMARIZATION_BATCH_SIZE=30`)
+- Generates natural language summaries via Gemini
+
+## Persona & Voice
+
+**System prompt** (`app/persona.py`):
+
+- Terse, sarcastic, Ukrainian by default
+- Black humor, no political correctness
+- **Never use markdown** (bold/italic forbidden)
+- **Never echo metadata** or technical details to users
+
+**Canned responses** (in `handlers/chat.py`):
+
+- `ERROR_FALLBACK` - "Ґеміні знову тупить..."
+- `EMPTY_REPLY` - "Скажи конкретніше..."
+- `BANNED_REPLY` - "Ти для гряга в бані..."
+- `SNARKY_REPLY` (throttle) - "Пригальмуй, балакучий..."
+
+## Testing & Development
+
+**Run tests**: `make test` or `pytest tests/`
+
+- Unit tests: `tests/unit/` (fast, mocked)
+- Integration tests: `tests/integration/` (require SQLite, slower)
+- Test fixtures in `tests/conftest.py` (async DB fixture, settings)
+- Async tests via `pytest-asyncio` (auto mode in `pyproject.toml`)
+
+**Run locally**:
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env  # Fill TELEGRAM_TOKEN, GEMINI_API_KEY
+python -m app.main
+```
+
+**Docker**: `docker-compose up bot`
+
+- Volume mount: `/app` (for `gryag.db` persistence)
+- Redis: Optional service in `docker-compose.yml`
+
+**Logging**:
+
+- `LOGLEVEL=DEBUG` for verbose output
+- Telemetry counters via `app.services.telemetry.increment_counter()`
+- Resource monitoring (if psutil installed): CPU/memory pressure warnings
+
+**Database inspection**:
+
+```bash
+sqlite3 gryag.db
+.tables  # List all tables
+SELECT * FROM user_facts ORDER BY created_at DESC LIMIT 10;
+SELECT * FROM episodes ORDER BY importance DESC LIMIT 5;
+```
+
+## Extending Patterns
+
+**Add a new handler**:
+
+1. Create router in `app/handlers/new_feature.py`
+2. Register in `app/main.py`: `dispatcher.include_router(new_feature_router)`
+3. Use middleware-injected services (never instantiate clients)
+
+**Add a new tool for Gemini**:
+
+1. Define in `app/services/new_tool.py`: function + `NEW_TOOL_DEFINITION` dict (JSON schema)
+2. Add to `tool_definitions` list in `handlers/chat.handle_group_message`
+3. Add callback to `tool_callbacks` dict
+4. **Always return JSON strings** (for consistency with existing tools)
+
+**Schema changes**:
+
+1. Edit `db/schema.sql` (single source of truth)
+2. Add migration logic in `ContextStore.init()` (idempotent `ALTER TABLE` with try/except)
+3. Test with fresh DB: `rm gryag.db && python -m app.main`
+4. Document in `docs/CHANGELOG.md`
+
+**Add a new fact pattern** (rule-based extraction):
+
+1. Add regex in `app/services/fact_extractors/patterns/ukrainian.py` or `english.py`
+2. Test in `tests/unit/test_fact_extractors.py`
+3. Pattern format: `(pattern, fact_type, fact_key_template, confidence)`
+
+## Documentation Rules (see AGENTS.md)
+
+- **Read `AGENTS.md` first** - short contract for automated edits
+- Docs live in `docs/` (overview, plans, phases, features, guides, history)
+- Use `git mv` for renames to preserve history
+- Update `docs/README.md` with one-line summary + verification step
+- Multi-file changes: add `docs/CHANGELOG.md` entry
+- Preserve original author's voice and technical intent
+- Include "How to verify" section in new docs
+
+**Top-level markdown files** (only these allowed at root):
+
+- `README.md` - Quick start, features, setup
+- `AGENTS.md` - Rules for automated code/doc edits
+- `.github/copilot-instructions.md` (this file)
+
+## Common Pitfalls
+
+1. **Don't use `main.py`** at repo root - it's deprecated, use `app.main`
+2. **Don't instantiate services in handlers** - use middleware-injected instances
+3. **Don't craft Gemini history manually** - use `ContextStore.recent()` or `MultiLevelContextManager`
+4. **Don't forget to clean metadata** from Gemini responses via `_clean_response_text()`
+5. **Don't skip embedding persistence** - needed for semantic search and episodic memory
+6. **Don't add schema changes outside `db/schema.sql`** - migrations go in `ContextStore.init()`
+7. **Don't bypass throttle checks** - admins use `admin_user_ids_list`, not manual bypasses
+8. **Don't echo persona/metadata to users** - system prompts are internal only
+
+## Phase Status (as of Oct 2025)
+
+✅ **Phase 1-2**: FTS5, hybrid search, episodic memory, fact graphs
+✅ **Phase 3**: Multi-level context manager (5 layers, <500ms)
+✅ **Phase 4.1**: Episode boundary detection (semantic, temporal, topic signals)
+🚧 **Phase 4.2**: Automatic episode creation (in progress)
+📋 **Phase 5-6**: Adaptive memory consolidation, fact graph expansion
+
+See `docs/phases/` for detailed completion reports and `docs/plans/MEMORY_AND_CONTEXT_IMPROVEMENTS.md` for roadmap.

@@ -1,0 +1,97 @@
+name: CI
+
+on:
+    push:
+        branches: [main, develop]
+    pull_request:
+        branches: [main]
+
+jobs:
+    test:
+        runs-on: ubuntu-latest
+
+        strategy:
+            matrix:
+                python-version: ["3.11", "3.12"]
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Set up Python ${{ matrix.python-version }}
+              uses: actions/setup-python@v5
+              with:
+                  python-version: ${{ matrix.python-version }}
+                  cache: "pip"
+
+            - name: Install dependencies
+              run: |
+                  python -m pip install --upgrade pip
+                  pip install -r requirements.txt
+                  pip install -r requirements-dev.txt
+
+            - name: Run linters
+              run: |
+                  black --check app/ tests/
+                  ruff check app/ tests/
+                  isort --check-only app/ tests/
+
+            - name: Run type checker
+              run: |
+                  mypy app/ --ignore-missing-imports
+              continue-on-error: true # Don't fail on mypy errors initially
+
+            - name: Run tests
+              run: |
+                  pytest tests/ -v --cov=app --cov-report=xml --cov-report=term
+
+            - name: Upload coverage to Codecov
+              uses: codecov/codecov-action@v3
+              with:
+                  file: ./coverage.xml
+                  flags: unittests
+                  name: codecov-umbrella
+                  fail_ci_if_error: false
+
+    security:
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
+
+            - name: Install dependencies
+              run: |
+                  python -m pip install --upgrade pip
+                  pip install safety bandit
+
+            - name: Run safety check
+              run: |
+                  pip freeze | safety check --stdin
+              continue-on-error: true
+
+            - name: Run bandit security check
+              run: |
+                  bandit -r app/ -f json -o bandit-report.json
+              continue-on-error: true
+
+    docker:
+        runs-on: ubuntu-latest
+        needs: test
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v3
+
+            - name: Build Docker image
+              run: |
+                  docker build -t gryag:${{ github.sha }} .
+
+            - name: Test Docker image
+              run: |
+                  docker run --rm gryag:${{ github.sha }} python -c "import app; print('OK')"

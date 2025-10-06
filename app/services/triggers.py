@@ -5,7 +5,13 @@ from typing import Iterable
 
 from aiogram.types import Message, MessageEntity
 
-_TRIGGER_PATTERN = re.compile(r"\b(?:гряг|gryag)\b", re.IGNORECASE)
+# Match all grammatical forms of гряг/gryag:
+# - гряг, гряга, грягу, грягом, грязі, гряже, etc.
+# - gryag, gryaga, gryagu, gryagom, etc.
+# - гряґ and variations with apostrophe
+_TRIGGER_PATTERN = re.compile(
+    r"\b(?:гр[яи]г[аоуеєіїюяьґ]*|gr[yi]ag\w*)\b", re.IGNORECASE | re.UNICODE
+)
 
 
 def _contains_keyword(text: str | None) -> bool:

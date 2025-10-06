@@ -6,11 +6,12 @@ from typing import Any, Optional
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.types import BotCommand
 
 from app.config import get_settings
-from app.handlers.admin import router as admin_router
+from app.handlers.admin import router as admin_router, ADMIN_COMMANDS
 from app.handlers.chat import router as chat_router
-from app.handlers.profile_admin import router as profile_admin_router
+from app.handlers.profile_admin import router as profile_admin_router, PROFILE_COMMANDS
 from app.middlewares.chat_meta import ChatMetaMiddleware
 from app.middlewares.throttle import ThrottleMiddleware
 from app.services.context_store import ContextStore
@@ -24,11 +25,35 @@ from app.services.resource_optimizer import (
     periodic_optimization_check,
 )
 from app.services.monitoring.continuous_monitor import ContinuousMonitor
+from app.services.context import HybridSearchEngine, EpisodicMemoryStore
+from app.services.context.episode_boundary_detector import EpisodeBoundaryDetector
+from app.services.context.episode_monitor import EpisodeMonitor
+from app.services.context.episode_summarizer import EpisodeSummarizer
 
 try:  # Optional dependency
     import redis.asyncio as redis
 except ImportError:  # pragma: no cover - redis optional.
     redis = None  # type: ignore
+
+
+async def setup_bot_commands(bot: Bot) -> None:
+    """Set up bot commands with descriptions for the command menu."""
+    all_commands = (
+        [
+            BotCommand(
+                command="gryag",
+                description="Запитати бота (альтернатива @mention або reply)",
+            ),
+        ]
+        + ADMIN_COMMANDS
+        + PROFILE_COMMANDS
+    )
+
+    try:
+        await bot.set_my_commands(commands=all_commands)
+        logging.info(f"Bot commands registered: {len(all_commands)} commands")
+    except Exception as e:
+        logging.warning(f"Failed to set bot commands: {e}")
 
 
 async def main() -> None:
@@ -69,6 +94,51 @@ async def main() -> None:
     # Initialize profile summarization (Phase 2)
     profile_summarizer = ProfileSummarizer(settings, profile_store, gemini_client)
     await profile_summarizer.start()
+
+    # Phase 3: Initialize hybrid search and episodic memory
+    hybrid_search = HybridSearchEngine(
+        db_path=settings.db_path,
+        gemini_client=gemini_client,
+        settings=settings,
+    )
+
+    episodic_memory = EpisodicMemoryStore(
+        db_path=settings.db_path,
+        gemini_client=gemini_client,
+        settings=settings,
+    )
+    await episodic_memory.init()
+
+    logging.info(
+        "Multi-level context services initialized",
+        extra={
+            "hybrid_search": True,
+            "episodic_memory": True,
+        },
+    )
+
+    # Phase 4: Initialize episode boundary detector and monitor
+    episode_boundary_detector = EpisodeBoundaryDetector(
+        db_path=settings.db_path,
+        settings=settings,
+        gemini_client=gemini_client,
+    )
+
+    episode_monitor = EpisodeMonitor(
+        db_path=settings.db_path,
+        settings=settings,
+        gemini_client=gemini_client,
+        episodic_memory=episodic_memory,
+        boundary_detector=episode_boundary_detector,
+        summarizer=EpisodeSummarizer(settings=settings, gemini_client=gemini_client),
+    )
+
+    # Start background monitoring if enabled
+    if settings.auto_create_episodes:
+        await episode_monitor.start()
+        logging.info("Episode monitoring started")
+    else:
+        logging.info("Episode monitoring disabled (AUTO_CREATE_EPISODES=false)")
 
     # Phase 1+: Initialize continuous monitoring system
     continuous_monitor = ContinuousMonitor(
@@ -171,6 +241,9 @@ async def main() -> None:
             gemini_client,
             profile_store,
             fact_extractor,
+            hybrid_search=hybrid_search,
+            episodic_memory=episodic_memory,
+            episode_monitor=episode_monitor,
             continuous_monitor=continuous_monitor,
             redis_client=redis_client,
         )
@@ -183,10 +256,18 @@ async def main() -> None:
     dispatcher.include_router(profile_admin_router)
     dispatcher.include_router(chat_router)
 
+    # Setup bot commands with descriptions
+    await setup_bot_commands(bot)
+
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await dispatcher.start_polling(bot, skip_updates=True)
     finally:
+        # Cleanup: Stop episode monitoring
+        if settings.auto_create_episodes:
+            await episode_monitor.stop()
+            logging.info("Episode monitoring stopped")
+
         # Cleanup: Stop continuous monitoring
         await continuous_monitor.stop()
         logging.info("Continuous monitoring stopped")

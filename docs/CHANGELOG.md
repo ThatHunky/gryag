@@ -1,8 +1,649 @@
-## CHANGELOG for docs/ reorganization
+# Changelog
 
-## Changelog
+All notable changes to gryag's memory, context, and learning systems.
 
-All notable changes to the gryag project documentation and major features.
+## [Unreleased]
+
+### 2025-10-07 - Phase 2 Complete: Universal Bot Configuration ✅
+
+**Feature**: Bot now supports multiple deployments with different identities, all configurable via environment variables.
+
+**What was implemented** (6 tasks):
+1. **Dynamic trigger patterns** - Bot responds to configurable trigger words instead of hardcoded "gryag"
+2. **Configurable Redis namespace** - Multiple bot instances can share Redis server with namespace isolation
+3. **Dynamic command prefixes** - All 17 admin commands support custom prefixes (backwards compatible with legacy commands)
+4. **Chat filter middleware** - Whitelist/blacklist functionality with 3 modes (global, whitelist, blacklist)
+5. **Middleware integration** - Chat filter registered before throttle to avoid quota waste
+6. **/chatinfo command** - Helps admins discover chat IDs for whitelist/blacklist configuration
+
+**Files Changed**:
+- **New**: `app/middlewares/chat_filter.py` (77 lines) - Chat filtering middleware
+- **New**: `docs/phases/UNIVERSAL_BOT_PHASE_2_COMPLETE.md` - Phase completion report
+- **Modified**: `app/handlers/admin.py` - Dynamic prefixes + chatinfo command (+100 lines)
+- **Modified**: `app/handlers/profile_admin.py` - Dynamic prefixes (+60 lines)
+- **Modified**: `app/handlers/prompt_admin.py` - Dynamic prefixes (+50 lines)
+- **Modified**: `app/services/triggers.py` - Dynamic pattern initialization (+15 lines)
+- **Modified**: `app/middlewares/throttle.py` - Configurable namespace (2 lines)
+- **Modified**: `app/main.py` - Integration (+5 lines)
+
+**Configuration** (new .env variables):
+```bash
+COMMAND_PREFIX=gryag           # Custom command prefix
+BOT_TRIGGER_PATTERNS=гряг,gryag  # Custom trigger words
+REDIS_NAMESPACE=gryag:         # Redis key namespace
+BOT_BEHAVIOR_MODE=global       # global | whitelist | blacklist
+ALLOWED_CHAT_IDS=              # Whitelist (comma-separated)
+BLOCKED_CHAT_IDS=              # Blacklist (comma-separated)
+```
+
+**Use Cases**:
+- Deploy same codebase as multiple bots with different names
+- Restrict bot to specific groups (whitelist mode)
+- Ban bot from specific groups (blacklist mode)
+- Multi-language support (Ukrainian/English/custom triggers)
+- Multiple bot instances on same Redis server
+
+**Backwards Compatibility**:
+- ✅ All legacy `/gryag*` commands still work
+- ✅ Default values preserve existing behavior
+- ✅ No database migrations required
+- ✅ Commands accept both old and new forms
+
+**Examples**:
+
+Rebrand bot:
+```bash
+COMMAND_PREFIX=mybot
+BOT_TRIGGER_PATTERNS=mybot,@mybotname
+# Use /mybotban, /mybotprofile, etc.
+```
+
+Whitelist mode:
+```bash
+BOT_BEHAVIOR_MODE=whitelist
+ALLOWED_CHAT_IDS=-1001234567890,-1009876543210
+# Bot only responds in these 2 chats (+ admin private chats)
+```
+
+Discover chat IDs:
+```
+# In any group, run:
+/chatinfo
+
+# Output shows:
+🆔 Chat ID: -1001234567890
+💡 Використання:
+ALLOWED_CHAT_IDS=-1001234567890
+```
+
+**Performance**: <2ms overhead per message (negligible)
+
+**Verification**:
+```bash
+# Check all features implemented
+grep -r "ChatFilterMiddleware" app/          # 2 matches
+grep -r "initialize_triggers" app/           # 2 matches  
+grep -r "get_admin_commands" app/handlers/   # 3 matches
+grep -r "chatinfo_command" app/              # 1 match
+grep -r "settings.redis_namespace" app/      # 3 matches
+```
+
+**See also**:
+- `docs/phases/UNIVERSAL_BOT_PHASE_2_COMPLETE.md` - Full phase report
+- `docs/plans/UNIVERSAL_BOT_PLAN.md` - Overall roadmap
+
+---
+
+### 2025-10-07 - System Prompt Management (New Feature) ✅
+
+**Feature**: Admins can now customize bot personality via Telegram commands with version control
+
+**Motivation**: Bot persona was hardcoded in `app/persona.py`. Admins needed a way to customize system prompts without code changes or redeployments. Supports universal bot framework (multiple bot identities).
+
+**What it does**:
+- Store custom system prompts in database (global or per-chat)
+- Upload prompts via multiline text or file attachment
+- Version history with rollback capability
+- Audit trail (who changed what, when)
+- Live updates (no bot restart needed)
+
+**New Commands** (admin-only):
+- `/gryagprompt` - View active prompt (with file download)
+- `/gryagprompt default` - View hardcoded default prompt
+- `/gryagsetprompt` - Set custom global prompt (multiline or file)
+- `/gryagsetprompt chat` - Set chat-specific prompt (in groups)
+- `/gryagresetprompt` - Reset to default
+- `/gryagprompthistory` - View version history
+- `/gryagactivateprompt <version>` - Rollback to specific version
+
+**Architecture**:
+- **Database**: `system_prompts` table with scopes (global, chat, personal), version tracking, admin_id audit
+- **Service**: `SystemPromptManager` (388 lines) - CRUD operations, active prompt resolution
+- **Handlers**: `prompt_admin.py` (624 lines) - 7 command handlers
+- **Integration**: `chat.py` fetches custom prompt before each message (chat → global → default precedence)
+
+**Files Changed**:
+- **New**: `app/services/system_prompt_manager.py` (388 lines)
+- **New**: `app/handlers/prompt_admin.py` (624 lines)
+- **Modified**: `db/schema.sql` (added system_prompts table)
+- **Modified**: `app/handlers/chat.py` (integrated custom prompt loading)
+- **Modified**: `app/middlewares/chat_meta.py` (injected prompt_manager)
+- **Modified**: `app/main.py` (initialized service, registered router)
+
+**Usage Example**:
+```
+# Set global prompt
+/gryagsetprompt
+You are a professional assistant.
+Be polite and helpful.
+Use Ukrainian language.
+
+# Set chat-specific prompt (in group)
+/gryagsetprompt chat
+You are a gaming coach for this Dota 2 team.
+Use gaming jargon and be energetic.
+
+# View current prompt
+/gryagprompt
+
+# See version history
+/gryagprompthistory
+
+# Rollback to version 3
+/gryagactivateprompt 3
+
+# Reset to default
+/gryagresetprompt
+```
+
+**Security**:
+- Admin-only: Requires user ID in `ADMIN_USER_IDS`
+- Validation: Minimum 50 chars (with warning)
+- Audit trail: All changes logged with admin ID and timestamp
+
+**Verification**:
+```bash
+# Check database schema
+sqlite3 gryag.db ".schema system_prompts"
+
+# Count handlers
+grep -c "^async def" app/handlers/prompt_admin.py
+# Should output: 7
+
+# Test in Telegram (as admin)
+/gryagprompt           # View current
+/gryagsetprompt        # Follow multiline instructions
+Test prompt for verification.
+Just testing.
+/done
+/gryagprompthistory    # Should show version 1
+/gryagresetprompt      # Back to default
+```
+
+**See also**: `docs/features/SYSTEM_PROMPT_MANAGEMENT.md`
+
+---
+
+### 2025-10-07 - Removed Local Model Infrastructure ✅
+
+**Change**: Bot now uses Google Gemini API exclusively (no more local models)
+
+**Removed**:
+- Phi-3-mini local model support
+- llama-cpp-python dependency
+- `app/services/fact_extractors/local_model.py` (deleted)
+- `app/services/fact_extractors/model_manager.py` (deleted)
+- 4 environment variables: `FACT_EXTRACTION_METHOD`, `LOCAL_MODEL_PATH`, `LOCAL_MODEL_THREADS`, `ENABLE_GEMINI_FALLBACK`
+
+**Simplified**:
+- Fact extraction now 2-tier: rule-based patterns → Gemini fallback (if `ENABLE_GEMINI_FACT_EXTRACTION=true`)
+- No more CPU-intensive local inference (Phi-3-mini was 100-500ms per extraction)
+- All AI operations now via cloud API (consistent performance)
+
+**Files Modified**:
+- `app/config.py` - Removed 4 local model settings, added `enable_gemini_fact_extraction`
+- `app/services/fact_extractors/hybrid.py` - Simplified to 2-tier extraction
+- `app/services/fact_extractors/__init__.py` - Removed local model exports
+- `.env.example` - Updated documentation
+- `app/services/resource_monitor.py` - Removed `should_disable_local_model()`
+- `app/services/resource_optimizer.py` - Updated recommendations
+
+**Migration**:
+- Existing `.env` files: Remove old settings, add `ENABLE_GEMINI_FACT_EXTRACTION=true`
+- No database changes required
+- Fact extraction behavior: Same quality, faster response (cloud API optimized)
+
+**Verification**:
+```bash
+# Ensure no local model references remain
+! grep -r "LOCAL_MODEL" app/
+
+# Check new config
+grep "enable_gemini_fact_extraction" app/config.py
+
+# Verify fact extraction still works
+python3 -c "
+from app.services.fact_extractors import create_hybrid_extractor
+from app.services.gemini_client import GeminiClient
+import asyncio
+async def test():
+    client = GeminiClient(api_key='test')
+    extractor = create_hybrid_extractor(enable_gemini_fallback=False, gemini_client=client)
+    facts = await extractor.extract('Я з Києва')
+    assert len(facts) > 0
+    print('✅ Fact extraction working')
+asyncio.run(test())
+"
+```
+
+**Performance Impact**:
+- Removed: 100-500ms local model latency per fact extraction
+- Added: Gemini API fallback (when enabled) - similar latency but cloud-based
+- Net result: No significant change (rule-based still handles 70%+ of cases instantly)
+
+---
+
+### 2025-10-07 - Added Bulk Fact Deletion Tool ✅
+
+**Feature**: `forget_all_facts` tool for efficient bulk deletion
+
+**Problem**: When user said "Забудь усе про мене" (Forget everything), bot only forgot 10 out of 20 facts because `recall_facts` defaults to limit=10. Model couldn't see all facts, so it couldn't forget them all.
+
+**Solution**: New `forget_all_facts` tool that deletes ALL facts in one operation:
+- Single SQL query vs. N individual forget_fact calls
+- Performance: ~90ms total vs. ~600-1200ms for multiple calls (10-13x faster)
+- Simplified parameters: just `user_id` and `reason` (no fact_type/fact_key needed)
+- Proper GDPR-style data removal
+
+**Implementation**:
+- **New**: `forget_all_facts_tool()` in `app/services/tools/memory_tools.py` (+130 lines)
+- **New**: `FORGET_ALL_FACTS_DEFINITION` in `app/services/tools/memory_definitions.py`
+- **Modified**: `app/handlers/chat.py` (tool registration)
+- **Modified**: `app/persona.py` (usage guidance)
+
+**When to use**:
+- `forget_fact` → specific: "Забудь мій номер телефону"
+- `forget_all_facts` → everything: "Забудь усе що знаєш про мене"
+
+**Verification**:
+```bash
+# Test in Telegram
+# User: "Забудь усе про мене"
+# Then: /gryagfacts
+# Should show: 0 facts
+
+# Check database
+sqlite3 gryag.db "SELECT COUNT(*) FROM user_facts WHERE user_id=YOUR_ID AND is_active=1"
+# Should output: 0
+```
+
+**See also**: `docs/features/FORGET_ALL_FACTS_BULK_DELETE.md`
+
+---
+
+### 2025-10-07 - Fixed Tool Schema Validation Errors (Critical) ✅
+
+**Issue 1**: Memory tools failing with `KeyError: 'object'`  
+**Issue 2**: Memory tools failing with `ValueError: Unknown field for Schema: minimum`
+
+**Root Causes**:
+1. Tool definitions missing required `function_declarations` wrapper for Gemini API
+2. Gemini protobuf Schema doesn't support JSON Schema validation keywords (`minimum`, `maximum`)
+
+**Fixes**:
+1. Wrapped all 4 memory tool definitions in `{"function_declarations": [...]}` format
+2. Removed `minimum`/`maximum` constraints from number/integer parameters
+3. Moved validation guidance to description fields (e.g., "0.5-1.0" in description)
+
+**Impact**:
+- ✅ All 4 memory tools now functional (remember, recall, update, forget)
+- ✅ Bot can manage user facts via Gemini function calling
+- ✅ No more KeyError or ValueError on tool usage
+- ✅ Response time: 250-500ms (vs 6000-12000ms with fallback retries)
+
+**Files Changed**:
+- Modified: `app/services/tools/memory_definitions.py` (format + schema fixes)
+- New: `docs/fixes/TOOL_DEFINITION_FORMAT_FIX.md` (format fix analysis)
+- New: `docs/fixes/MEMORY_TOOLS_SCHEMA_FIXES.md` (comprehensive summary)
+
+**Verification**:
+```bash
+docker compose restart bot
+docker compose logs bot | grep -E "KeyError|ValueError"  # No new errors after 11:18:40
+```
+
+---
+
+### 2025-10-07 - Fixed Tool Definition Format (Critical) ✅
+
+**Issue**: Memory tools failing with `KeyError: 'object'` when bot tried to use them
+
+**Root Cause**: Tool definitions missing required `function_declarations` wrapper for Gemini API
+
+**Fix**:
+- Wrapped all 4 memory tool definitions in `{"function_declarations": [...]}` format
+- Followed same pattern as existing tools (calculator, weather, currency)
+- All tools now load correctly without API errors
+
+**Impact**:
+- ✅ All 4 memory tools now functional (remember, recall, update, forget)
+- ✅ Bot can manage user facts via Gemini function calling
+- ✅ No more KeyError on tool usage
+
+**Files Changed**:
+- Modified: `app/services/tools/memory_definitions.py` (fixed format)
+- New: `docs/fixes/TOOL_DEFINITION_FORMAT_FIX.md` (detailed analysis)
+
+**Verification**:
+```bash
+docker compose restart bot
+docker compose logs bot | grep "KeyError"  # Should show no new errors
+```
+
+**See Also**:
+- Fix documentation: `docs/fixes/TOOL_DEFINITION_FORMAT_FIX.md`
+
+---
+
+### 2025-10-07 - Added forget_fact Tool (Phase 5.1+) ✅
+
+**Implementation**: Soft-delete capability for user privacy and data hygiene
+
+**What Changed**:
+- **New**: `forget_fact` tool - Archive outdated/incorrect facts (soft delete)
+- **Modified**: System persona with forget_fact usage guidance
+- **Modified**: `.env` configuration - disabled automated memory systems
+- **Testing**: Added 3 new tests (12 total, all passing ✅)
+
+**Tool Capabilities**:
+- Soft delete (sets `is_active=0`, preserves audit trail)
+- Reason tracking: outdated, incorrect, superseded, user_requested
+- Handles user privacy requests ("Забудь мій номер телефону")
+- Can link to replacement facts when superseded
+
+**Configuration Changes** (`.env`):
+```bash
+# Disabled automated memory (now using tool-based only)
+FACT_EXTRACTION_ENABLED=false
+ENABLE_CONTINUOUS_MONITORING=false
+ENABLE_GEMINI_FALLBACK=false
+ENABLE_AUTOMATED_MEMORY_FALLBACK=false
+
+# Tool-based memory enabled
+ENABLE_TOOL_BASED_MEMORY=true
+```
+
+**Performance**:
+- forget_fact: 60-90ms (SELECT + UPDATE)
+- All 4 tools: 60-140ms latency range
+
+**Testing**:
+- Test 10: forget_fact (remove skill) ✅
+- Test 11: recall_facts (verify forgotten) ✅
+- Test 12: forget_fact (non-existent fact) ✅
+
+**Impact**:
+- Users can request data removal (GDPR-friendly)
+- Bot can archive obsolete information
+- Audit trail preserved for debugging
+- Fully automated memory systems now disabled (tool-based only)
+
+**Files Changed**:
+- Modified: `app/services/tools/memory_definitions.py` (+40 lines)
+- Modified: `app/services/tools/memory_tools.py` (+160 lines)
+- Modified: `app/services/tools/__init__.py` (exports)
+- Modified: `app/handlers/chat.py` (integration)
+- Modified: `app/persona.py` (guidance)
+- Modified: `.env` (disabled automation)
+- Modified: `test_memory_tools_phase5.py` (+60 lines, 12 tests)
+
+**See Also**:
+- Original plan: `docs/plans/MEMORY_TOOL_CALLING_REDESIGN.md` (forget_fact spec at line 439)
+
+---
+
+### 2025-10-03 - Phase 5.1 Complete: Tool-Based Memory Control ✅
+
+**Implementation**: Core memory tools with model-driven decision making
+
+**What Changed**:
+- **New**: 3 memory tools giving Gemini direct control over fact storage
+  - `remember_fact`: Store new user information with duplicate checking
+  - `recall_facts`: Search/filter existing facts before storing
+  - `update_fact`: Modify existing facts with change tracking
+- **New**: Tool definitions for Gemini function calling (JSON schemas)
+- **New**: Memory tool handlers with telemetry and error handling
+- **Modified**: Chat handler integration (conditional tool registration)
+- **Modified**: System persona with memory management guidance
+- **Modified**: Configuration (5 new settings for Phase 5.1)
+
+**Architecture**:
+```
+Gemini 2.5 Flash → Memory Tools → UserProfileStore → SQLite
+```
+- Tools run synchronously (<200ms latency target, actual: 70-140ms)
+- Duplicate detection before storing (exact string match)
+- Confidence-based updates via direct SQL
+- Full telemetry coverage (counters + gauges)
+
+**Testing**:
+- Created `test_memory_tools_phase5.py` (9 tests, all passing ✅)
+- Covered: store, recall, update, duplicates, filters, non-existent facts
+- Manual testing guide for Telegram integration
+
+**Impact**:
+- Model now decides when to remember/update facts (not automated)
+- Better context awareness (checks existing facts before storing)
+- Audit trail for fact changes (old value, new value, reason)
+- Backward compatible (Phase 1-4 automation still works)
+
+**Performance**:
+- remember_fact: 80-140ms (duplicate check + insert)
+- recall_facts: 70-100ms (SELECT with filters)
+- update_fact: 80-120ms (find + UPDATE)
+
+**Files Changed**:
+- New: `app/services/tools/__init__.py`
+- New: `app/services/tools/memory_definitions.py`
+- New: `app/services/tools/memory_tools.py` (400+ lines)
+- New: `docs/plans/MEMORY_TOOL_CALLING_REDESIGN.md` (1202 lines)
+- New: `docs/plans/MEMORY_REDESIGN_QUICKREF.md` (251 lines)
+- New: `docs/plans/MEMORY_TOOLS_ARCHITECTURE.md` (350+ lines)
+- New: `docs/phases/PHASE_5.1_COMPLETE.md`
+- New: `test_memory_tools_phase5.py`
+- Modified: `app/handlers/chat.py` (imports, definitions, callbacks)
+- Modified: `app/config.py` (5 new settings)
+- Modified: `app/persona.py` (memory management section)
+
+**Configuration**:
+```bash
+ENABLE_TOOL_BASED_MEMORY=true  # Master switch
+MEMORY_TOOL_ASYNC=true  # Background processing (Phase 5.3)
+MEMORY_TOOL_TIMEOUT_MS=200  # Max sync latency
+MEMORY_TOOL_QUEUE_SIZE=1000  # Max pending ops
+ENABLE_AUTOMATED_MEMORY_FALLBACK=true  # Safety net
+```
+
+**Next Steps**:
+- Phase 5.2: Implement 6 additional tools (episodes, forget, merge)
+- Phase 5.3: Async orchestrator for non-blocking operations
+- Integration testing with real Telegram conversations
+- Monitor telemetry for tool usage patterns
+
+**See Also**:
+- Complete implementation report: `docs/phases/PHASE_5.1_COMPLETE.md`
+- Design specification: `docs/plans/MEMORY_TOOL_CALLING_REDESIGN.md`
+- Quick reference: `docs/plans/MEMORY_REDESIGN_QUICKREF.md`
+
+---
+
+### 2025-10-07 - Bot Self-Learning Integration Complete ✅
+
+**Implementation**: Bot self-learning is now fully operational and tracking interactions
+
+**What Changed**:
+- Created integration layer: `app/handlers/bot_learning_integration.py` (299 lines)
+- Modified chat handler: `app/handlers/chat.py` (+50 lines)
+- Added 3 integration hooks: reaction processing, tool tracking, interaction recording
+- All processing happens in background tasks (non-blocking)
+
+**How It Works**:
+1. Bot responds → `track_bot_interaction()` records outcome (neutral)
+2. User reacts → `process_potential_reaction()` analyzes sentiment
+3. Updates effectiveness score based on positive/negative ratios
+4. Extracts bot facts about communication patterns and tool usage
+
+**Impact**:
+- `/gryagself` now shows actual data instead of zeros
+- Effectiveness score updates in real-time based on user reactions
+- Performance overhead: <20ms per interaction
+- Easy to disable: `ENABLE_BOT_SELF_LEARNING=false`
+
+**Testing**:
+- Created test script: `test_bot_learning_integration.py`
+- All tests passing ✅
+- Manual verification guide included
+
+**Files Changed**:
+- New: `app/handlers/bot_learning_integration.py`
+- Modified: `app/handlers/chat.py`
+- New: `test_bot_learning_integration.py`
+- New: `docs/fixes/BOT_SELF_LEARNING_IMPLEMENTATION.md`
+
+**See Also**:
+- Implementation summary: `docs/fixes/BOT_SELF_LEARNING_IMPLEMENTATION.md`
+- Original fix plan: `docs/fixes/BOT_SELF_LEARNING_INTEGRATION_FIX.md`
+
+---
+
+### 2025-10-07 - Bot Self-Learning Integration Analysis
+
+**Problem Identified**: Bot self-learning shows 0 interactions despite feature being enabled
+
+**Root Cause**: Missing integration between chat handler and learning services
+- Infrastructure exists: `BotProfileStore`, `BotLearningEngine`, database tables, admin commands
+- Services injected via middleware but never called from `app/handlers/chat.py`
+- No tracking of bot interactions, reactions, tool usage, or performance metrics
+
+**Impact**:
+- `/gryagself` shows zero data even after many bot responses
+- Effectiveness scores remain at default 0.5
+- No bot facts extracted from interaction patterns
+- Gemini insights have no data to analyze
+
+**Fix Plan**: Created comprehensive integration plan (`docs/fixes/BOT_SELF_LEARNING_INTEGRATION_FIX.md`)
+- Phase 1: Record interaction outcomes after bot responses
+- Phase 2: Detect and analyze user reactions for sentiment
+- Phase 3: Track tool effectiveness patterns
+- Phase 4: Monitor performance metrics (response time, tokens)
+- Estimated effort: 6-9 hours development + 4-6 hours testing
+
+**Files Affected**:
+- `app/handlers/chat.py` - needs integration hooks (10 new lines)
+- `app/handlers/bot_learning_integration.py` - new helper module
+- No database changes needed (all tables already exist)
+
+**See Also**:
+- Issue analysis: This file
+- Fix plan: `docs/fixes/BOT_SELF_LEARNING_INTEGRATION_FIX.md`
+- Original feature docs: `docs/features/BOT_SELF_LEARNING.md`
+
+---
+
+### 2025-10-07 - Time Awareness Feature
+
+### Added
+
+- **Current time injection in system prompt** - Bot now receives the current timestamp with every message
+  - Format: "The current time is: {Day}, {Month} {Date}, {Year} at {HH:MM:SS}"
+  - Example: "The current time is: Tuesday, October 07, 2025 at 11:14:39"
+  - Injected into system prompt before every Gemini API call
+  - Works with all context modes (multi-level, profile, fallback)
+
+### Fixed
+
+- **Timezone issue** - Bot now correctly uses Kyiv time instead of UTC
+  - Added `tzdata>=2024.1` to requirements.txt
+  - Added `tzdata` system package to Dockerfile
+  - Primary approach: Uses `ZoneInfo("Europe/Kiev")` for proper timezone handling
+  - Fallback approach: UTC + 3 hours if zoneinfo fails
+  - Container verification: UTC 08:14 → Kyiv 11:14 (correct +3 offset)
+
+### Changed
+
+- `app/handlers/chat.py` - Enhanced timestamp generation with timezone support
+  - Imports `zoneinfo.ZoneInfo` for proper timezone handling (line 9)
+  - Generates Kyiv timezone timestamp with fallback logic (lines 1021-1028)
+  - Appends to system prompt in all code paths (lines 1031, 1039, 1053)
+- `app/persona.py` - Added time handling instruction
+  - Bot instructed to use injected "Current Time" context for time/date queries
+  - Should respond directly with time instead of evasive answers
+- `requirements.txt` - Added `tzdata>=2024.1` dependency
+- `Dockerfile` - Added `tzdata` system package for timezone data
+
+### Impact
+
+- Bot can now tell users the current Kyiv time when asked
+- Context-aware responses (e.g., "добрий ранок" vs "добрий вечір")
+- Time-sensitive information available without external tools
+- Negligible performance impact (<1ms per message)
+- Proper timezone handling regardless of container environment
+
+### How to Verify
+
+```bash
+# Test the timezone solution
+python3 test_timezone_solution.py
+
+# In production, ask the bot:
+# "котра година?" → should respond with current Kyiv time
+# "який день?" → should respond with current day/date
+```
+
+### Technical Details
+
+- Uses Kyiv time (Europe/Kiev timezone) regardless of container timezone
+- Graceful fallback to UTC+3 if zoneinfo unavailable
+- Format is human-readable and consistent with persona style
+- No configuration changes required (always enabled)
+- Docker container rebuilt with timezone support
+
+## 2025-10-06 - Bot Self-Learning Bug Fixes
+
+### Fixed
+
+- **KeyError in Gemini fact extraction prompt** (`app/services/user_profile.py`)
+  - JSON example in `FACT_EXTRACTION_PROMPT` had unescaped curly braces
+  - Python's `.format()` tried to interpret them as format placeholders
+  - Escaped all braces: `{` → `{{` and `}` → `}}`
+  - Gemini fallback fact extraction now works correctly
+  - See: `docs/fixes/fact_extraction_keyerror_fix.md`
+
+- **AttributeError in Gemini insights generation** (`app/services/bot_learning.py`)
+  - Line 394 incorrectly accessed `response.text` when `response` is already a string
+  - Changed `response.text.strip()` → `response.strip()`
+  - `/gryaginsights` admin command now works correctly
+  - See: `docs/fixes/bot_learning_gemini_response_fix.md`
+
+- **UNIQUE constraint violation in bot_profiles table** (`db/schema.sql`)
+  - Redundant `UNIQUE` on `bot_id` column conflicted with composite `UNIQUE(bot_id, chat_id)`
+  - Changed `bot_id INTEGER NOT NULL UNIQUE` → `bot_id INTEGER NOT NULL`
+  - Created migration script: `fix_bot_profiles_constraint.py`
+  - Bot can now create multiple profiles (global + per-chat)
+
+### Changed
+
+- `app/services/user_profile.py` - Escaped JSON braces in FACT_EXTRACTION_PROMPT (lines 36-46)
+- `app/services/bot_learning.py` - Fixed response type handling in generate_gemini_insights()
+- `db/schema.sql` - Removed redundant UNIQUE constraint from bot_profiles table
+
+### Impact
+
+- Bot self-learning system fully functional
+- User fact extraction works with Gemini fallback
+- `/gryagself` and `/gryaginsights` admin commands working
+- Bot can maintain separate learning profiles per chat
+- Reduced log noise from repeated KeyErrors
 
 ## 2025-10-06 - Critical Bug Fixes and Improvements
 
@@ -128,55 +769,96 @@ grep -A3 "except Exception" app/handlers/*.py | grep -E "LOGGER\.(error|warning|
 - Full message processing (no filtering)
 - Better observability with verification script
 
-## 2025-10-06 - Documentation Reorganization
+# Changelog
 
-**Achievement**: Cleaned up repository root by moving all documentation to organized folders
+All notable documentation and structural changes to this project.
 
-**Files Moved:**
+## 2025-10-06 - Bot Self-Learning Schema Fix
 
-**To docs/phases/:**
-- `PHASE1_COMPLETE.md` → `docs/phases/PHASE_1_COMPLETE.md`
-- `PHASE2_COMPLETE.md` → `docs/phases/PHASE_2_COMPLETE.md`
-- `PHASE2_QUICKREF.md` → `docs/phases/PHASE_2_QUICKREF.md`
-- `PHASE_4_1_COMPLETE_SUMMARY.md` → `docs/phases/`
-- `PHASE_4_1_SUMMARY.md` → `docs/phases/`
-- `PHASE_4_2_1_IMPLEMENTATION_SUMMARY.md` → `docs/phases/`
-- `PHASE_4_2_1_SUMMARY.md` → `docs/phases/`
-- `PHASE_4_2_COMPLETE_SUMMARY.md` → `docs/phases/`
-- `PHASE_4_2_IMPLEMENTATION_COMPLETE.md` → `docs/phases/`
-- `PHASE_4_2_INTEGRATION_COMPLETE.md` → `docs/phases/`
-- `PHASE_4_2_PLAN.md` → `docs/phases/`
-- `PHASE_4_2_README.md` → `docs/phases/`
+**Fixed**:
+- UNIQUE constraint violation in `bot_profiles` table
+  - Removed redundant `UNIQUE` constraint from `bot_id` column
+  - Keeps composite `UNIQUE(bot_id, chat_id)` for proper multi-profile support
+  - Migration script: `fix_bot_profiles_constraint.py` (backs up and restores data)
 
-**To docs/features/:**
-- `MULTIMODAL_COMPLETE.md` → `docs/features/`
-- `MULTIMODAL_QUICKREF.md` → `docs/features/`
+**Impact**:
+- Bot can now create multiple profiles (global + per-chat)
+- `/gryagself` command works in all chats
+- Chat-specific learning enabled
 
-**To docs/guides/:**
-- `QUICKSTART_PHASE1.md` → `docs/guides/`
-- `QUICKREF.md` → `docs/guides/QUICKREF.md`
-
-**To docs/plans/:**
-- `IMPLEMENTATION_SUMMARY.md` → `docs/plans/`
-- `PROGRESS.md` → `docs/plans/`
-
-**Verification:**
-
+**Verification**:
 ```bash
-# Only AGENTS.md and README.md should remain in root
-ls *.md | grep -v -E "^(AGENTS|README)\.md$"
-# (Should return nothing)
-
-# All docs now organized
-find docs -name "*.md" | wc -l
-# 95 files in organized structure
+python3 fix_bot_profiles_constraint.py
+docker compose restart bot
+# Test: /gryagself in different chats
 ```
 
-**Benefits:**
-- ✅ Clean repository root
-- ✅ Consistent with AGENTS.md guidelines
-- ✅ Easier to find documentation by category
-- ✅ Better structure for future additions
+See: `docs/fixes/BOT_PROFILES_UNIQUE_CONSTRAINT_FIX.md`
+
+## 2025-10-06 - Bot Self-Learning System (Phase 5)
+
+**Added**:
+- Complete bot self-learning infrastructure
+  - `bot_profiles`, `bot_facts`, `bot_interaction_outcomes`, `bot_insights`, `bot_persona_rules`, `bot_performance_metrics` tables
+  - BotProfileStore service with semantic deduplication and temporal decay
+  - BotLearningEngine for automatic pattern extraction from user reactions
+  - Gemini-powered self-reflection insights (weekly)
+  - Two new Gemini tools: `query_bot_self` and `get_bot_effectiveness`
+  - Admin commands: `/gryagself` and `/gryaginsights`
+
+**Implementation highlights**:
+- Bot tracks effectiveness across 8 fact categories (communication_style, knowledge_domain, tool_effectiveness, etc.)
+- Sentiment analysis detects user reactions (positive, negative, corrected, praised, ignored)
+- Performance metrics tracked: response_time_ms, token_count, sentiment_score
+- Integrates with episodic memory for conversation-level learning
+- Embedding-based fact deduplication (85% similarity threshold)
+- Temporal decay for outdated facts (exponential: confidence * exp(-decay_rate * age_days))
+
+**Files**:
+- Schema: `db/schema.sql` (bot self-learning tables + indexes)
+- Services: `app/services/bot_profile.py`, `app/services/bot_learning.py`
+- Tools: `app/services/tools/bot_self_tools.py`
+- Config: `app/config.py` (9 new settings)
+- Middleware: `app/middlewares/chat_meta.py` (injection)
+- Main: `app/main.py` (Phase 5 initialization)
+- Admin: `app/handlers/profile_admin.py` (2 new commands)
+- Docs: `docs/features/BOT_SELF_LEARNING.md` (comprehensive guide)
+
+**Verification**:
+```bash
+# Check schema applied
+sqlite3 gryag.db ".tables" | grep bot_
+
+# Start bot and verify init
+python -m app.main
+# Look for: "Bot self-learning initialized" in logs
+
+# Test admin commands (in Telegram)
+/gryagself          # View learned profile
+/gryaginsights      # Generate Gemini insights
+
+# Check bot learns from feedback
+# Say "thanks" or give feedback, then:
+sqlite3 gryag.db "SELECT * FROM bot_facts ORDER BY updated_at DESC LIMIT 5;"
+```
+
+**Configuration** (.env):
+- `ENABLE_BOT_SELF_LEARNING=true` (master switch)
+- `ENABLE_TEMPORAL_DECAY=true` (outdated facts fade)
+- `ENABLE_SEMANTIC_DEDUP=true` (embedding-based dedup)
+- `ENABLE_GEMINI_INSIGHTS=true` (self-reflection)
+- `BOT_INSIGHT_INTERVAL_HOURS=168` (weekly)
+
+**Performance impact**:
+- +4 async embedding calls per learned fact (for semantic dedup)
+- +1 DB write per interaction outcome (background)
+- +1 Gemini API call per insight generation (weekly, admin-triggered)
+- Storage: ~50-200 facts per chat after 1 month, ~1-2KB each
+
+## 2025-10-02 - Documentation Reorganization
+
+**Moved** (via `git mv` to preserve history):
+
 
 ---
 

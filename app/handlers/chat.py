@@ -5,6 +5,8 @@ import json
 import re
 import time
 from collections import deque
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Any
 import logging
 
@@ -19,6 +21,19 @@ from app.services.calculator import calculator_tool, CALCULATOR_TOOL_DEFINITION
 from app.services.weather import weather_tool, WEATHER_TOOL_DEFINITION
 from app.services.currency import currency_tool, CURRENCY_TOOL_DEFINITION
 from app.services.polls import polls_tool, POLLS_TOOL_DEFINITION
+from app.services.system_prompt_manager import SystemPromptManager
+from app.services.tools import (
+    remember_fact_tool,
+    recall_facts_tool,
+    update_fact_tool,
+    forget_fact_tool,
+    forget_all_facts_tool,
+    REMEMBER_FACT_DEFINITION,
+    RECALL_FACTS_DEFINITION,
+    UPDATE_FACT_DEFINITION,
+    FORGET_FACT_DEFINITION,
+    FORGET_ALL_FACTS_DEFINITION,
+)
 from app.services.context_store import ContextStore, format_metadata
 from app.services.gemini import GeminiClient, GeminiError
 from app.services.media import collect_media_parts
@@ -31,6 +46,13 @@ from app.services.context import (
     MultiLevelContextManager,
     HybridSearchEngine,
     EpisodicMemoryStore,
+)
+from app.services.bot_profile import BotProfileStore
+from app.services.bot_learning import BotLearningEngine
+from app.handlers.bot_learning_integration import (
+    track_bot_interaction,
+    process_potential_reaction,
+    estimate_token_count,
 )
 
 router = Router()
@@ -565,6 +587,9 @@ async def handle_group_message(
     episodic_memory: EpisodicMemoryStore | None = None,
     episode_monitor: Any | None = None,
     continuous_monitor: Any | None = None,
+    bot_profile: BotProfileStore | None = None,
+    bot_learning: BotLearningEngine | None = None,
+    prompt_manager: SystemPromptManager | None = None,
     redis_client: RedisLike | None = None,
     redis_quota: tuple[str, int] | None = None,
     throttle_blocked: bool | None = None,
@@ -606,6 +631,28 @@ async def handle_group_message(
                 exc_info=e,
                 extra={"chat_id": chat_id, "message_id": message.message_id},
             )
+
+    # Bot Self-Learning: Check if message is a reaction to bot's previous response
+    # This runs BEFORE is_addressed check so we can learn from all user messages
+    if (
+        settings.enable_bot_self_learning
+        and bot_profile is not None
+        and bot_learning is not None
+        and bot_id is not None
+    ):
+        asyncio.create_task(
+            process_potential_reaction(
+                message=message,
+                bot_profile=bot_profile,
+                bot_learning=bot_learning,
+                store=store,
+                bot_id=bot_id,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                user_id=message.from_user.id,
+                reaction_timeout_seconds=settings.bot_reaction_timeout_seconds,
+            )
+        )
 
     is_addressed = addressed_to_bot(message, bot_username, bot_id)
     if not is_addressed:
@@ -1003,6 +1050,14 @@ async def handle_group_message(
     # Add polls tool
     tool_definitions.append(POLLS_TOOL_DEFINITION)
 
+    # Add memory tools (Phase 5.1)
+    if settings.enable_tool_based_memory:
+        tool_definitions.append(REMEMBER_FACT_DEFINITION)
+        tool_definitions.append(RECALL_FACTS_DEFINITION)
+        tool_definitions.append(UPDATE_FACT_DEFINITION)
+        tool_definitions.append(FORGET_FACT_DEFINITION)
+        tool_definitions.append(FORGET_ALL_FACTS_DEFINITION)
+
     # Enrich with user profile context
     # Note: If using multi-level context, profile is already included
     if not use_multi_level:
@@ -1015,8 +1070,37 @@ async def handle_group_message(
     else:
         profile_context = None
 
+    # Add current timestamp to system prompt (Kyiv time)
+    try:
+        kyiv_tz = ZoneInfo("Europe/Kiev")
+        current_time = datetime.now(kyiv_tz).strftime("%A, %B %d, %Y at %H:%M:%S")
+    except Exception:
+        # Fallback: add +3 hours to UTC for Kyiv time (EET/EEST)
+        import datetime as dt
+
+        utc_now = datetime.utcnow()
+        kyiv_time = utc_now + dt.timedelta(hours=3)
+        current_time = kyiv_time.strftime("%A, %B %d, %Y at %H:%M:%S")
+
+    timestamp_context = f"\n\n# Current Time\n\nThe current time is: {current_time}"
+
+    # Fetch custom system prompt from database (if configured by admin)
+    base_system_prompt = SYSTEM_PERSONA
+
+    if prompt_manager:
+        try:
+            custom_prompt = await prompt_manager.get_active_prompt(chat_id=chat_id)
+            if custom_prompt:
+                base_system_prompt = custom_prompt.prompt_text
+                LOGGER.debug(
+                    f"Using custom system prompt: version={custom_prompt.version}, "
+                    f"scope={custom_prompt.scope}, chat_id={custom_prompt.chat_id}"
+                )
+        except Exception as e:
+            LOGGER.warning(f"Failed to fetch custom system prompt, using default: {e}")
+
     # If we have profile context, inject it into the system prompt
-    system_prompt_with_profile = SYSTEM_PERSONA
+    system_prompt_with_profile = base_system_prompt + timestamp_context
 
     # Format context for Gemini
     if use_multi_level and context_manager and context_assembly:
@@ -1027,7 +1111,10 @@ async def handle_group_message(
         # Append multi-level system context
         if formatted_context.get("system_context"):
             system_prompt_with_profile = (
-                SYSTEM_PERSONA + "\n\n" + formatted_context["system_context"]
+                base_system_prompt
+                + timestamp_context
+                + "\n\n"
+                + formatted_context["system_context"]
             )
 
         LOGGER.debug(
@@ -1042,7 +1129,83 @@ async def handle_group_message(
         )
     elif profile_context:
         # Fallback: Simple history + profile context
-        system_prompt_with_profile = SYSTEM_PERSONA + profile_context
+        system_prompt_with_profile = (
+            base_system_prompt + timestamp_context + profile_context
+        )
+
+    # Bot Self-Learning: Track which tools are used in this request
+    tools_used_in_request: list[str] = []
+
+    def make_tracked_tool_callback(tool_name: str, original_callback):
+        """Wrapper to track tool usage."""
+
+        async def wrapper(params: dict[str, Any]) -> str:
+            tools_used_in_request.append(tool_name)
+            return await original_callback(params)
+
+        return wrapper
+
+    # Wrap tool callbacks with tracking
+    tracked_tool_callbacks = {
+        "search_messages": make_tracked_tool_callback(
+            "search_messages", search_messages_tool
+        ),
+        "calculator": make_tracked_tool_callback("calculator", calculator_tool),
+        "weather": make_tracked_tool_callback("weather", weather_tool),
+        "currency": make_tracked_tool_callback("currency", currency_tool),
+        "polls": make_tracked_tool_callback("polls", polls_tool),
+    }
+
+    # Add memory tool callbacks (Phase 5.1)
+    if settings.enable_tool_based_memory:
+        tracked_tool_callbacks["remember_fact"] = make_tracked_tool_callback(
+            "remember_fact",
+            lambda params: remember_fact_tool(
+                **params,
+                chat_id=chat_id,
+                message_id=message.message_id,
+                profile_store=profile_store,
+            ),
+        )
+        tracked_tool_callbacks["recall_facts"] = make_tracked_tool_callback(
+            "recall_facts",
+            lambda params: recall_facts_tool(
+                **params,
+                chat_id=chat_id,
+                profile_store=profile_store,
+            ),
+        )
+        tracked_tool_callbacks["update_fact"] = make_tracked_tool_callback(
+            "update_fact",
+            lambda params: update_fact_tool(
+                **params,
+                chat_id=chat_id,
+                message_id=message.message_id,
+                profile_store=profile_store,
+            ),
+        )
+        tracked_tool_callbacks["forget_fact"] = make_tracked_tool_callback(
+            "forget_fact",
+            lambda params: forget_fact_tool(
+                **params,
+                chat_id=chat_id,
+                message_id=message.message_id,
+                profile_store=profile_store,
+            ),
+        )
+        tracked_tool_callbacks["forget_all_facts"] = make_tracked_tool_callback(
+            "forget_all_facts",
+            lambda params: forget_all_facts_tool(
+                **params,
+                chat_id=chat_id,
+                message_id=message.message_id,
+                profile_store=profile_store,
+            ),
+        )
+
+    # Bot Self-Learning: Track generation timing
+    generation_start_time = time.time()
+    response_time_ms = 0  # Initialize in case of error
 
     try:
         reply_text = await gemini_client.generate(
@@ -1050,14 +1213,13 @@ async def handle_group_message(
             history=history,
             user_parts=user_parts,
             tools=tool_definitions,
-            tool_callbacks={
-                "search_messages": search_messages_tool,
-                "calculator": calculator_tool,
-                "weather": weather_tool,
-                "currency": currency_tool,
-                "polls": polls_tool,
-            },
+            tool_callbacks=tracked_tool_callbacks,  # type: ignore[arg-type]
         )
+
+        # Calculate response time
+        generation_end_time = time.time()
+        response_time_ms = int((generation_end_time - generation_start_time) * 1000)
+
         telemetry.increment_counter("chat.reply_success")
 
         # Update user profile in background (fire-and-forget)
@@ -1137,6 +1299,30 @@ async def handle_group_message(
         embedding=model_embedding,
         retention_days=settings.retention_days,
     )
+
+    # Bot Self-Learning: Track this interaction for learning
+    if (
+        settings.enable_bot_self_learning
+        and bot_profile is not None
+        and bot_id is not None
+    ):
+        # Estimate token count
+        estimated_tokens = estimate_token_count(reply_trimmed)
+
+        # Track interaction in background (non-blocking)
+        asyncio.create_task(
+            track_bot_interaction(
+                bot_profile=bot_profile,
+                bot_id=bot_id,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                message_id=response_message.message_id,
+                response_text=reply_trimmed,
+                response_time_ms=response_time_ms,
+                token_count=estimated_tokens,
+                tools_used=tools_used_in_request if tools_used_in_request else None,
+            )
+        )
 
 
 async def _handle_poll_vote_attempt(

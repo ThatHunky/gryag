@@ -59,7 +59,8 @@ class ThrottleMiddleware(BaseMiddleware):
         quota_source = "sqlite"
         redis_key: str | None = None
         if self._redis is not None:
-            redis_key = f"gryag:quota:{chat_id}:{user_id}"
+            # Phase 2: Use configurable Redis namespace instead of hardcoded "gryag:"
+            redis_key = f"{self._settings.redis_namespace}:quota:{chat_id}:{user_id}"
             try:
                 await self._redis.zremrangebyscore(redis_key, 0, now - window_seconds)
                 entries = await self._redis.zrange(
@@ -140,7 +141,12 @@ class ThrottleMiddleware(BaseMiddleware):
                     await event.reply(SNARKY_REPLY)
                 blocked = True
             else:
-                redis_meta = (redis_key or f"gryag:quota:{chat_id}:{user_id}", now)
+                # Phase 2: Use configurable Redis namespace
+                redis_meta = (
+                    redis_key
+                    or f"{self._settings.redis_namespace}:quota:{chat_id}:{user_id}",
+                    now,
+                )
         else:
             if recent_count >= dynamic_limit:
                 if await self._store.should_send_notice(

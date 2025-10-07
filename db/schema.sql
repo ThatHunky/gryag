@@ -438,4 +438,220 @@ CREATE INDEX IF NOT EXISTS idx_messages_chat_ts ON messages(chat_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role);
 CREATE INDEX IF NOT EXISTS idx_messages_embedding_not_null ON messages(embedding) WHERE embedding IS NOT NULL;
 
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- Bot Self-Learning System - Phase 5
+-- Added: October 6, 2025
+-- Bot learns about itself, tracks effectiveness, adapts persona dynamically
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+-- Bot identity and version tracking (support for multiple bot instances)
+CREATE TABLE IF NOT EXISTS bot_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id INTEGER NOT NULL,  -- Telegram bot user ID (can have multiple profiles per bot)
+    bot_username TEXT,
+    bot_name TEXT,
+    chat_id INTEGER,  -- NULL for global facts, specific for per-chat learning
+    profile_version INTEGER DEFAULT 1,
+    total_interactions INTEGER DEFAULT 0,
+    positive_interactions INTEGER DEFAULT 0,
+    negative_interactions INTEGER DEFAULT 0,
+    effectiveness_score REAL DEFAULT 0.5,  -- Running effectiveness metric
+    last_self_reflection INTEGER,  -- Last Gemini-powered insight generation
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(bot_id, chat_id)  -- Separate profiles per chat + one global
+);
+
+-- Facts the bot learns about itself (parallel to user_facts)
+CREATE TABLE IF NOT EXISTS bot_facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id INTEGER NOT NULL,
+    fact_category TEXT NOT NULL CHECK(fact_category IN (
+        'communication_style',  -- Learned tone/approach preferences
+        'knowledge_domain',     -- Topics bot knows well/poorly
+        'tool_effectiveness',   -- Which tools work when
+        'user_interaction',     -- Patterns in user responses
+        'persona_adjustment',   -- Context-based personality tweaks
+        'mistake_pattern',      -- Common errors to avoid
+        'temporal_pattern',     -- Time-based behavior (e.g., evening vs morning)
+        'performance_metric'    -- Response time, token usage patterns
+    )),
+    fact_key TEXT NOT NULL,
+    fact_value TEXT NOT NULL,
+    confidence REAL DEFAULT 0.5,
+    evidence_count INTEGER DEFAULT 1,  -- How many times observed
+    last_reinforced INTEGER,
+    context_tags TEXT,  -- JSON array: ["formal", "technical", "evening", "weekend"]
+    source_type TEXT CHECK(source_type IN (
+        'user_feedback',      -- User explicitly told us
+        'reaction_analysis',  -- Inferred from emoji/replies
+        'success_metric',     -- Measured outcome (response time, etc.)
+        'error_pattern',      -- Detected from failures
+        'admin_input',        -- Admin commands
+        'gemini_insight',     -- Generated from self-reflection
+        'episode_learning'    -- Learned from episodic memory
+    )),
+    fact_embedding TEXT,  -- JSON array for semantic deduplication
+    is_active INTEGER DEFAULT 1,
+    decay_rate REAL DEFAULT 0.0,  -- For temporal decay (0.0 = no decay)
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (profile_id) REFERENCES bot_profiles(id) ON DELETE CASCADE
+);
+
+-- Track specific interaction outcomes (similar to proactive_events but bot-focused)
+CREATE TABLE IF NOT EXISTS bot_interaction_outcomes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id INTEGER NOT NULL,
+    message_id INTEGER,  -- References messages table (bot's response)
+    chat_id INTEGER NOT NULL,
+    thread_id INTEGER,
+    interaction_type TEXT NOT NULL CHECK(interaction_type IN (
+        'response',          -- Regular response to user
+        'proactive',         -- Unsolicited contribution
+        'tool_usage',        -- Used a tool
+        'error_recovery',    -- Handled an error
+        'clarification'      -- Asked for clarification
+    )),
+    outcome TEXT NOT NULL CHECK(outcome IN (
+        'positive',          -- User engaged positively (thanks, emoji, follow-up)
+        'neutral',           -- No reaction or neutral
+        'negative',          -- User expressed frustration
+        'corrected',         -- User corrected bot
+        'ignored',           -- User didn't respond at all
+        'praised'            -- Explicit praise
+    )),
+    sentiment_score REAL,  -- -1.0 to 1.0 from reaction analysis
+    context_snapshot TEXT,  -- JSON with chat state, time of day, etc.
+    response_text TEXT,     -- What bot said
+    response_length INTEGER,  -- Character count
+    response_time_ms INTEGER,  -- How long to generate
+    token_count INTEGER,    -- Tokens used
+    tools_used TEXT,        -- JSON array of tool names
+    user_reaction TEXT,     -- What user said/did
+    reaction_delay_seconds INTEGER,  -- Time until user reacted
+    learned_from INTEGER DEFAULT 0,  -- Whether this updated bot_facts
+    episode_id INTEGER,     -- Link to episode if part of one
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (profile_id) REFERENCES bot_profiles(id) ON DELETE CASCADE,
+    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE SET NULL,
+    FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE SET NULL
+);
+
+-- Bot self-reflection insights (Gemini-generated periodic analysis)
+CREATE TABLE IF NOT EXISTS bot_insights (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id INTEGER NOT NULL,
+    insight_type TEXT NOT NULL CHECK(insight_type IN (
+        'effectiveness_trend',   -- Overall effectiveness analysis
+        'communication_pattern', -- What works/doesn't work
+        'knowledge_gap',         -- Topics bot struggles with
+        'user_preference',       -- What users prefer from bot
+        'temporal_insight',      -- Time-based patterns
+        'improvement_suggestion' -- Self-improvement ideas
+    )),
+    insight_text TEXT NOT NULL,
+    supporting_data TEXT,  -- JSON with stats/evidence
+    confidence REAL DEFAULT 0.5,
+    actionable INTEGER DEFAULT 0,  -- Whether this should trigger changes
+    applied INTEGER DEFAULT 0,  -- Whether changes were applied
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (profile_id) REFERENCES bot_profiles(id) ON DELETE CASCADE
+);
+
+-- Persona adaptation rules (dynamically generated from learning)
+CREATE TABLE IF NOT EXISTS bot_persona_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id INTEGER NOT NULL,
+    rule_name TEXT NOT NULL,
+    rule_condition TEXT NOT NULL,  -- JSON: {"time_of_day": "evening", "chat_type": "technical"}
+    persona_modification TEXT NOT NULL,  -- Text to append to system prompt
+    priority INTEGER DEFAULT 50,  -- 0-100, higher = more important
+    activation_count INTEGER DEFAULT 0,
+    success_rate REAL DEFAULT 0.5,
+    is_active INTEGER DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (profile_id) REFERENCES bot_profiles(id) ON DELETE CASCADE
+);
+
+-- Performance metrics tracking
+CREATE TABLE IF NOT EXISTS bot_performance_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id INTEGER NOT NULL,
+    metric_type TEXT NOT NULL CHECK(metric_type IN (
+        'response_time',
+        'token_usage',
+        'tool_success_rate',
+        'error_rate',
+        'user_satisfaction',
+        'embedding_cache_hit'
+    )),
+    metric_value REAL NOT NULL,
+    context_tags TEXT,  -- JSON array for grouping
+    measured_at INTEGER NOT NULL,
+    FOREIGN KEY (profile_id) REFERENCES bot_profiles(id) ON DELETE CASCADE
+);
+
+-- Indexes for bot learning tables
+
+CREATE INDEX IF NOT EXISTS idx_bot_profiles_bot_id ON bot_profiles(bot_id);
+CREATE INDEX IF NOT EXISTS idx_bot_profiles_chat_id ON bot_profiles(chat_id);
+CREATE INDEX IF NOT EXISTS idx_bot_profiles_effectiveness ON bot_profiles(effectiveness_score DESC);
+
+CREATE INDEX IF NOT EXISTS idx_bot_facts_profile ON bot_facts(profile_id);
+CREATE INDEX IF NOT EXISTS idx_bot_facts_category ON bot_facts(fact_category);
+CREATE INDEX IF NOT EXISTS idx_bot_facts_active ON bot_facts(is_active);
+CREATE INDEX IF NOT EXISTS idx_bot_facts_confidence ON bot_facts(confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_bot_facts_key ON bot_facts(fact_key);
+CREATE INDEX IF NOT EXISTS idx_bot_facts_updated ON bot_facts(updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_bot_interaction_outcomes_profile ON bot_interaction_outcomes(profile_id);
+CREATE INDEX IF NOT EXISTS idx_bot_interaction_outcomes_outcome ON bot_interaction_outcomes(outcome);
+CREATE INDEX IF NOT EXISTS idx_bot_interaction_outcomes_chat ON bot_interaction_outcomes(chat_id, thread_id);
+CREATE INDEX IF NOT EXISTS idx_bot_interaction_outcomes_created ON bot_interaction_outcomes(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bot_interaction_outcomes_episode ON bot_interaction_outcomes(episode_id);
+
+CREATE INDEX IF NOT EXISTS idx_bot_insights_profile ON bot_insights(profile_id);
+CREATE INDEX IF NOT EXISTS idx_bot_insights_type ON bot_insights(insight_type);
+CREATE INDEX IF NOT EXISTS idx_bot_insights_actionable ON bot_insights(actionable) WHERE actionable = 1;
+CREATE INDEX IF NOT EXISTS idx_bot_insights_created ON bot_insights(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_bot_persona_rules_profile ON bot_persona_rules(profile_id);
+CREATE INDEX IF NOT EXISTS idx_bot_persona_rules_active ON bot_persona_rules(is_active) WHERE is_active = 1;
+CREATE INDEX IF NOT EXISTS idx_bot_persona_rules_priority ON bot_persona_rules(priority DESC);
+
+CREATE INDEX IF NOT EXISTS idx_bot_performance_metrics_profile ON bot_performance_metrics(profile_id);
+CREATE INDEX IF NOT EXISTS idx_bot_performance_metrics_type ON bot_performance_metrics(metric_type);
+CREATE INDEX IF NOT EXISTS idx_bot_performance_metrics_measured ON bot_performance_metrics(measured_at DESC);
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- Custom System Prompts - Admin Configuration
+-- Added: October 7, 2025
+-- Allows admins to customize system prompts per chat or globally via bot commands
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS system_prompts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    admin_id INTEGER NOT NULL,  -- Admin who created/modified this prompt
+    chat_id INTEGER,  -- NULL for global/default, specific chat_id for per-chat override
+    scope TEXT NOT NULL DEFAULT 'global' CHECK(scope IN ('global', 'chat', 'personal')),
+    prompt_text TEXT NOT NULL,  -- The actual system prompt
+    is_active INTEGER NOT NULL DEFAULT 1,  -- Can have multiple prompts, only one active per scope
+    version INTEGER DEFAULT 1,  -- Track versions for rollback
+    notes TEXT,  -- Admin notes about what changed or why
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    activated_at INTEGER  -- When this prompt was activated
+);
+
+-- Partial unique index: only one active prompt per scope per chat
+CREATE UNIQUE INDEX IF NOT EXISTS idx_system_prompts_active_unique 
+    ON system_prompts(chat_id, scope) WHERE is_active = 1;
+
+CREATE INDEX IF NOT EXISTS idx_system_prompts_active ON system_prompts(is_active, scope, chat_id);
+CREATE INDEX IF NOT EXISTS idx_system_prompts_admin ON system_prompts(admin_id);
+CREATE INDEX IF NOT EXISTS idx_system_prompts_chat ON system_prompts(chat_id);
+CREATE INDEX IF NOT EXISTS idx_system_prompts_created ON system_prompts(created_at DESC);
+
 

@@ -14,33 +14,49 @@ from aiogram.types import BotCommand, BotCommandScopeChat, Message
 from app.config import Settings
 from app.services.user_profile import UserProfileStore
 from app.services import telemetry
+from app.services.bot_profile import BotProfileStore
+from app.services.bot_learning import BotLearningEngine
 
 router = Router()
 logger = logging.getLogger(__name__)
 
-# Command descriptions for bot menu
-PROFILE_COMMANDS = [
-    BotCommand(
-        command="gryagprofile",
-        description="Показати профіль користувача (свій або у відповідь)",
-    ),
-    BotCommand(
-        command="gryagfacts",
-        description="Список фактів про користувача (свої або у відповідь)",
-    ),
-    BotCommand(
-        command="gryagremovefact",
-        description="🔒 Видалити конкретний факт за ID (тільки адміни)",
-    ),
-    BotCommand(
-        command="gryagforget",
-        description="🔒 Видалити всі факти про користувача (тільки адміни, потребує підтвердження)",
-    ),
-    BotCommand(
-        command="gryagexport",
-        description="🔒 Експортувати профіль у JSON (тільки адміни)",
-    ),
-]
+
+def get_profile_commands(prefix: str = "gryag") -> list[BotCommand]:
+    """Generate profile commands with dynamic prefix."""
+    return [
+        BotCommand(
+            command=f"{prefix}profile",
+            description="Показати профіль користувача (свій або у відповідь)",
+        ),
+        BotCommand(
+            command=f"{prefix}facts",
+            description="Список фактів про користувача (свої або у відповідь)",
+        ),
+        BotCommand(
+            command=f"{prefix}removefact",
+            description="🔒 Видалити конкретний факт за ID (тільки адміни)",
+        ),
+        BotCommand(
+            command=f"{prefix}forget",
+            description="🔒 Видалити всі факти про користувача (тільки адміни, потребує підтвердження)",
+        ),
+        BotCommand(
+            command=f"{prefix}export",
+            description="🔒 Експортувати профіль у JSON (тільки адміни)",
+        ),
+        BotCommand(
+            command=f"{prefix}self",
+            description="🔒 Показати self-learning профіль бота (тільки адміни)",
+        ),
+        BotCommand(
+            command=f"{prefix}insights",
+            description="🔒 Показати insights про бота (тільки адміни)",
+        ),
+    ]
+
+
+# Keep for backwards compatibility (used in main.py)
+PROFILE_COMMANDS = get_profile_commands()
 
 
 async def setup_profile_commands(bot: Bot, chat_id: int) -> None:
@@ -126,11 +142,9 @@ async def _resolve_target_user(
     return None
 
 
-@router.message(Command("gryagprofile"))
-async def cmd_profile(
-    message: Message,
-    profile_store: UserProfileStore,
-    settings: Settings,
+@router.message(Command(commands=["gryagprofile", "profile"]))
+async def get_user_profile_command(
+    message: Message, settings: Settings, profile_store: UserProfileStore
 ) -> None:
     """
     Show user profile summary.
@@ -193,11 +207,9 @@ async def cmd_profile(
     telemetry.increment_counter("profile_admin.profile_viewed")
 
 
-@router.message(Command("gryagfacts"))
-async def cmd_facts(
-    message: Message,
-    profile_store: UserProfileStore,
-    settings: Settings,
+@router.message(Command(commands=["gryagfacts", "facts"]))
+async def get_user_facts_command(
+    message: Message, settings: Settings, profile_store: UserProfileStore
 ) -> None:
     """
     List facts for a user.
@@ -284,11 +296,9 @@ async def cmd_facts(
     )
 
 
-@router.message(Command("gryagremovefact"))
-async def cmd_remove_fact(
-    message: Message,
-    profile_store: UserProfileStore,
-    settings: Settings,
+@router.message(Command(commands=["gryagremovefact", "removefact"]))
+async def remove_fact_command(
+    message: Message, settings: Settings, profile_store: UserProfileStore
 ) -> None:
     """
     Remove a specific fact by ID (admin only).
@@ -330,11 +340,9 @@ async def cmd_remove_fact(
         await message.reply(f"❌ Факт #{fact_id} не знайдено.")
 
 
-@router.message(Command("gryagforget"))
-async def cmd_forget(
-    message: Message,
-    profile_store: UserProfileStore,
-    settings: Settings,
+@router.message(Command(commands=["gryagforget", "forget"]))
+async def forget_user_command(
+    message: Message, settings: Settings, profile_store: UserProfileStore
 ) -> None:
     """
     Clear all facts for a user (admin only).
@@ -412,11 +420,9 @@ async def cmd_forget(
     )
 
 
-@router.message(Command("gryagexport"))
-async def cmd_export(
-    message: Message,
-    profile_store: UserProfileStore,
-    settings: Settings,
+@router.message(Command(commands=["gryagexport", "export"]))
+async def export_profile_command(
+    message: Message, settings: Settings, profile_store: UserProfileStore
 ) -> None:
     """
     Export user profile as JSON (admin only).
@@ -497,3 +503,155 @@ async def cmd_export(
             "fact_count": len(facts),
         },
     )
+
+
+@router.message(Command(commands=["gryagself", "self"]))
+async def cmd_bot_self_profile(
+    message: Message,
+    settings: Settings,
+    bot_profile: BotProfileStore | None,
+) -> None:
+    """View bot's self-learning profile (admin only)."""
+    if not _is_admin(message.from_user.id, settings):
+        await message.reply("🔒 Ця команда доступна тільки адмінам.")
+        return
+
+    if not bot_profile:
+        await message.reply(
+            "🤖 Bot self-learning вимкнено (ENABLE_BOT_SELF_LEARNING=false)."
+        )
+        return
+
+    chat_id = message.chat.id
+
+    # Get effectiveness summary
+    summary = await bot_profile.get_effectiveness_summary(chat_id=chat_id, days=7)
+
+    # Get top facts by category
+    categories = [
+        "communication_style",
+        "knowledge_domain",
+        "tool_effectiveness",
+        "user_interaction",
+        "mistake_pattern",
+    ]
+
+    response = "🤖 <b>Bot Self-Learning Profile</b>\n\n"
+    response += f"📊 <b>Effectiveness (last 7 days)</b>\n"
+    response += f"• Overall score: {summary['effectiveness_score']:.1%}\n"
+    response += f"• Recent score: {summary['recent_effectiveness']:.1%}\n"
+    response += f"• Total interactions: {summary['total_interactions']}\n"
+    response += f"• Positive: {summary['positive_interactions']} ({summary['positive_interactions']/max(summary['total_interactions'],1):.1%})\n"
+    response += f"• Negative: {summary['negative_interactions']} ({summary['negative_interactions']/max(summary['total_interactions'],1):.1%})\n\n"
+
+    response += f"⚡ <b>Performance</b>\n"
+    response += f"• Avg response time: {summary['avg_response_time_ms']:.0f}ms\n"
+    response += f"• Avg tokens: {summary['avg_token_count']:.0f}\n"
+    response += f"• Avg sentiment: {summary['avg_sentiment']:.2f}\n\n"
+
+    # Show top 3 facts per category
+    for category in categories:
+        facts = await bot_profile.get_facts(
+            category=category,
+            chat_id=chat_id,
+            min_confidence=0.5,
+            limit=3,
+        )
+
+        if facts:
+            emoji_map = {
+                "communication_style": "💬",
+                "knowledge_domain": "📚",
+                "tool_effectiveness": "🛠",
+                "user_interaction": "👥",
+                "mistake_pattern": "⚠️",
+            }
+            emoji = emoji_map.get(category, "📌")
+            response += f"{emoji} <b>{category.replace('_', ' ').title()}</b>\n"
+
+            for fact in facts:
+                confidence = fact.get("effective_confidence", fact["confidence"])
+                response += (
+                    f"• {fact['fact_key'][:50]}: {fact['fact_value'][:80]}...\n"
+                    f"  └ confidence: {confidence:.2f}, evidence: {fact['evidence_count']}\n"
+                )
+
+            response += "\n"
+
+    # Truncate if too long
+    if len(response) > 4000:
+        response = response[:3950] + "\n\n<i>... (truncated)</i>"
+
+    await message.reply(response, parse_mode="HTML")
+    telemetry.increment_counter("profile_admin.bot_self_viewed")
+    logger.info(
+        f"Admin {message.from_user.id} viewed bot self-profile for chat {chat_id}"
+    )
+
+
+@router.message(Command(commands=["gryaginsights", "insights"]))
+async def cmd_generate_insights(
+    message: Message,
+    settings: Settings,
+    bot_profile: BotProfileStore | None,
+    bot_learning: BotLearningEngine | None,
+) -> None:
+    """Generate Gemini-powered insights about bot's learning (admin only)."""
+    if not _is_admin(message.from_user.id, settings):
+        await message.reply("🔒 Ця команда доступна тільки адмінам.")
+        return
+
+    if not bot_profile or not bot_learning:
+        await message.reply(
+            "🤖 Bot self-learning вимкнено (ENABLE_BOT_SELF_LEARNING=false)."
+        )
+        return
+
+    chat_id = message.chat.id
+
+    # Send initial message
+    status_msg = await message.reply(
+        "🧠 Генерую інсайти через Gemini... (це займе ~10-30 секунд)"
+    )
+
+    try:
+        # Generate insights
+        insights = await bot_learning.generate_gemini_insights(chat_id=chat_id, days=7)
+
+        if not insights:
+            await status_msg.edit_text(
+                "ℹ️ Не вдалося згенерувати інсайти (недостатньо даних або помилка API)."
+            )
+            return
+
+        response = "🧠 <b>Bot Self-Reflection Insights</b>\n\n"
+        response += f"<i>Generated from {await bot_profile.get_effectiveness_summary(chat_id, 7)}</i>\n\n"
+
+        for idx, insight in enumerate(insights, 1):
+            emoji_map = {
+                "effectiveness_trend": "📈",
+                "communication_pattern": "💬",
+                "knowledge_gap": "📚",
+                "temporal_insight": "⏰",
+                "improvement_suggestion": "💡",
+            }
+            emoji = emoji_map.get(insight.get("type", ""), "📌")
+
+            response += f"{emoji} <b>Insight {idx}</b>\n"
+            response += f"{insight['text']}\n"
+            response += f"• Confidence: {insight.get('confidence', 0.5):.2f}\n"
+            response += f"• Actionable: {'✅ Yes' if insight.get('actionable') else '❌ No'}\n\n"
+
+        # Truncate if too long
+        if len(response) > 4000:
+            response = response[:3950] + "\n\n<i>... (truncated)</i>"
+
+        await status_msg.edit_text(response, parse_mode="HTML")
+        telemetry.increment_counter("profile_admin.insights_generated")
+        logger.info(
+            f"Admin {message.from_user.id} generated {len(insights)} insights for chat {chat_id}"
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to generate insights: {e}", exc_info=True)
+        await status_msg.edit_text(f"❌ Помилка при генерації інсайтів: {str(e)}")

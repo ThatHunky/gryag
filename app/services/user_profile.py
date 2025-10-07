@@ -35,17 +35,17 @@ Rules:
 - Use standardized fact_key names (e.g., "location", "profession", "hobby", "language", "favorite_food")
 
 Return JSON with this structure:
-{
+{{
   "facts": [
-    {
+    {{
       "fact_type": "personal|preference|trait|skill|opinion",
       "fact_key": "standardized_key",
       "fact_value": "the actual fact",
       "confidence": 0.7-1.0,
       "evidence": "quote supporting this"
-    }
+    }}
   ]
-}
+}}
 
 Conversation context:
 {context}

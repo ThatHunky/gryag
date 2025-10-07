@@ -21,7 +21,7 @@ class ResourceOptimizer:
 
     Implements graceful degradation:
     - High CPU: Reduce monitoring frequency, disable non-essential features
-    - High Memory: Reduce cache sizes, disable local models
+    - High Memory: Reduce cache sizes, optimize fact extraction
     - Critical levels: Emergency mode with minimal processing
     """
 
@@ -169,14 +169,13 @@ class ResourceOptimizer:
                     "Consider disabling continuous monitoring",
                     "Reduce fact extraction frequency",
                     "Disable profile summarization",
-                    "Use rule-based extraction only",
+                    "Use rule-based extraction only (disable Gemini fallback)",
                 ]
             )
 
         if stats.memory_percent > 80:
             recommendations.extend(
                 [
-                    "Disable local model loading",
                     "Reduce conversation window size",
                     "Lower max concurrent windows",
                     "Increase retention cleanup frequency",

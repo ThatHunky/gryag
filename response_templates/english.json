@@ -1,0 +1,18 @@
+{
+  "_comment": "English response templates for assistant bot",
+  
+  "error_fallback": "I'm having trouble connecting to the AI service. Please try again later.",
+  "empty_reply": "I need more information to help you with that.",
+  "banned_reply": "You are currently banned from using {bot_name}.",
+  "snarky_reply": "Please slow down with your messages.",
+  "throttle_notice": "Too many messages. Please wait {seconds} seconds.",
+  "admin_only": "Only administrators can use this command.",
+  "chat_not_allowed": "I'm not configured to operate in this chat.",
+  "command_help": "Available commands: /{command_prefix}help, /{command_prefix}profile, /{command_prefix}facts",
+  "profile_not_found": "Profile not found.",
+  "facts_empty": "No information stored about this user yet.",
+  "ban_success": "User {user_name} has been banned.",
+  "unban_success": "User {user_name} has been unbanned.",
+  "reset_success": "History cleared for user {user_name}.",
+  "chat_info": "Chat ID: {chat_id}\nThread ID: {thread_id}\nChat Type: {chat_type}"
+}

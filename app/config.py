@@ -79,13 +79,10 @@ class Settings(BaseSettings):
         50, alias="MAX_PROFILES_PER_DAY", ge=1
     )  # Limit to avoid overload
 
-    # Fact extraction method configuration
-    fact_extraction_method: str = Field(
-        "hybrid", alias="FACT_EXTRACTION_METHOD"
-    )  # rule_based, local_model, hybrid, gemini
-    local_model_path: str | None = Field(None, alias="LOCAL_MODEL_PATH")
-    local_model_threads: int | None = Field(None, alias="LOCAL_MODEL_THREADS")
-    enable_gemini_fallback: bool = Field(False, alias="ENABLE_GEMINI_FALLBACK")
+    # Fact extraction configuration - uses Google Gemini API (rule-based + optional Gemini fallback)
+    enable_gemini_fact_extraction: bool = Field(
+        True, alias="ENABLE_GEMINI_FACT_EXTRACTION"
+    )
 
     # Continuous monitoring configuration (Phase 1+)
     enable_continuous_monitoring: bool = Field(
@@ -253,6 +250,112 @@ class Settings(BaseSettings):
     max_cache_size_mb: int = Field(100, alias="MAX_CACHE_SIZE_MB", ge=10, le=1000)
     enable_embedding_cache: bool = Field(True, alias="ENABLE_EMBEDDING_CACHE")
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Bot Self-Learning (Phase 5)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # Bot Self-Learning
+    enable_bot_self_learning: bool = Field(True, alias="ENABLE_BOT_SELF_LEARNING")
+    bot_learning_confidence_threshold: float = Field(
+        0.5, alias="BOT_LEARNING_CONFIDENCE_THRESHOLD", ge=0.0, le=1.0
+    )
+    bot_learning_min_evidence: int = Field(
+        3, alias="BOT_LEARNING_MIN_EVIDENCE", ge=1, le=20
+    )
+    enable_bot_persona_adaptation: bool = Field(
+        True, alias="ENABLE_BOT_PERSONA_ADAPTATION"
+    )
+    enable_temporal_decay: bool = Field(
+        True, alias="ENABLE_TEMPORAL_DECAY"
+    )  # Outdated facts lose confidence
+    enable_semantic_dedup: bool = Field(
+        True, alias="ENABLE_SEMANTIC_DEDUP"
+    )  # Use embeddings for fact dedup
+    enable_gemini_insights: bool = Field(
+        True, alias="ENABLE_GEMINI_INSIGHTS"
+    )  # Self-reflection via Gemini
+    bot_insight_interval_hours: int = Field(
+        168, alias="BOT_INSIGHT_INTERVAL_HOURS", ge=24, le=720
+    )  # Weekly by default
+    bot_reaction_timeout_seconds: int = Field(
+        300, alias="BOT_REACTION_TIMEOUT_SECONDS", ge=30, le=3600
+    )  # Wait time for user reaction
+
+    # Memory tool calling configuration (Phase 5.1)
+    enable_tool_based_memory: bool = Field(True, alias="ENABLE_TOOL_BASED_MEMORY")
+    memory_tool_async: bool = Field(
+        True, alias="MEMORY_TOOL_ASYNC"
+    )  # Run memory ops in background
+    memory_tool_timeout_ms: int = Field(
+        200, alias="MEMORY_TOOL_TIMEOUT_MS", ge=50, le=1000
+    )
+    memory_tool_queue_size: int = Field(
+        1000, alias="MEMORY_TOOL_QUEUE_SIZE", ge=100, le=10000
+    )
+    enable_automated_memory_fallback: bool = Field(
+        True, alias="ENABLE_AUTOMATED_MEMORY_FALLBACK"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # Universal Bot Configuration (Phase 1)
+    # Bot Identity, Personality, and Chat Management
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    # Bot Identity
+    bot_name: str = Field("gryag", alias="BOT_NAME")  # Display name for responses
+    bot_username: str | None = Field(
+        None, alias="BOT_USERNAME"
+    )  # Telegram username (without @), auto-detected if None
+    bot_trigger_patterns: str = Field(
+        "", alias="BOT_TRIGGER_PATTERNS"
+    )  # Comma-separated trigger words, empty = use persona config
+    redis_namespace: str = Field(
+        "gryag", alias="REDIS_NAMESPACE"
+    )  # Redis key prefix for quota tracking
+    command_prefix: str = Field(
+        "gryag", alias="COMMAND_PREFIX"
+    )  # Prefix for admin commands (/gryagban, etc.)
+
+    # Personality Configuration
+    persona_config: str = Field(
+        "", alias="PERSONA_CONFIG"
+    )  # Path to persona YAML file, empty = use hardcoded persona
+    response_templates: str = Field(
+        "", alias="RESPONSE_TEMPLATES"
+    )  # Path to response templates JSON, empty = use hardcoded responses
+    bot_language: str = Field("uk", alias="BOT_LANGUAGE")  # Primary language code
+    enable_profanity: bool = Field(
+        True, alias="ENABLE_PROFANITY"
+    )  # Allow strong language in responses
+
+    # Chat Management
+    bot_behavior_mode: str = Field(
+        "global", alias="BOT_BEHAVIOR_MODE"
+    )  # global, whitelist, blacklist
+    allowed_chat_ids: str = Field(
+        "", alias="ALLOWED_CHAT_IDS"
+    )  # Comma-separated chat IDs for whitelist mode
+    blocked_chat_ids: str = Field(
+        "", alias="BLOCKED_CHAT_IDS"
+    )  # Comma-separated chat IDs for blacklist mode
+    admin_chat_ids: str = Field(
+        "", alias="ADMIN_CHAT_IDS"
+    )  # Comma-separated chat IDs where admin commands work, empty = all chats
+    ignore_private_chats: bool = Field(
+        False, alias="IGNORE_PRIVATE_CHATS"
+    )  # Only operate in groups
+
+    # Feature Toggles
+    enable_chat_filtering: bool = Field(
+        False, alias="ENABLE_CHAT_FILTERING"
+    )  # Enable chat restrictions
+    enable_custom_commands: bool = Field(
+        False, alias="ENABLE_CUSTOM_COMMANDS"
+    )  # Use configurable command names
+    enable_persona_templates: bool = Field(
+        False, alias="ENABLE_PERSONA_TEMPLATES"
+    )  # Use template-based responses
+
     @property
     def db_path_str(self) -> str:
         return str(self.db_path)
@@ -264,6 +367,41 @@ class Settings(BaseSettings):
             return []
         parts = [part.strip() for part in self.admin_user_ids.split(",")]
         return [int(part) for part in parts if part]
+
+    @property
+    def allowed_chat_ids_list(self) -> list[int]:
+        """Parse allowed chat IDs from string to list."""
+        if not self.allowed_chat_ids:
+            return []
+        parts = [part.strip() for part in self.allowed_chat_ids.split(",")]
+        return [int(part) for part in parts if part]
+
+    @property
+    def blocked_chat_ids_list(self) -> list[int]:
+        """Parse blocked chat IDs from string to list."""
+        if not self.blocked_chat_ids:
+            return []
+        parts = [part.strip() for part in self.blocked_chat_ids.split(",")]
+        return [int(part) for part in parts if part]
+
+    @property
+    def admin_chat_ids_list(self) -> list[int]:
+        """Parse admin chat IDs from string to list."""
+        if not self.admin_chat_ids:
+            return []
+        parts = [part.strip() for part in self.admin_chat_ids.split(",")]
+        return [int(part) for part in parts if part]
+
+    @property
+    def bot_trigger_patterns_list(self) -> list[str]:
+        """Parse bot trigger patterns from string to list."""
+        if not self.bot_trigger_patterns:
+            return []
+        return [
+            part.strip()
+            for part in self.bot_trigger_patterns.split(",")
+            if part.strip()
+        ]
 
     @field_validator("admin_user_ids", mode="before")
     @classmethod
@@ -277,6 +415,17 @@ class Settings(BaseSettings):
         if isinstance(value, int):
             return str(value)
         raise ValueError("Invalid ADMIN_USER_IDS value")
+
+    @field_validator("bot_behavior_mode")
+    @classmethod
+    def _validate_behavior_mode(cls, v: str) -> str:
+        """Validate bot behavior mode is a valid option."""
+        valid_modes = {"global", "whitelist", "blacklist"}
+        if v not in valid_modes:
+            raise ValueError(
+                f"bot_behavior_mode must be one of {valid_modes}, got '{v}'"
+            )
+        return v
 
     @field_validator("semantic_weight", "keyword_weight", "temporal_weight")
     @classmethod

@@ -14,21 +14,31 @@ router = Router()
 
 LOGGER = logging.getLogger(__name__)
 
-# Command descriptions for bot menu
-ADMIN_COMMANDS = [
-    BotCommand(
-        command="gryagban",
-        description="🔒 Забанити користувача (тільки адміни, у відповідь або ID)",
-    ),
-    BotCommand(
-        command="gryagunban",
-        description="🔒 Розбанити користувача (тільки адміни, у відповідь або ID)",
-    ),
-    BotCommand(
-        command="gryagreset",
-        description="🔒 Скинути ліміти повідомлень у чаті (тільки адміни)",
-    ),
-]
+
+def get_admin_commands(prefix: str = "gryag") -> list[BotCommand]:
+    """Generate admin commands with dynamic prefix."""
+    return [
+        BotCommand(
+            command=f"{prefix}ban",
+            description="🔒 Забанити користувача (тільки адміни, у відповідь або ID)",
+        ),
+        BotCommand(
+            command=f"{prefix}unban",
+            description="🔒 Розбанити користувача (тільки адміни, у відповідь або ID)",
+        ),
+        BotCommand(
+            command=f"{prefix}reset",
+            description="🔒 Скинути ліміти повідомлень у чаті (тільки адміни)",
+        ),
+        BotCommand(
+            command=f"{prefix}chatinfo",
+            description="🔒 Показати ID чату для конфігурації (тільки адміни)",
+        ),
+    ]
+
+
+# Keep for backwards compatibility (used in main.py)
+ADMIN_COMMANDS = get_admin_commands()
 
 ADMIN_ONLY = "Ця команда лише для своїх. І явно не для тебе."
 BAN_SUCCESS = "Готово: користувача кувалдіровано."
@@ -63,10 +73,11 @@ def _extract_target(message: Message) -> tuple[int, str] | None:
     return None
 
 
-@router.message(Command("gryagban"))
+@router.message(Command(commands=["gryagban", "ban"]))
 async def ban_user_command(
     message: Message, settings: Settings, store: ContextStore
 ) -> None:
+    # Support both legacy "gryagban" and dynamic "{prefix}ban"
     if not _is_admin(message, settings):
         await message.reply(ADMIN_ONLY)
         return
@@ -87,10 +98,11 @@ async def ban_user_command(
     await message.reply(f"{BAN_SUCCESS} ({target_label})")
 
 
-@router.message(Command("gryagunban"))
+@router.message(Command(commands=["gryagunban", "unban"]))
 async def unban_user_command(
     message: Message, settings: Settings, store: ContextStore
 ) -> None:
+    # Support both legacy "gryagunban" and dynamic "{prefix}unban"
     if not _is_admin(message, settings):
         await message.reply(ADMIN_ONLY)
         return
@@ -111,13 +123,14 @@ async def unban_user_command(
     await message.reply(f"{UNBAN_SUCCESS} ({target_label})")
 
 
-@router.message(Command("gryagreset"))
+@router.message(Command(commands=["gryagreset", "reset"]))
 async def reset_quotas_command(
     message: Message,
     settings: Settings,
     store: ContextStore,
     redis_client: RedisLike | None = None,
 ) -> None:
+    # Support both legacy "gryagreset" and dynamic "{prefix}reset"
     if not _is_admin(message, settings):
         await message.reply(ADMIN_ONLY)
         return
@@ -126,7 +139,7 @@ async def reset_quotas_command(
     await store.reset_quotas(chat_id)
 
     if redis_client is not None:
-        pattern = f"gryag:quota:{chat_id}:*"
+        pattern = f"{settings.redis_namespace}quota:{chat_id}:*"
         cursor = 0
         try:
             while True:
@@ -146,3 +159,72 @@ async def reset_quotas_command(
             )
 
     await message.reply(RESET_DONE)
+
+
+@router.message(Command(commands=["gryagchatinfo", "chatinfo"]))
+async def chatinfo_command(
+    message: Message,
+    settings: Settings,
+) -> None:
+    """Show chat ID and type for configuration purposes (admin only).
+
+    This helps admins discover chat IDs to configure whitelist/blacklist.
+    """
+    if not _is_admin(message, settings):
+        await message.reply(ADMIN_ONLY)
+        return
+
+    chat = message.chat
+    chat_type = chat.type
+    chat_id = chat.id
+
+    # Build response with chat information
+    response = f"📊 <b>Інформація про чат</b>\n\n"
+    response += f"🆔 Chat ID: <code>{chat_id}</code>\n"
+    response += f"📱 Тип: {chat_type}\n"
+
+    if chat.title:
+        response += f"📝 Назва: {chat.title}\n"
+
+    if chat.username:
+        response += f"🔗 Username: @{chat.username}\n"
+
+    # Add configuration hints
+    response += f"\n💡 <b>Використання:</b>\n"
+
+    if chat_id < 0:  # Group/supergroup
+        response += f"Для whitelist режиму:\n"
+        response += f"<code>ALLOWED_CHAT_IDS={chat_id}</code>\n\n"
+        response += f"Для blacklist режиму:\n"
+        response += f"<code>BLOCKED_CHAT_IDS={chat_id}</code>\n\n"
+        response += f"Кілька чатів через кому:\n"
+        response += f"<code>ALLOWED_CHAT_IDS={chat_id},-100456,...</code>"
+    else:  # Private chat
+        response += f"Це приватний чат (ID > 0).\n"
+        response += f"Приватні чати з адмінами завжди дозволені."
+
+    # Show current configuration
+    response += f"\n\n⚙️ <b>Поточна конфігурація:</b>\n"
+    response += f"Режим: <code>{settings.bot_behavior_mode}</code>\n"
+
+    if settings.allowed_chat_ids_list:
+        response += f"Whitelist: <code>{settings.allowed_chat_ids_list}</code>\n"
+
+    if settings.blocked_chat_ids_list:
+        response += f"Blacklist: <code>{settings.blocked_chat_ids_list}</code>\n"
+
+    # Check if current chat is allowed
+    if settings.bot_behavior_mode == "whitelist":
+        if chat_id in settings.allowed_chat_ids_list or chat_id > 0:
+            response += f"\n✅ Цей чат <b>дозволений</b>"
+        else:
+            response += f"\n❌ Цей чат <b>НЕ в whitelist</b>"
+    elif settings.bot_behavior_mode == "blacklist":
+        if chat_id in settings.blocked_chat_ids_list:
+            response += f"\n❌ Цей чат <b>заблокований</b>"
+        else:
+            response += f"\n✅ Цей чат <b>дозволений</b>"
+    else:  # global
+        response += f"\n✅ Всі чати дозволені (global режим)"
+
+    await message.reply(response)

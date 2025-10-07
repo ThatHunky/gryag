@@ -1,0 +1,18 @@
+{
+  "_comment": "Ukrainian response templates for gryag bot",
+  
+  "error_fallback": "Ґеміні знову тупить. Спробуй пізніше.",
+  "empty_reply": "Скажи конкретніше, бо зараз з цього нічого не зробити.",
+  "banned_reply": "Ти для {bot_name} в бані. Йди погуляй.",
+  "snarky_reply": "Пригальмуй, балакучий...",
+  "throttle_notice": "Занадто багато повідомлень. Почекай трохи.",
+  "admin_only": "Тільки адміни можуть це робити.",
+  "chat_not_allowed": "Я тут не працюю. Додай мене в дозволений чат.",
+  "command_help": "Доступні команди: /{command_prefix}help, /{command_prefix}profile, /{command_prefix}facts",
+  "profile_not_found": "Профіль не знайдено.",
+  "facts_empty": "Поки що нічого не знаю про цього користувача.",
+  "ban_success": "Забанено користувача {user_name}.",
+  "unban_success": "Розбанено користувача {user_name}.",
+  "reset_success": "Історію очищено для користувача {user_name}.",
+  "chat_info": "ID чату: {chat_id}\nID треду: {thread_id}\nТип чату: {chat_type}"
+}

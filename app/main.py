@@ -12,6 +12,8 @@ from app.config import get_settings
 from app.handlers.admin import router as admin_router, ADMIN_COMMANDS
 from app.handlers.chat import router as chat_router
 from app.handlers.profile_admin import router as profile_admin_router, PROFILE_COMMANDS
+from app.handlers.prompt_admin import router as prompt_admin_router, PROMPT_COMMANDS
+from app.middlewares.chat_filter import ChatFilterMiddleware
 from app.middlewares.chat_meta import ChatMetaMiddleware
 from app.middlewares.throttle import ThrottleMiddleware
 from app.services.context_store import ContextStore
@@ -20,6 +22,7 @@ from app.services.user_profile import UserProfileStore
 from app.services.fact_extractors import create_hybrid_extractor
 from app.services.profile_summarization import ProfileSummarizer
 from app.services.resource_monitor import get_resource_monitor
+from app.services.system_prompt_manager import SystemPromptManager
 from app.services.resource_optimizer import (
     get_resource_optimizer,
     periodic_optimization_check,
@@ -29,6 +32,8 @@ from app.services.context import HybridSearchEngine, EpisodicMemoryStore
 from app.services.context.episode_boundary_detector import EpisodeBoundaryDetector
 from app.services.context.episode_monitor import EpisodeMonitor
 from app.services.context.episode_summarizer import EpisodeSummarizer
+from app.services.bot_profile import BotProfileStore
+from app.services.bot_learning import BotLearningEngine
 
 try:  # Optional dependency
     import redis.asyncio as redis
@@ -47,6 +52,8 @@ async def setup_bot_commands(bot: Bot) -> None:
         ]
         + ADMIN_COMMANDS
         + PROFILE_COMMANDS
+        + PROMPT_COMMANDS
+        + PROFILE_COMMANDS
     )
 
     try:
@@ -63,6 +70,19 @@ async def main() -> None:
     )
 
     settings = get_settings()
+
+    # Phase 2: Initialize trigger patterns from configuration
+    from app.services.triggers import initialize_triggers
+
+    trigger_patterns = (
+        settings.bot_trigger_patterns_list if settings.bot_trigger_patterns else None
+    )
+    initialize_triggers(trigger_patterns)
+
+    if trigger_patterns:
+        logging.info(f"Initialized {len(trigger_patterns)} custom trigger patterns")
+    else:
+        logging.info("Using default trigger patterns")
 
     bot = Bot(
         token=settings.telegram_token, default=DefaultBotProperties(parse_mode="HTML")
@@ -82,13 +102,10 @@ async def main() -> None:
     profile_store = UserProfileStore(settings.db_path)
     await profile_store.init()
 
-    # Create hybrid fact extractor based on configuration
+    # Create hybrid fact extractor (rule-based + optional Gemini fallback)
     fact_extractor = await create_hybrid_extractor(
-        extraction_method=settings.fact_extraction_method,
-        local_model_path=settings.local_model_path,
-        local_model_threads=settings.local_model_threads,
-        enable_gemini_fallback=settings.enable_gemini_fallback,
-        gemini_client=gemini_client if settings.enable_gemini_fallback else None,
+        enable_gemini_fallback=settings.enable_gemini_fact_extraction,
+        gemini_client=gemini_client if settings.enable_gemini_fact_extraction else None,
     )
 
     # Initialize profile summarization (Phase 2)
@@ -116,6 +133,11 @@ async def main() -> None:
             "episodic_memory": True,
         },
     )
+
+    # Initialize system prompt manager for admin configuration
+    prompt_manager = SystemPromptManager(db_path=settings.db_path)
+    await prompt_manager.init()
+    logging.info("System prompt manager initialized")
 
     # Phase 4: Initialize episode boundary detector and monitor
     episode_boundary_detector = EpisodeBoundaryDetector(
@@ -162,6 +184,42 @@ async def main() -> None:
             "async_processing": settings.enable_async_processing,
         },
     )
+
+    # Phase 5: Initialize bot self-learning system
+    bot_profile: BotProfileStore | None = None
+    bot_learning: BotLearningEngine | None = None
+
+    if settings.enable_bot_self_learning:
+        # Get bot ID early
+        me = await bot.get_me()
+        bot_id = me.id
+
+        bot_profile = BotProfileStore(
+            db_path=settings.db_path_str,
+            bot_id=bot_id,
+            gemini_client=gemini_client,
+            enable_temporal_decay=settings.enable_temporal_decay,
+            enable_semantic_dedup=settings.enable_semantic_dedup,
+        )
+        await bot_profile.init()
+
+        bot_learning = BotLearningEngine(
+            bot_profile=bot_profile,
+            gemini_client=gemini_client,
+            enable_gemini_insights=settings.enable_gemini_insights,
+        )
+
+        logging.info(
+            "Bot self-learning initialized",
+            extra={
+                "bot_id": bot_id,
+                "temporal_decay": settings.enable_temporal_decay,
+                "semantic_dedup": settings.enable_semantic_dedup,
+                "gemini_insights": settings.enable_gemini_insights,
+            },
+        )
+    else:
+        logging.info("Bot self-learning disabled (ENABLE_BOT_SELF_LEARNING=false)")
 
     # Phase 3: Initialize resource monitoring
     resource_monitor = get_resource_monitor()
@@ -245,15 +303,21 @@ async def main() -> None:
             episodic_memory=episodic_memory,
             episode_monitor=episode_monitor,
             continuous_monitor=continuous_monitor,
+            bot_profile=bot_profile,
+            bot_learning=bot_learning,
+            prompt_manager=prompt_manager,
             redis_client=redis_client,
         )
     )
+    # Chat filter must come BEFORE throttle to prevent wasting quota on blocked chats
+    dispatcher.message.middleware(ChatFilterMiddleware(settings))
     dispatcher.message.middleware(
         ThrottleMiddleware(store, settings, redis_client=redis_client)
     )
 
     dispatcher.include_router(admin_router)
     dispatcher.include_router(profile_admin_router)
+    dispatcher.include_router(prompt_admin_router)
     dispatcher.include_router(chat_router)
 
     # Setup bot commands with descriptions

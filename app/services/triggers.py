@@ -5,19 +5,37 @@ from typing import Iterable
 
 from aiogram.types import Message, MessageEntity
 
-# Match all grammatical forms of гряг/gryag:
-# - гряг, гряга, грягу, грягом, грязі, гряже, etc.
-# - gryag, gryaga, gryagu, gryagom, etc.
-# - гряґ and variations with apostrophe
-_TRIGGER_PATTERN = re.compile(
+# Default trigger pattern for backwards compatibility
+# Will be overridden by persona configuration or BOT_TRIGGER_PATTERNS setting
+_DEFAULT_TRIGGER_PATTERN = re.compile(
     r"\b(?:гр[яи]г[аоуеєіїюяьґ]*|gr[yi]ag\w*)\b", re.IGNORECASE | re.UNICODE
 )
+
+# Global trigger patterns (set by initialize_triggers function)
+_TRIGGER_PATTERNS: list[re.Pattern[str]] = [_DEFAULT_TRIGGER_PATTERN]
+
+
+def initialize_triggers(patterns: list[str] | None = None) -> None:
+    """Initialize trigger patterns from configuration.
+
+    Args:
+        patterns: List of regex pattern strings. If None, uses default pattern.
+    """
+    global _TRIGGER_PATTERNS
+
+    if patterns:
+        _TRIGGER_PATTERNS = [
+            re.compile(pattern, re.IGNORECASE | re.UNICODE) for pattern in patterns
+        ]
+    else:
+        _TRIGGER_PATTERNS = [_DEFAULT_TRIGGER_PATTERN]
 
 
 def _contains_keyword(text: str | None) -> bool:
     if not text:
         return False
-    return bool(_TRIGGER_PATTERN.search(text))
+    # Check all trigger patterns
+    return any(pattern.search(text) for pattern in _TRIGGER_PATTERNS)
 
 
 def _matches_mention(

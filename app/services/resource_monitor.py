@@ -182,15 +182,6 @@ class ResourceMonitor:
 
         return False, None
 
-    def should_disable_local_model(self) -> bool:
-        """Determine if local model should be disabled due to resource pressure.
-
-        Returns True if memory usage exceeds critical threshold (90% on i5-6500).
-        This triggers graceful degradation to rule-based + Gemini fallback.
-        """
-        is_critical, _ = self.check_memory_pressure()
-        return is_critical
-
     def log_resource_summary(self) -> None:
         """Log a summary of current resource usage."""
         stats = self.get_stats()

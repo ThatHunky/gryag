@@ -13,6 +13,9 @@ from app.services.fact_extractors import FactExtractor
 from app.services.monitoring.continuous_monitor import ContinuousMonitor
 from app.services.context import HybridSearchEngine, EpisodicMemoryStore
 from app.services.context.episode_monitor import EpisodeMonitor
+from app.services.bot_profile import BotProfileStore
+from app.services.bot_learning import BotLearningEngine
+from app.services.system_prompt_manager import SystemPromptManager
 
 
 class ChatMetaMiddleware(BaseMiddleware):
@@ -30,6 +33,9 @@ class ChatMetaMiddleware(BaseMiddleware):
         episodic_memory: EpisodicMemoryStore | None = None,
         episode_monitor: EpisodeMonitor | None = None,
         continuous_monitor: ContinuousMonitor | None = None,
+        bot_profile: BotProfileStore | None = None,
+        bot_learning: BotLearningEngine | None = None,
+        prompt_manager: SystemPromptManager | None = None,
         redis_client: RedisLike | None = None,
     ) -> None:
         self._bot = bot
@@ -42,6 +48,9 @@ class ChatMetaMiddleware(BaseMiddleware):
         self._episodic_memory = episodic_memory
         self._episode_monitor = episode_monitor
         self._continuous_monitor = continuous_monitor
+        self._bot_profile = bot_profile
+        self._bot_learning = bot_learning
+        self._prompt_manager = prompt_manager
         self._redis = redis_client
         self._bot_username: str | None = None
         self._bot_id: int | None = None
@@ -76,6 +85,9 @@ class ChatMetaMiddleware(BaseMiddleware):
         data["episodic_memory"] = self._episodic_memory
         data["episode_monitor"] = self._episode_monitor
         data["continuous_monitor"] = self._continuous_monitor
+        data["bot_profile"] = self._bot_profile
+        data["bot_learning"] = self._bot_learning
+        data["prompt_manager"] = self._prompt_manager
         if self._redis is not None:
             data["redis_client"] = self._redis
         return await handler(event, data)

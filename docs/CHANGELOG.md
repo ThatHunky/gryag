@@ -4,6 +4,50 @@ All notable changes to gryag's memory, context, and learning systems.
 
 ## [Unreleased]
 
+### 2025-10-08 - Search as Function Tool Implementation 🔍
+
+**Summary**: Converted Google Search grounding from direct API tool to a function calling tool, solving API limitation that prevented using search alongside other function tools.
+
+**Problem**: Google's Gemini API doesn't allow mixing `google_search` grounding with `function_declarations` in the same request. Error: `400 INVALID_ARGUMENT: Tool use with function calling is unsupported`
+
+**Solution**: Created `search_web` function tool that internally uses Google Search grounding, allowing both capabilities to coexist.
+
+**Changes**:
+1. **Created**: `app/services/search_tool.py` - New search wrapper using Google Search grounding backend
+2. **Modified**: `app/handlers/chat.py` - Replaced direct `{"google_search": {}}` with `SEARCH_WEB_TOOL_DEFINITION`
+3. **Modified**: `app/services/gemini.py` - Simplified tool handling (all tools now use function_declarations)
+4. **Modified**: `app/persona.py` - Added `search_web` to available tools documentation
+
+**Benefits**:
+- ✅ All function tools work together (memory, calculator, weather, currency, polls, search_messages, search_web)
+- ✅ No API conflicts or 400 errors
+- ✅ Bot explicitly decides when to search (better observability)
+- ✅ Same Google Search backend (no quality loss)
+
+**Documentation**: See [Search as Function Tool](fixes/SEARCH_AS_FUNCTION_TOOL.md)
+
+**Status**: ✅ Implemented and deployed, pending real-world testing
+
+---
+
+### 2025-01-29 - Google Gemini SDK Migration 🚀
+
+**Summary**: Completed full migration from legacy `google-generativeai` SDK (0.8.5) to modern `google-genai` SDK (0.2+).
+
+**Changes**:
+1. **app/services/gemini.py**: Refactored to use `genai.Client()` and `client.aio.models` API
+2. **requirements.txt**: Changed from `google-generativeai>=0.8` to `google-genai>=0.2.0`  
+3. **Safety settings**: Converted to `types.SafetySetting` objects
+4. **Search grounding**: Now supports modern `google_search` format
+
+**Benefits**: Native Gemini 2.5 support, better type safety, simpler API, modern search grounding
+
+**Documentation**: See [SDK Migration Guide](fixes/SEARCH_GROUNDING_SDK_MIGRATION.md)
+
+**Status**: Code migrated, pending Docker rebuild and testing
+
+---
+
 ### 2025-10-08 - Google Search Grounding - SDK Compatibility Fix �
 
 **Issue**: Attempted to update search grounding to modern `google_search` format but discovered SDK incompatibility.

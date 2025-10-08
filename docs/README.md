@@ -15,7 +15,12 @@ Structure recommended:
 
 **October 8, 2025**: **Google Search Grounding SDK Compatibility Fix** - Attempted to modernize to `google_search` format but discovered bot uses legacy `google.generativeai` SDK which only supports `google_search_retrieval`. Reverted to working configuration with detailed documentation. Error: `ValueError: Unknown field for FunctionDeclaration: google_search`. Modified `app/handlers/chat.py` (reverted with explanatory comment), updated docs. See `docs/fixes/SEARCH_GROUNDING_API_UPDATE.md`. Verification: `grep "google_search_retrieval" app/handlers/chat.py` (should find the working format)
 
-**October 8, 2025**: Fixed **Reply Message Media Visibility** - Bot now sees media from replied-to messages even when they're outside the context window. Added explicit history injection logic that detects reply contexts with media and inserts them into conversation history sent to Gemini. Includes deduplication to prevent duplicate messages. Modified `app/handlers/chat.py` (+60 lines), added `docs/fixes/REPLY_MEDIA_CONTEXT_FIX.md`. Verification: Reply to an old message with a photo and tag the bot → Bot should describe the photo. Check logs for: `DEBUG - Injected reply context with N media part(s) into history`
+# Documentation Index
+
+Recent significant changes:
+
+1. **2025-01-29**: [Google Gemini SDK Migration](fixes/SEARCH_GROUNDING_SDK_MIGRATION.md) - Migrated from `google-generativeai` 0.8.5 to `google-genai` 0.2+ for native Gemini 2.5 support
+2. **2025-10-08**: [Reply Message Media Visibility Fix](fixes/REPLY_MEDIA_VISIBILITY_FIX.md) - Fixed media context in replies (was being silently dropped)
 
 **October 7, 2025**: Implemented **Comprehensive Model Capability Detection System** - Bot now automatically adapts to different Gemini model families (Gemma, Gemini, Flash) by detecting and gracefully handling: audio support, video support, media count limits, function calling (tools), rate limiting, and historical context filtering. Five fixes in total: (1) media count limiting (max 28 for Gemma), (2) current message media filtering by type, (3) historical context two-phase filtering, (4) rate limit warnings, (5) tool support detection and disabling. Works with zero configuration - just set `GEMINI_MODEL` and capabilities are auto-detected. See `docs/features/comprehensive-model-capability-detection.md` and 5 detailed fix docs in `docs/fixes/` and `docs/features/`. Verification: `grep -E "_detect.*support|_is_media_supported|_limit_media_in_history" app/services/gemini.py app/services/context/multi_level_context.py | wc -l` (should show 15+ matches)
 

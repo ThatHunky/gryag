@@ -21,6 +21,7 @@ from app.services.calculator import calculator_tool, CALCULATOR_TOOL_DEFINITION
 from app.services.weather import weather_tool, WEATHER_TOOL_DEFINITION
 from app.services.currency import currency_tool, CURRENCY_TOOL_DEFINITION
 from app.services.polls import polls_tool, POLLS_TOOL_DEFINITION
+from app.services.search_tool import search_web_tool, SEARCH_WEB_TOOL_DEFINITION
 from app.services.system_prompt_manager import SystemPromptManager
 from app.services.tools import (
     remember_fact_tool,
@@ -976,14 +977,8 @@ async def handle_group_message(
         return json.dumps({"results": payload})
 
     tool_definitions: list[dict[str, Any]] = []
-    if settings.enable_search_grounding:
-        # Modern google_search format for google-genai SDK (0.2+)
-        # Replaces legacy google_search_retrieval from google-generativeai SDK
-        retrieval_tool: dict[str, Any] = {
-            "google_search": {}
-        }
-        tool_definitions.append(retrieval_tool)
 
+    # Add search_messages tool for searching chat history
     tool_definitions.append(
         {
             "function_declarations": [
@@ -1014,6 +1009,10 @@ async def handle_group_message(
             ]
         }
     )
+
+    # Add web search tool (replaces direct google_search grounding)
+    if settings.enable_search_grounding:
+        tool_definitions.append(SEARCH_WEB_TOOL_DEFINITION)
 
     # Add calculator tool
     tool_definitions.append(CALCULATOR_TOOL_DEFINITION)
@@ -1185,6 +1184,13 @@ async def handle_group_message(
         "currency": make_tracked_tool_callback("currency", currency_tool),
         "polls": make_tracked_tool_callback("polls", polls_tool),
     }
+
+    # Add web search callback (if enabled)
+    if settings.enable_search_grounding:
+        tracked_tool_callbacks["search_web"] = make_tracked_tool_callback(
+            "search_web",
+            lambda params: search_web_tool(params, gemini_client),
+        )
 
     # Add memory tool callbacks (Phase 5.1)
     if settings.enable_tool_based_memory:

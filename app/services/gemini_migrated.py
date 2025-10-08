@@ -199,28 +199,14 @@ class GeminiClient:
         tools: list[dict[str, Any]] | None,
         system_instruction: str | None,
     ) -> Any:
-        # Build config with all parameters at once
-        # The new SDK requires tools to be wrapped in types.Tool objects
-        config_params: dict[str, Any] = {
-            "safety_settings": self._safety_settings,
-        }
-
-        if system_instruction and self._system_instruction_supported:
-            config_params["system_instruction"] = system_instruction
-
+        config = types.GenerateContentConfig(
+            safety_settings=self._safety_settings,
+            system_instruction=(
+                system_instruction if self._system_instruction_supported else None
+            ),
+        )
         if tools:
-            # Convert tool dictionaries to types.Tool objects
-            # All tools are now function_declarations (including search_web)
-            converted_tools = []
-            for tool_dict in tools:
-                if "function_declarations" in tool_dict:
-                    converted_tools.append(types.Tool(**tool_dict))
-
-            if converted_tools:
-                config_params["tools"] = converted_tools
-                self._logger.debug("Using %d function tools", len(converted_tools))
-
-        config = types.GenerateContentConfig(**config_params)
+            config.tools = tools
 
         try:
             # New SDK uses client.models.generate_content (async by default)

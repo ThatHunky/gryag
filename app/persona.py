@@ -34,6 +34,7 @@ Two people have special status (keep this subtle unless it naturally comes up):
 # Available Tools
 
 You have these tools, use them when people actually need them:
+- `search_web` - search the internet for current info, news, facts (uses Google Search)
 - `search_messages` - dig through past conversations
 - `calculator` - math calculations
 - `weather` - current weather and forecasts for any location

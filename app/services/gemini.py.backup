@@ -8,8 +8,8 @@ import time
 from typing import Any, Awaitable, Callable, Iterable
 import logging
 
-from google import genai
-from google.genai import types
+import google.generativeai as genai
+from google.generativeai.types import HarmBlockThreshold, HarmCategory
 
 from app.services import telemetry
 
@@ -22,8 +22,8 @@ class GeminiClient:
     """Async wrapper around Google Gemini models."""
 
     def __init__(self, api_key: str, model: str, embed_model: str) -> None:
-        self._client = genai.Client(api_key=api_key)
-        self._model = None  # Not needed in new SDK - we call client.models.generate_content directly
+        genai.configure(api_key=api_key)  # type: ignore[attr-defined]
+        self._model = genai.GenerativeModel(model_name=model)  # type: ignore[attr-defined]
         self._model_name = model
         self._embed_model = embed_model
         self._logger = logging.getLogger(__name__)
@@ -34,8 +34,13 @@ class GeminiClient:
         self._video_supported = self._detect_video_support(model)
         self._tools_supported = self._detect_tools_support(model)
 
-        # New SDK supports system_instruction by default
-        self._system_instruction_supported = True
+        try:
+            signature = inspect.signature(self._model.generate_content_async)
+        except (AttributeError, ValueError, TypeError):
+            signature = None
+        self._system_instruction_supported = bool(
+            signature and "system_instruction" in signature.parameters
+        )
         self._generate_timeout = 45.0
         self._max_failures = 3
         self._cooldown_seconds = 60.0
@@ -43,24 +48,22 @@ class GeminiClient:
         self._circuit_open_until = 0.0
         self._embed_semaphore = asyncio.Semaphore(8)
         # Gemini 1.5 renamed some safety categories and dropped the SafetySetting class
-        # Safety settings for new SDK
+        categories = []
+        for name in (
+            "HARM_CATEGORY_HARASSMENT",
+            "HARM_CATEGORY_HATE_SPEECH",
+            "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+            "HARM_CATEGORY_SEXUAL",  # backwards compatibility with older SDKs
+            "HARM_CATEGORY_SELF_HARM",
+            "HARM_CATEGORY_DANGEROUS_CONTENT",
+        ):
+            category = getattr(HarmCategory, name, None)
+            if category is not None and category not in categories:
+                categories.append(category)
+
         self._safety_settings = [
-            types.SafetySetting(
-                category="HARM_CATEGORY_HARASSMENT",
-                threshold="BLOCK_NONE",
-            ),
-            types.SafetySetting(
-                category="HARM_CATEGORY_HATE_SPEECH",
-                threshold="BLOCK_NONE",
-            ),
-            types.SafetySetting(
-                category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                threshold="BLOCK_NONE",
-            ),
-            types.SafetySetting(
-                category="HARM_CATEGORY_DANGEROUS_CONTENT",
-                threshold="BLOCK_NONE",
-            ),
+            {"category": category, "threshold": HarmBlockThreshold.BLOCK_NONE}
+            for category in categories
         ]
 
     @staticmethod
@@ -199,40 +202,21 @@ class GeminiClient:
         tools: list[dict[str, Any]] | None,
         system_instruction: str | None,
     ) -> Any:
-        # Build config with all parameters at once
-        # The new SDK requires tools to be wrapped in types.Tool objects
-        config_params: dict[str, Any] = {
+        kwargs: dict[str, Any] = {
             "safety_settings": self._safety_settings,
         }
-
-        if system_instruction and self._system_instruction_supported:
-            config_params["system_instruction"] = system_instruction
-
         if tools:
-            # Convert tool dictionaries to types.Tool objects
-            # All tools are now function_declarations (including search_web)
-            converted_tools = []
-            for tool_dict in tools:
-                if "function_declarations" in tool_dict:
-                    converted_tools.append(types.Tool(**tool_dict))
-
-            if converted_tools:
-                config_params["tools"] = converted_tools
-                self._logger.debug("Using %d function tools", len(converted_tools))
-
-        config = types.GenerateContentConfig(**config_params)
-
+            kwargs["tools"] = tools
+        if system_instruction and self._system_instruction_supported:
+            kwargs["system_instruction"] = system_instruction
         try:
-            # New SDK uses client.models.generate_content (async by default)
-            response = await asyncio.wait_for(
-                self._client.aio.models.generate_content(
-                    model=self._model_name,
-                    contents=contents,
-                    config=config,
+            return await asyncio.wait_for(
+                self._model.generate_content_async(
+                    contents,
+                    **kwargs,
                 ),
                 timeout=self._generate_timeout,
             )
-            return response
         except asyncio.TimeoutError as exc:
             raise GeminiError("Gemini request timed out") from exc
 
@@ -666,18 +650,10 @@ class GeminiClient:
         if not text or not text.strip():
             return []
 
+        def _embed() -> list[float]:
+            result = genai.embed_content(model=self._embed_model, content=text)  # type: ignore[attr-defined]
+            embedding = result.get("embedding") if isinstance(result, dict) else None
+            return list(embedding) if embedding else []
+
         async with self._embed_semaphore:
-            try:
-                response = await self._client.aio.models.embed_content(
-                    model=self._embed_model,
-                    contents=text,
-                )
-                # Extract embedding from response
-                if hasattr(response, "embeddings") and response.embeddings:
-                    embedding = response.embeddings[0]
-                    if hasattr(embedding, "values"):
-                        return list(embedding.values)
-                return []
-            except Exception as exc:
-                self._logger.warning("Embedding failed: %s", exc)
-                return []
+            return await asyncio.to_thread(_embed)

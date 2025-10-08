@@ -82,18 +82,36 @@ async def chatfacts_command(
     chat_id = message.chat.id
 
     try:
-        # Get chat profile
-        profile = await chat_profile_store.get_or_create_profile(
-            chat_id=chat_id,
-            chat_type=message.chat.type,
-            chat_title=message.chat.title,
-        )
+        # Import UnifiedFactRepository for direct access
+        from app.repositories.fact_repository import UnifiedFactRepository
 
-        # Get all active facts
-        all_facts = await chat_profile_store.get_all_facts(
-            chat_id=chat_id,
+        fact_repo = UnifiedFactRepository(settings.db_path)
+
+        # Get all active chat facts from unified repository
+        all_facts_data = await fact_repo.get_facts(
+            entity_id=chat_id,  # chat_id (negative number)
             include_inactive=False,
         )
+
+        if not all_facts_data:
+            await message.reply(
+                "📭 Ще немає фактів про цей чат.\n\n"
+                "Я почну запам'ятовувати групові звички, традиції та норми "
+                "після кількох розмов."
+            )
+            return
+
+        # Convert to objects with attributes for compatibility
+        class FactObj:
+            def __init__(self, data: dict):
+                self.fact_category = data["fact_category"]
+                self.fact_key = data["fact_key"]
+                self.fact_value = data["fact_value"]
+                self.fact_description = data.get("fact_description")
+                self.confidence = data["confidence"]
+                self.evidence_count = data.get("evidence_count", 1)
+
+        all_facts = [FactObj(f) for f in all_facts_data]
 
         if not all_facts:
             await message.reply(
@@ -150,14 +168,8 @@ async def chatfacts_command(
                     f"(підтверджень: {fact.evidence_count})"
                 )
 
-        # Add summary if available
-        if profile.culture_summary:
-            lines.append(f"\n💡 <b>Культура чату:</b>\n{profile.culture_summary}")
-
-        # Add footer
-        lines.append(
-            f"\n<i>Останнє оновлення: {_format_timestamp(profile.updated_at)}</i>"
-        )
+        # Add footer (without profile info for now since we're using unified repo)
+        lines.append(f"\n<i>📊 Всього категорій: {len(facts_by_category)}</i>")
 
         response = "\n".join(lines)
 

@@ -18,7 +18,7 @@ from app.middlewares.chat_filter import ChatFilterMiddleware
 from app.middlewares.chat_meta import ChatMetaMiddleware
 from app.services.context_store import ContextStore
 from app.services.gemini import GeminiClient
-from app.services.user_profile import UserProfileStore
+from app.services.user_profile_adapter import UserProfileStoreAdapter
 from app.repositories.chat_profile import ChatProfileRepository
 from app.services.fact_extractors import create_hybrid_extractor
 from app.services.profile_summarization import ProfileSummarizer
@@ -100,7 +100,7 @@ async def main() -> None:
     )
 
     # Initialize user profiling system
-    profile_store = UserProfileStore(settings.db_path)
+    profile_store = UserProfileStoreAdapter(settings.db_path)
     await profile_store.init()
 
     # Initialize chat profiling system (Phase 4: Chat Public Memory)

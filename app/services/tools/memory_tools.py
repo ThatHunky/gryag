@@ -1,6 +1,8 @@
 """Memory tool handlers for Gemini function calling.
 
 These tools give the model direct control over memory operations.
+
+Updated to use UnifiedFactRepository for both user and chat facts.
 """
 
 from __future__ import annotations
@@ -10,7 +12,7 @@ import logging
 import time
 from typing import Any
 
-from app.services.user_profile import UserProfileStore
+from app.repositories.fact_repository import UnifiedFactRepository
 from app.services import telemetry
 
 LOGGER = logging.getLogger(__name__)
@@ -26,21 +28,25 @@ async def remember_fact_tool(
     # Injected by handler
     chat_id: int | None = None,
     message_id: int | None = None,
-    profile_store: UserProfileStore | None = None,
+    fact_repo: UnifiedFactRepository | None = None,
 ) -> str:
     """
     Tool handler for remembering facts.
 
+    Auto-detects entity type:
+    - user_id > 0 → user fact (stored with chat_context)
+    - user_id < 0 → chat fact (user_id is actually chat_id)
+
     Args:
-        user_id: Telegram user ID
-        fact_type: Category (personal, preference, skill, trait, opinion, relationship)
+        user_id: Telegram user ID (or chat ID if negative)
+        fact_type: Category (maps to fact_category in unified schema)
         fact_key: Standardized key (location, hobby, programming_language, etc.)
         fact_value: The actual fact content
         confidence: Confidence score (0.5-1.0)
         source_excerpt: Quote from message (optional)
-        chat_id: Chat ID (injected)
+        chat_id: Chat ID context (injected)
         message_id: Message ID (injected)
-        profile_store: UserProfileStore instance (injected)
+        fact_repo: UnifiedFactRepository instance (injected)
 
     Returns:
         JSON string for Gemini to interpret
@@ -48,7 +54,7 @@ async def remember_fact_tool(
     start_time = time.time()
 
     try:
-        if not profile_store:
+        if not fact_repo:
             return json.dumps(
                 {"status": "error", "message": "Profile store not available"}
             )

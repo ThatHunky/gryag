@@ -1,8 +1,26 @@
 # Docs
 
-This ## Recent Changes
+This directory contains the repository documentation organized into subfolders. When moving or reorganizing docs, follow the rules in `AGENTS.md` and add a short summary here describing the change.
 
-**October 8, 2025**: **Chat Public Memory Admin Commands (Phase 5 Complete) 🎉** - Implemented full admin interface for chat memory management. Created `/gryadchatfacts` command (shows facts grouped by category with confidence bars) and `/gryadchatreset` command (delete all chat facts with confirmation). Added `chat_admin_router` with emoji formatting and admin-only access control. **Chat Public Memory System is now FULLY OPERATIONAL** - all 5 phases complete! Verification: `test -f app/handlers/chat_admin.py && echo "✅"` 
+Structure recommended:
+
+- docs/overview/ — high-level project overviews
+- docs/plans/ — implementation plans and roadmaps
+- docs/phases/ — phase-specific writeups and status reports
+- docs/features/ — feature specs
+- docs/guides/ — operational guides and runbooks
+- docs/history/ — transient exports or archived notes (optional)
+- docs/fixes/ — bug fix documentation
+
+## Recent Changes
+
+**October 8, 2025**: **🎯 COMPLETE: Unified Fact Storage Implementation** - **All phases done!** Successfully migrated database (95 facts), created UnifiedFactRepository, built UserProfileStoreAdapter for backward compatibility, updated /gryagchatfacts command, and wrote comprehensive tests. Chat facts now work correctly - the bug where "любити кавунову пітсу" was invisible is **FIXED**! Integration tests pass 100%. Created 5 new files: fact_repository.py, user_profile_adapter.py, test_unified_facts.py, migration script, and documentation. See `docs/phases/UNIFIED_FACT_STORAGE_COMPLETE.md` for full implementation details. Verification: `python scripts/verification/test_unified_facts.py` (all tests pass)
+
+**October 8, 2025**: **🎯 MAJOR: Unified Fact Storage Architecture** - Replaced separate `user_facts` and `chat_facts` tables with single unified `facts` table. Fixed critical bug where chat facts were stored in wrong table and not visible in `/gryagchatfacts`. Migration successfully moved 95 facts (94 user, 1 chat) to new schema with entity_type detection. Old tables preserved as `*_old` for rollback safety. Created migration script `scripts/migrations/migrate_to_unified_facts.py` and comprehensive plan in `docs/plans/UNIFIED_FACT_STORAGE.md`. **Chat facts now work correctly!** Verification: `sqlite3 gryag.db "SELECT entity_type, COUNT(*) FROM facts GROUP BY entity_type"` (should show chat: 1, user: 94)
+
+**October 8, 2025**: **Chat Facts Storage Bug Identified** - Discovered critical bug: bot's memory tools store chat facts in `user_facts` table (using chat_id as user_id), but `/gryagchatfacts` command reads from separate `chat_facts` table. Result: facts are stored but not visible. Root cause: two independent fact systems developed without integration. Documented in `docs/fixes/CHAT_FACTS_NOT_SHOWING.md` with 3 solution options. Chose Option 3 (unify tables) as long-term fix. Verification: `cat docs/fixes/CHAT_FACTS_NOT_SHOWING.md | grep -c "user_facts\|chat_facts"` (shows the problem)
+
+**October 8, 2025**: **Chat Public Memory Admin Commands (Phase 5 Complete) 🎉** - Implemented full admin interface for chat memory management. Created `/gryagchatfacts` command (shows facts grouped by category with confidence bars) and `/gryagchatreset` command (delete all chat facts with confirmation). Added `chat_admin_router` with emoji formatting and admin-only access control. **Chat Public Memory System is now FULLY OPERATIONAL** - all 5 phases complete! Verification: `test -f app/handlers/chat_admin.py && echo "✅"` 
 
 **October 8, 2025**: **Chat Public Memory Initialization (Phase 4 Complete)** - Wired chat public memory into bot startup sequence. ChatProfileRepository now initializes on startup and gets injected into ContinuousMonitor (creates ChatFactExtractor internally) and ChatMetaMiddleware (makes it available to all handlers). Implemented abstract methods in ChatProfileRepository (find_by_id, save, delete). Next: create admin commands for chat fact management. Verification: `grep -c "chat_profile_store" app/main.py app/middlewares/chat_meta.py` (should show 6+ matches)
 

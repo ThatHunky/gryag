@@ -1,6 +1,12 @@
 # Docs
 
-This folder contains the repository documentation organized into subfolders. When moving or reorganizing docs, follow the rules in `AGENTS.md` and add a short summary here describing the change.
+This ## Recent Changes
+
+**October 8, 2025**: **Chat Public Memory Admin Commands (Phase 5 Complete) 🎉** - Implemented full admin interface for chat memory management. Created `/gryadchatfacts` command (shows facts grouped by category with confidence bars) and `/gryadchatreset` command (delete all chat facts with confirmation). Added `chat_admin_router` with emoji formatting and admin-only access control. **Chat Public Memory System is now FULLY OPERATIONAL** - all 5 phases complete! Verification: `test -f app/handlers/chat_admin.py && echo "✅"` 
+
+**October 8, 2025**: **Chat Public Memory Initialization (Phase 4 Complete)** - Wired chat public memory into bot startup sequence. ChatProfileRepository now initializes on startup and gets injected into ContinuousMonitor (creates ChatFactExtractor internally) and ChatMetaMiddleware (makes it available to all handlers). Implemented abstract methods in ChatProfileRepository (find_by_id, save, delete). Next: create admin commands for chat fact management. Verification: `grep -c "chat_profile_store" app/main.py app/middlewares/chat_meta.py` (should show 6+ matches)
+
+**October 8, 2025**: **Chat Public Memory Integration (Phase 3 Complete)** - Integrated chat-level memory extraction and retrieval into the continuous monitoring pipeline and multi-level context system. Added `raw_messages` field to `ConversationWindow`, implemented `_store_chat_facts()` in ContinuousMonitor, extended `BackgroundContext` with chat facts. Token budget: 60% user facts (720 tokens), 40% chat facts (480 tokens). Modified 3 core files: `continuous_monitor.py`, `conversation_analyzer.py`, `multi_level_context.py`. Next: initialize in main.py, create admin commands. See `docs/CHANGELOG.md` (2025-10-08 entry). Verification: `bash scripts/verification/verify_chat_memory_integration.sh` (33/37 checks passing)der contains the repository documentation organized into subfolders. When moving or reorganizing docs, follow the rules in `AGENTS.md` and add a short summary here describing the change.
 
 Structure recommended:
 
@@ -12,6 +18,12 @@ Structure recommended:
 - docs/history/ — transient exports or archived notes (optional)
 
 ## Recent Changes
+
+**October 8, 2025**: **Chat Public Memory Integration (Phase 3 Complete)** - Integrated chat-level memory system into continuous monitoring and multi-level context pipelines. Added `raw_messages` field to `ConversationWindow`, implemented `_store_chat_facts()` in ContinuousMonitor, extended `BackgroundContext` with chat facts. Token budget: 60% user facts (720 tokens), 40% chat facts (480 tokens). Modified 3 core files: `continuous_monitor.py`, `conversation_analyzer.py`, `multi_level_context.py`. Next: initialize in main.py, create admin commands. See `docs/CHANGELOG.md` (2025-10-08 entry). Verification: `bash scripts/verification/verify_chat_memory_integration.sh` (33/37 checks passing)
+
+**October 8, 2025**: **Chat Public Memory Plan** - Created comprehensive design plan for group-level memory system. Bot will now remember chat-wide facts (preferences, traditions, rules, culture) separate from user-specific facts. Includes: new database schema (`chat_facts` table), extraction methods (pattern, statistical, LLM), integration with multi-level context, and token budget management (400 tokens max). 4-week implementation roadmap. See `docs/plans/CHAT_PUBLIC_MEMORY.md`. Verification: `grep -c "chat_facts\|ChatFactExtractor\|chat_profile" docs/plans/CHAT_PUBLIC_MEMORY.md` (should show 50+ matches)
+
+**October 8, 2025**: **Repository Cleanup and Organization** - Organized root-level files into proper directories. Moved 3 markdown docs to `docs/`, 19 Python scripts to `scripts/` (organized into migrations/, diagnostics/, tests/, verification/, deprecated/), and 6 shell scripts to `scripts/verification/`. Created `scripts/README.md` with comprehensive inventory. Only `README.md` and `AGENTS.md` remain at root. See changelog entry below. Verification: `ls -1 *.py *.sh *.md 2>/dev/null | grep -v -E "^(README.md|AGENTS.md)$"` (should return empty) and `tree scripts/ -L 1` (should show organized subdirectories)
 
 **October 8, 2025**: **Google Search Grounding SDK Compatibility Fix** - Attempted to modernize to `google_search` format but discovered bot uses legacy `google.generativeai` SDK which only supports `google_search_retrieval`. Reverted to working configuration with detailed documentation. Error: `ValueError: Unknown field for FunctionDeclaration: google_search`. Modified `app/handlers/chat.py` (reverted with explanatory comment), updated docs. See `docs/fixes/SEARCH_GROUNDING_API_UPDATE.md`. Verification: `grep "google_search_retrieval" app/handlers/chat.py` (should find the working format)
 

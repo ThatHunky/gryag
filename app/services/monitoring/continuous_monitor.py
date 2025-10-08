@@ -6,12 +6,13 @@ Integrates all components: classification, windowing, fact extraction, and proac
 
 Phase 1: Log classifications, track windows, queue events (no behavior changes)
 Phase 3+: Actually process events and enable continuous learning
+Chat Public Memory (Oct 2025): Extract and store group-level facts
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, List, Tuple
 
 from aiogram.types import Message
 
@@ -28,6 +29,8 @@ from app.services.monitoring.proactive_trigger import ProactiveTrigger
 from app.services.monitoring.event_system import EventQueue, Event, EventPriority
 from app.services.user_profile import UserProfileStore
 from app.services.fact_extractors import FactExtractor
+from app.services.fact_extractors.chat_fact_extractor import ChatFactExtractor
+from app.repositories.chat_profile import ChatProfileRepository, ChatFact
 
 LOGGER = logging.getLogger(__name__)
 
@@ -54,6 +57,7 @@ class ContinuousMonitor:
         gemini_client: GeminiClient,
         user_profile_store: UserProfileStore,
         fact_extractor: FactExtractor,
+        chat_profile_store: ChatProfileRepository | None = None,
         enable_monitoring: bool = True,
         enable_filtering: bool = False,  # Phase 1: False, Phase 3: True
         enable_async_processing: bool = False,  # Phase 1: False, Phase 3: True
@@ -67,6 +71,7 @@ class ContinuousMonitor:
             gemini_client: Gemini API client
             user_profile_store: User profile store
             fact_extractor: Fact extraction service
+            chat_profile_store: Chat profile store (for chat-level facts)
             enable_monitoring: Master switch for monitoring
             enable_filtering: Enable message filtering (Phase 3)
             enable_async_processing: Enable async event processing (Phase 3)
@@ -76,6 +81,7 @@ class ContinuousMonitor:
         self.gemini_client = gemini_client
         self.user_profile_store = user_profile_store
         self.fact_extractor = fact_extractor
+        self.chat_profile_store = chat_profile_store
 
         self.enable_monitoring = enable_monitoring
         self.enable_filtering = enable_filtering
@@ -99,6 +105,18 @@ class ContinuousMonitor:
             gemini_client=gemini_client,
             settings=settings,
         )
+
+        # Chat fact extractor (for group-level facts)
+        self.chat_fact_extractor = None
+        if self.settings.enable_chat_memory and chat_profile_store:
+            method = self.settings.chat_fact_extraction_method
+            self.chat_fact_extractor = ChatFactExtractor(
+                gemini_client=gemini_client,
+                enable_patterns="pattern" in method or "hybrid" in method,
+                enable_statistical="statistical" in method or "hybrid" in method,
+                enable_llm="llm" in method or "hybrid" in method,
+                min_confidence=self.settings.chat_fact_min_confidence,
+            )
 
         self.event_queue = EventQueue(
             num_workers=3,
@@ -412,17 +430,18 @@ Response:"""
 
     async def _extract_facts_from_window(
         self, window: ConversationWindow
-    ) -> list[dict[str, Any]]:
+    ) -> Tuple[List[dict[str, Any]], List[ChatFact]]:
         """
-        Extract facts from a conversation window.
+        Extract both user facts and chat facts from a conversation window.
 
         Phase 3 implementation: Uses fact extractor to analyze conversation context.
+        Chat Public Memory (Oct 2025): Also extracts group-level facts.
 
         Args:
             window: Closed conversation window
 
         Returns:
-            List of extracted facts with metadata
+            Tuple of (user_facts, chat_facts)
         """
         try:
             # Build conversation context from window messages
@@ -445,7 +464,7 @@ Response:"""
 
             if not messages_text:
                 LOGGER.debug("No text content in window, skipping fact extraction")
-                return []
+                return ([], [])
 
             # Join into conversation
             conversation = "\n".join(messages_text)
@@ -458,8 +477,8 @@ Response:"""
                 },
             )
 
-            # Extract facts for each participant
-            all_facts = []
+            # Extract user facts for each participant
+            all_user_facts = []
 
             for user_id in participants:
                 # Skip bot's own messages
@@ -483,21 +502,48 @@ Response:"""
                         fact["window_message_count"] = len(window.messages)
                         fact["window_has_high_value"] = window.has_high_value
 
-                    all_facts.extend(facts)
+                    all_user_facts.extend(facts)
 
                     LOGGER.info(
-                        f"Extracted {len(facts)} facts from window for user {user_id}",
+                        f"Extracted {len(facts)} user facts from window for user {user_id}",
                         extra={"chat_id": window.chat_id, "user_id": user_id},
                     )
 
                 except Exception as e:
                     LOGGER.error(
-                        f"Failed to extract facts for user {user_id}: {e}",
+                        f"Failed to extract user facts for user {user_id}: {e}",
                         extra={"chat_id": window.chat_id, "user_id": user_id},
                     )
 
-            self._stats["facts_extracted"] += len(all_facts)
-            return all_facts
+            # Extract chat facts (group-level)
+            chat_facts = []
+            if (
+                self.settings.enable_chat_memory
+                and self.settings.enable_chat_fact_extraction
+                and self.chat_fact_extractor
+                and hasattr(window, "raw_messages")
+                and window.raw_messages
+            ):
+                try:
+                    chat_facts = await self.chat_fact_extractor.extract_chat_facts(
+                        messages=window.raw_messages,
+                        chat_id=window.chat_id,
+                    )
+
+                    LOGGER.info(
+                        f"Extracted {len(chat_facts)} chat-level facts from window",
+                        extra={"chat_id": window.chat_id},
+                    )
+
+                except Exception as e:
+                    LOGGER.error(
+                        f"Failed to extract chat facts: {e}",
+                        exc_info=True,
+                        extra={"chat_id": window.chat_id},
+                    )
+
+            self._stats["facts_extracted"] += len(all_user_facts) + len(chat_facts)
+            return (all_user_facts, chat_facts)
 
         except Exception as e:
             LOGGER.error(
@@ -505,19 +551,42 @@ Response:"""
                 exc_info=True,
                 extra={"chat_id": window.chat_id},
             )
-            return []
+            return ([], [])
 
     async def _store_facts(
-        self, facts: list[dict[str, Any]], window: ConversationWindow
+        self,
+        facts: Tuple[List[dict[str, Any]], List[ChatFact]],
+        window: ConversationWindow,
     ) -> None:
         """
-        Store extracted facts with quality processing.
+        Store extracted user facts and chat facts with quality processing.
 
         Phase 3 implementation: Apply deduplication, conflict resolution, and decay
         before storing facts.
+        Chat Public Memory (Oct 2025): Also stores group-level facts.
 
         Args:
-            facts: Extracted facts from window
+            facts: Tuple of (user_facts, chat_facts) from extraction
+            window: Conversation window (for context)
+        """
+        user_facts, chat_facts = facts
+
+        # Store user facts (existing logic)
+        if user_facts:
+            await self._store_user_facts(user_facts, window)
+
+        # Store chat facts (new logic)
+        if chat_facts and self.chat_profile_store:
+            await self._store_chat_facts(chat_facts, window)
+
+    async def _store_user_facts(
+        self, facts: List[dict[str, Any]], window: ConversationWindow
+    ) -> None:
+        """
+        Store user facts with quality processing.
+
+        Args:
+            facts: Extracted user facts from window
             window: Conversation window (for context)
         """
         if not facts:
@@ -605,6 +674,67 @@ Response:"""
         except Exception as e:
             LOGGER.error(
                 f"Error storing facts: {e}",
+                exc_info=True,
+                extra={"chat_id": window.chat_id},
+            )
+
+    async def _store_chat_facts(
+        self, chat_facts: list[ChatFact], window: ConversationWindow
+    ) -> None:
+        """
+        Store chat-level facts via ChatProfileRepository.
+
+        Args:
+            chat_facts: List of extracted chat facts
+            window: Conversation window containing source messages
+        """
+        if not self.chat_profile_store or not chat_facts:
+            return
+
+        try:
+            LOGGER.info(
+                f"Storing {len(chat_facts)} chat facts",
+                extra={"chat_id": window.chat_id},
+            )
+
+            for fact in chat_facts:
+                try:
+                    await self.chat_profile_store.add_chat_fact(
+                        chat_id=window.chat_id,
+                        category=fact.fact_category,
+                        fact_key=fact.fact_key,
+                        fact_value=fact.fact_value,
+                        fact_description=fact.fact_description,
+                        confidence=fact.confidence,
+                        evidence_text=fact.evidence_text,
+                    )
+
+                    LOGGER.debug(
+                        f"Stored chat fact: {fact.fact_category}.{fact.fact_key}",
+                        extra={
+                            "chat_id": window.chat_id,
+                            "confidence": fact.confidence,
+                        },
+                    )
+
+                except Exception as e:
+                    LOGGER.error(
+                        f"Failed to store chat fact: {e}",
+                        extra={
+                            "chat_id": window.chat_id,
+                            "fact_category": fact.fact_category,
+                            "fact_key": fact.fact_key,
+                        },
+                    )
+
+            LOGGER.info(
+                f"Successfully stored {len(chat_facts)} chat facts",
+                extra={"chat_id": window.chat_id},
+            )
+
+        except Exception as e:
+            LOGGER.error(
+                f"Error storing chat facts: {e}",
                 exc_info=True,
                 extra={"chat_id": window.chat_id},
             )

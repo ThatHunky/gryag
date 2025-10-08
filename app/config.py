@@ -301,6 +301,43 @@ class Settings(BaseSettings):
     )
 
     # ═══════════════════════════════════════════════════════════════════════════════
+    # Chat Public Memory (October 2025)
+    # Group-level memory for chat-wide facts, preferences, and culture
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    # Master switch
+    enable_chat_memory: bool = Field(True, alias="ENABLE_CHAT_MEMORY")
+
+    # Extraction
+    enable_chat_fact_extraction: bool = Field(True, alias="ENABLE_CHAT_FACT_EXTRACTION")
+    chat_fact_min_confidence: float = Field(
+        0.6, alias="CHAT_FACT_MIN_CONFIDENCE", ge=0.0, le=1.0
+    )
+    chat_fact_extraction_method: str = Field(
+        "hybrid", alias="CHAT_FACT_EXTRACTION_METHOD"
+    )  # pattern, statistical, llm, hybrid
+
+    # Retrieval
+    chat_facts_in_context: bool = Field(True, alias="CHAT_FACTS_IN_CONTEXT")
+    max_chat_facts_in_context: int = Field(
+        8, alias="MAX_CHAT_FACTS_IN_CONTEXT", ge=1, le=20
+    )
+    chat_context_token_budget: int = Field(
+        480, alias="CHAT_CONTEXT_TOKEN_BUDGET", ge=100, le=2000
+    )  # 40% of background budget
+
+    # Quality
+    enable_chat_fact_deduplication: bool = Field(
+        True, alias="ENABLE_CHAT_FACT_DEDUPLICATION"
+    )
+    chat_fact_similarity_threshold: float = Field(
+        0.85, alias="CHAT_FACT_SIMILARITY_THRESHOLD", ge=0.0, le=1.0
+    )
+    chat_fact_temporal_half_life_days: int = Field(
+        30, alias="CHAT_FACT_TEMPORAL_HALF_LIFE_DAYS", ge=1, le=365
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════════════
     # Universal Bot Configuration (Phase 1)
     # Bot Identity, Personality, and Chat Management
     # ═══════════════════════════════════════════════════════════════════════════════

@@ -58,11 +58,13 @@ class RelevantContext:
 
 @dataclass
 class BackgroundContext:
-    """Background context - user profile, facts, relationships."""
+    """Background context - user profile, facts, relationships, and chat facts."""
 
     profile_summary: str | None
     key_facts: list[dict[str, Any]]
     relationships: list[dict[str, Any]]
+    chat_summary: str | None
+    chat_facts: list[dict[str, Any]]
     token_count: int
     source: str = "background"
 
@@ -103,6 +105,7 @@ class MultiLevelContextManager:
         settings: Settings,
         context_store: Any,
         profile_store: Any | None = None,
+        chat_profile_store: Any | None = None,
         hybrid_search: Any | None = None,
         episode_store: Any | None = None,
         gemini_client: Any | None = None,
@@ -111,6 +114,7 @@ class MultiLevelContextManager:
         self.settings = settings
         self.context_store = context_store
         self.profile_store = profile_store
+        self.chat_profile_store = chat_profile_store
         self.hybrid_search = hybrid_search
         self.episode_store = episode_store
         self.gemini_client = gemini_client
@@ -429,19 +433,26 @@ class MultiLevelContextManager:
         max_tokens: int,
     ) -> BackgroundContext:
         """
-        Get background context - user profile and facts.
+        Get background context - user profile and facts, plus chat-level facts.
 
         Selects most relevant facts for current query.
+        Allocates budget between user facts (60%) and chat facts (40%).
         """
         if not self.profile_store:
             return BackgroundContext(
                 profile_summary=None,
                 key_facts=[],
                 relationships=[],
+                chat_summary=None,
+                chat_facts=[],
                 token_count=0,
             )
 
         try:
+            # Allocate budget: 60% for user facts, 40% for chat facts
+            user_budget = int(max_tokens * 0.6)
+            chat_budget = max_tokens - user_budget
+
             # Get profile summary
             summary = await self.profile_store.get_user_summary(
                 user_id,
@@ -451,7 +462,7 @@ class MultiLevelContextManager:
                 max_facts=10,
             )
 
-            # Get top facts (sorted by confidence)
+            # Get top user facts (sorted by confidence)
             facts = await self.profile_store.get_facts(
                 user_id,
                 chat_id,
@@ -466,6 +477,38 @@ class MultiLevelContextManager:
                 min_strength=0.5,
             )
 
+            # Get chat-level facts (if chat_profile_store available)
+            chat_summary = None
+            chat_facts = []
+            if self.chat_profile_store and self.settings.enable_chat_memory:
+                try:
+                    chat_summary = await self.chat_profile_store.get_chat_summary(
+                        chat_id=chat_id,
+                        max_facts=self.settings.max_chat_facts_in_context,
+                    )
+
+                    # Get top chat facts
+                    chat_facts_raw = await self.chat_profile_store.get_top_chat_facts(
+                        chat_id=chat_id,
+                        max_facts=self.settings.max_chat_facts_in_context,
+                        min_confidence=self.settings.chat_fact_min_confidence,
+                    )
+
+                    # Convert to dict format for consistency
+                    chat_facts = [
+                        {
+                            "fact_category": f.fact_category,
+                            "fact_key": f.fact_key,
+                            "fact_value": f.fact_value,
+                            "fact_description": f.fact_description,
+                            "confidence": f.confidence,
+                        }
+                        for f in chat_facts_raw
+                    ]
+
+                except Exception as e:
+                    LOGGER.warning(f"Failed to get chat facts: {e}")
+
             # Estimate tokens and truncate if needed
             summary_tokens = len(summary.split()) * 1.3 if summary else 0
             facts_tokens = sum(
@@ -473,18 +516,38 @@ class MultiLevelContextManager:
                 for f in facts
             )
 
-            # Truncate facts if over budget
-            remaining_budget = max_tokens - summary_tokens
-            if facts_tokens > remaining_budget:
-                # Keep highest confidence facts
-                facts = facts[: int(remaining_budget / 20)]  # ~20 tokens per fact
+            chat_summary_tokens = len(chat_summary.split()) * 1.3 if chat_summary else 0
+            chat_facts_tokens = sum(
+                len(f["fact_key"].split() + f["fact_value"].split()) * 1.3
+                for f in chat_facts
+            )
 
-            total_tokens = int(summary_tokens + len(facts) * 20)
+            # Truncate user facts if over budget
+            remaining_user_budget = user_budget - summary_tokens
+            if facts_tokens > remaining_user_budget:
+                # Keep highest confidence facts
+                facts = facts[: int(remaining_user_budget / 20)]  # ~20 tokens per fact
+
+            # Truncate chat facts if over budget
+            remaining_chat_budget = chat_budget - chat_summary_tokens
+            if chat_facts_tokens > remaining_chat_budget:
+                # Respect the configured limit
+                max_chat_facts = min(len(chat_facts), int(remaining_chat_budget / 20))
+                chat_facts = chat_facts[:max_chat_facts]
+
+            total_tokens = int(
+                summary_tokens
+                + len(facts) * 20
+                + chat_summary_tokens
+                + len(chat_facts) * 20
+            )
 
             return BackgroundContext(
                 profile_summary=summary,
                 key_facts=facts,
                 relationships=relationships[:5],  # Top 5 relationships
+                chat_summary=chat_summary,
+                chat_facts=chat_facts,
                 token_count=total_tokens,
             )
 
@@ -494,6 +557,8 @@ class MultiLevelContextManager:
                 profile_summary=None,
                 key_facts=[],
                 relationships=[],
+                chat_summary=None,
+                chat_facts=[],
                 token_count=0,
             )
 

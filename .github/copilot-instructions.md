@@ -3,6 +3,27 @@ description: AI coding guide for gryag - Ukrainian Telegram bot with smart memor
 globs: *
 ---
 
+## ⚠️ CRITICAL: File Organization Rules
+
+**NEVER create files at the repository root!** Follow these strict rules:
+
+**Allowed at root ONLY:**
+
+- `README.md`, `AGENTS.md` (documentation)
+- Configuration: `.env.example`, `Dockerfile`, `docker-compose.yml`, `Makefile`, `pyproject.toml`, `requirements*.txt`
+- Package metadata: `LICENSE`, `setup.py` (if needed)
+
+**All other files MUST go in proper directories:**
+
+- **Documentation** → `docs/` (features/, plans/, phases/, guides/, fixes/, history/, overview/)
+- **Scripts** → `scripts/` (migrations/, diagnostics/, tests/, verification/, deprecated/)
+- **Application code** → `app/`
+- **Tests** → `tests/` (unit/, integration/)
+
+**Before creating ANY file, check:** Is this a root-level config? If NO → use proper subdirectory!
+
+See `AGENTS.md` and `scripts/README.md` for complete organization structure.
+
 ## Architecture Overview
 
 **gryag** is a Telegram group bot with a sarcastic Ukrainian personality, powered by Google Gemini 2.5 Flash. It features multi-level context management, user profiling, episodic memory, and hybrid fact extraction (local LLM + regex patterns).
@@ -11,7 +32,7 @@ globs: *
 
 **Entry point**: `python -m app.main` or script `gryag`
 
-- Root `main.py` is a **deprecated shim** - always use `app.main`
+- Root `main.py` is a **deprecated shim** (now in `scripts/deprecated/`) - always use `app.main`
 - Main initializes all services and wires aiogram dispatcher with middlewares
 
 **Core directories**:
@@ -22,6 +43,8 @@ globs: *
 - `app/services/context/` - Multi-level context, hybrid search, episodic memory
 - `app/services/monitoring/` - Continuous monitoring, event system, message classification
 - `db/schema.sql` - **Single source of truth** for SQLite schema (FTS5, user profiles, episodes, fact graphs)
+- `scripts/` - Utilities organized by purpose (see `scripts/README.md`)
+- `docs/` - All documentation organized by category (see `docs/README.md`)
 
 ## Message Flow (Critical Path)
 

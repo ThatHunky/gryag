@@ -633,4 +633,110 @@ CREATE INDEX IF NOT EXISTS idx_system_prompts_admin ON system_prompts(admin_id);
 CREATE INDEX IF NOT EXISTS idx_system_prompts_chat ON system_prompts(chat_id);
 CREATE INDEX IF NOT EXISTS idx_system_prompts_created ON system_prompts(created_at DESC);
 
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- Chat Public Memory - Group-level facts and preferences
+-- Added: October 8, 2025
+-- Allows bot to remember chat-wide context (preferences, traditions, rules, culture)
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+-- Chat profile metadata (one per chat)
+CREATE TABLE IF NOT EXISTS chat_profiles (
+    chat_id INTEGER PRIMARY KEY,
+    chat_type TEXT CHECK(chat_type IN ('group', 'supergroup', 'channel')),
+    chat_title TEXT,
+    participant_count INTEGER DEFAULT 0,
+    bot_joined_at INTEGER NOT NULL,
+    last_active INTEGER NOT NULL,
+    culture_summary TEXT,  -- Optional AI-generated summary
+    profile_version INTEGER DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+-- Chat-level facts (group preferences, traditions, norms)
+CREATE TABLE IF NOT EXISTS chat_facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    fact_category TEXT NOT NULL CHECK(fact_category IN (
+        'preference',    -- "prefers dark humor", "likes technical discussions"
+        'tradition',     -- "Friday recap", "Monday memes"
+        'rule',          -- "no politics", "Ukrainian only"
+        'norm',          -- "emoji reactions common", "voice messages rare"
+        'topic',         -- "frequently discusses AI", "crypto enthusiasts"
+        'culture',       -- "sarcastic", "supportive", "competitive"
+        'event',         -- "monthly meetups", "annual party planning"
+        'shared_knowledge'  -- "discussed movie X", "planning trip to Y"
+    )),
+    fact_key TEXT NOT NULL,      -- e.g., "humor_style", "weekly_tradition"
+    fact_value TEXT NOT NULL,    -- e.g., "dark_sarcastic", "friday_recap"
+    fact_description TEXT,       -- Human-readable: "Group prefers dark humor"
+    confidence REAL DEFAULT 0.7,
+    evidence_count INTEGER DEFAULT 1,  -- How many times reinforced
+    first_observed INTEGER NOT NULL,
+    last_reinforced INTEGER NOT NULL,
+    participant_consensus REAL,  -- 0-1: what % of users agree
+    is_active INTEGER DEFAULT 1,
+    decay_rate REAL DEFAULT 0.0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (chat_id) REFERENCES chat_profiles(chat_id) ON DELETE CASCADE
+);
+
+-- Chat fact versions (track changes over time)
+CREATE TABLE IF NOT EXISTS chat_fact_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fact_id INTEGER NOT NULL,
+    previous_version_id INTEGER,
+    version_number INTEGER NOT NULL,
+    change_type TEXT CHECK(change_type IN (
+        'creation', 'reinforcement', 'evolution', 'correction', 'deprecation'
+    )),
+    confidence_delta REAL,
+    change_evidence TEXT,  -- What triggered the change
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (fact_id) REFERENCES chat_facts(id) ON DELETE CASCADE,
+    FOREIGN KEY (previous_version_id) REFERENCES chat_facts(id) ON DELETE SET NULL
+);
+
+-- Chat fact quality metrics (deduplication, conflicts)
+CREATE TABLE IF NOT EXISTS chat_fact_quality_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    fact_id INTEGER NOT NULL,
+    duplicate_of INTEGER,  -- References another chat_fact id
+    conflict_with INTEGER,
+    similarity_score REAL,
+    resolution_method TEXT,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (fact_id) REFERENCES chat_facts(id) ON DELETE CASCADE,
+    FOREIGN KEY (chat_id) REFERENCES chat_profiles(chat_id) ON DELETE CASCADE
+);
+
+-- Indexes for chat public memory
+CREATE INDEX IF NOT EXISTS idx_chat_profiles_type 
+    ON chat_profiles(chat_type);
+CREATE INDEX IF NOT EXISTS idx_chat_profiles_active 
+    ON chat_profiles(last_active DESC);
+
+CREATE INDEX IF NOT EXISTS idx_chat_facts_chat 
+    ON chat_facts(chat_id, is_active);
+CREATE INDEX IF NOT EXISTS idx_chat_facts_category 
+    ON chat_facts(fact_category);
+CREATE INDEX IF NOT EXISTS idx_chat_facts_confidence 
+    ON chat_facts(confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_chat_facts_reinforced 
+    ON chat_facts(last_reinforced DESC);
+CREATE INDEX IF NOT EXISTS idx_chat_facts_key 
+    ON chat_facts(chat_id, fact_key);
+
+CREATE INDEX IF NOT EXISTS idx_chat_fact_versions_fact 
+    ON chat_fact_versions(fact_id, version_number);
+CREATE INDEX IF NOT EXISTS idx_chat_fact_versions_previous 
+    ON chat_fact_versions(previous_version_id);
+
+CREATE INDEX IF NOT EXISTS idx_chat_fact_quality_chat 
+    ON chat_fact_quality_metrics(chat_id);
+CREATE INDEX IF NOT EXISTS idx_chat_fact_quality_fact 
+    ON chat_fact_quality_metrics(fact_id);
+
 

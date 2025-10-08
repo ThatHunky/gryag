@@ -37,25 +37,18 @@ class Repository(ABC, Generic[T]):
         """
         self.db_path = db_path
 
-    async def _get_connection(self) -> aiosqlite.Connection:
-        """Get database connection.
+    def _get_connection(self) -> aiosqlite.Connection:
+        """Get database connection manager.
 
         Returns:
-            Database connection with row factory configured
+            Database connection manager (context manager for async with)
 
-        Raises:
-            DatabaseError: If connection fails
+        Note:
+            This returns the connection manager from aiosqlite.connect(),
+            which should be used with 'async with' in calling code.
+            Row factory is set after connection is opened.
         """
-        try:
-            conn = await aiosqlite.connect(self.db_path)
-            conn.row_factory = aiosqlite.Row
-            return conn
-        except aiosqlite.Error as e:
-            raise DatabaseError(
-                "Failed to connect to database",
-                context={"db_path": self.db_path},
-                cause=e,
-            )
+        return aiosqlite.connect(self.db_path)
 
     async def _execute(
         self,
@@ -75,7 +68,8 @@ class Repository(ABC, Generic[T]):
             DatabaseError: If query execution fails
         """
         try:
-            async with await self._get_connection() as db:
+            async with self._get_connection() as db:
+                db.row_factory = aiosqlite.Row
                 if params:
                     cursor = await db.execute(query, params)
                 else:
@@ -107,7 +101,8 @@ class Repository(ABC, Generic[T]):
             DatabaseError: If query fails
         """
         try:
-            async with await self._get_connection() as db:
+            async with self._get_connection() as db:
+                db.row_factory = aiosqlite.Row
                 if params:
                     cursor = await db.execute(query, params)
                 else:
@@ -138,12 +133,13 @@ class Repository(ABC, Generic[T]):
             DatabaseError: If query fails
         """
         try:
-            async with await self._get_connection() as db:
+            async with self._get_connection() as db:
+                db.row_factory = aiosqlite.Row
                 if params:
                     cursor = await db.execute(query, params)
                 else:
                     cursor = await db.execute(query)
-                return await cursor.fetchall()
+                return list(await cursor.fetchall())
         except aiosqlite.Error as e:
             raise DatabaseError(
                 "Failed to fetch rows",

@@ -12,12 +12,14 @@ from app.config import get_settings
 from app.handlers.admin import router as admin_router, ADMIN_COMMANDS
 from app.handlers.chat import router as chat_router
 from app.handlers.profile_admin import router as profile_admin_router, PROFILE_COMMANDS
+from app.handlers.chat_admin import router as chat_admin_router, CHAT_COMMANDS
 from app.handlers.prompt_admin import router as prompt_admin_router, PROMPT_COMMANDS
 from app.middlewares.chat_filter import ChatFilterMiddleware
 from app.middlewares.chat_meta import ChatMetaMiddleware
 from app.services.context_store import ContextStore
 from app.services.gemini import GeminiClient
 from app.services.user_profile import UserProfileStore
+from app.repositories.chat_profile import ChatProfileRepository
 from app.services.fact_extractors import create_hybrid_extractor
 from app.services.profile_summarization import ProfileSummarizer
 from app.services.resource_monitor import get_resource_monitor
@@ -51,8 +53,8 @@ async def setup_bot_commands(bot: Bot) -> None:
         ]
         + ADMIN_COMMANDS
         + PROFILE_COMMANDS
+        + CHAT_COMMANDS
         + PROMPT_COMMANDS
-        + PROFILE_COMMANDS
     )
 
     try:
@@ -100,6 +102,23 @@ async def main() -> None:
     # Initialize user profiling system
     profile_store = UserProfileStore(settings.db_path)
     await profile_store.init()
+
+    # Initialize chat profiling system (Phase 4: Chat Public Memory)
+    chat_profile_store: ChatProfileRepository | None = None
+
+    if settings.enable_chat_memory:
+        chat_profile_store = ChatProfileRepository(db_path=str(settings.db_path))
+
+        logging.info(
+            "Chat public memory initialized",
+            extra={
+                "fact_extraction": settings.enable_chat_fact_extraction,
+                "extraction_method": settings.chat_fact_extraction_method,
+                "max_facts_in_context": settings.max_chat_facts_in_context,
+            },
+        )
+    else:
+        logging.info("Chat public memory disabled (ENABLE_CHAT_MEMORY=false)")
 
     # Create hybrid fact extractor (rule-based + optional Gemini fallback)
     fact_extractor = await create_hybrid_extractor(
@@ -167,6 +186,7 @@ async def main() -> None:
         context_store=store,
         gemini_client=gemini_client,
         user_profile_store=profile_store,
+        chat_profile_store=chat_profile_store,
         fact_extractor=fact_extractor,
         enable_monitoring=settings.enable_continuous_monitoring,
         enable_filtering=settings.enable_message_filtering,
@@ -298,6 +318,7 @@ async def main() -> None:
             gemini_client,
             profile_store,
             fact_extractor,
+            chat_profile_store=chat_profile_store,
             hybrid_search=hybrid_search,
             episodic_memory=episodic_memory,
             episode_monitor=episode_monitor,
@@ -313,6 +334,7 @@ async def main() -> None:
 
     dispatcher.include_router(admin_router)
     dispatcher.include_router(profile_admin_router)
+    dispatcher.include_router(chat_admin_router)
     dispatcher.include_router(prompt_admin_router)
     dispatcher.include_router(chat_router)
 

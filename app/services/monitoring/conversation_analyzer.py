@@ -85,6 +85,9 @@ class ConversationWindow:
     chat_id: int
     thread_id: int | None
     messages: list[MessageContext] = field(default_factory=list)
+    raw_messages: list[Message] = field(
+        default_factory=list
+    )  # Original Message objects
     first_timestamp: int = 0
     last_timestamp: int = 0
     participant_ids: set[int] = field(default_factory=set)
@@ -93,12 +96,16 @@ class ConversationWindow:
     closed: bool = False
     closure_reason: str = ""
 
-    def add_message(self, msg_ctx: MessageContext) -> None:
+    def add_message(
+        self, msg_ctx: MessageContext, raw_message: Message | None = None
+    ) -> None:
         """Add a message to the window."""
         if not self.messages:
             self.first_timestamp = msg_ctx.timestamp
 
         self.messages.append(msg_ctx)
+        if raw_message:
+            self.raw_messages.append(raw_message)
         self.last_timestamp = msg_ctx.timestamp
         self.participant_ids.add(msg_ctx.user_id)
 
@@ -252,14 +259,14 @@ class ConversationAnalyzer:
             )
             self._stats["windows_created"] += 1
 
-            # Add message to new window
-            self._windows[key].add_message(msg_ctx)
+            # Add message to new window (with raw Message object)
+            self._windows[key].add_message(msg_ctx, message)
             self._stats["messages_added"] += 1
 
             return closed_window
 
-        # Add to existing window
-        window.add_message(msg_ctx)
+        # Add to existing window (with raw Message object)
+        window.add_message(msg_ctx, message)
         self._stats["messages_added"] += 1
 
         # Enforce max concurrent windows limit

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
+
 from aiogram import BaseMiddleware, Bot
 from aiogram.types import Message
 
@@ -29,6 +31,7 @@ class ChatMetaMiddleware(BaseMiddleware):
         gemini: GeminiClient,
         profile_store: UserProfileStore,
         fact_extractor: FactExtractor,
+        chat_profile_store: Any | None = None,
         hybrid_search: HybridSearchEngine | None = None,
         episodic_memory: EpisodicMemoryStore | None = None,
         episode_monitor: EpisodeMonitor | None = None,
@@ -44,6 +47,7 @@ class ChatMetaMiddleware(BaseMiddleware):
         self._gemini = gemini
         self._profile_store = profile_store
         self._fact_extractor = fact_extractor
+        self._chat_profile_store = chat_profile_store
         self._hybrid_search = hybrid_search
         self._episodic_memory = episodic_memory
         self._episode_monitor = episode_monitor
@@ -80,6 +84,7 @@ class ChatMetaMiddleware(BaseMiddleware):
         data["store"] = self._store
         data["gemini_client"] = self._gemini
         data["profile_store"] = self._profile_store
+        data["chat_profile_store"] = self._chat_profile_store
         data["fact_extractor"] = self._fact_extractor
         data["hybrid_search"] = self._hybrid_search
         data["episodic_memory"] = self._episodic_memory

@@ -105,6 +105,7 @@ class MultiLevelContextManager:
         profile_store: Any | None = None,
         hybrid_search: Any | None = None,
         episode_store: Any | None = None,
+        gemini_client: Any | None = None,
     ):
         self.db_path = Path(db_path)
         self.settings = settings
@@ -112,6 +113,7 @@ class MultiLevelContextManager:
         self.profile_store = profile_store
         self.hybrid_search = hybrid_search
         self.episode_store = episode_store
+        self.gemini_client = gemini_client
 
         # Cache for immediate context
         self._immediate_cache: dict[
@@ -617,6 +619,127 @@ class MultiLevelContextManager:
         """Clear immediate context cache."""
         self._immediate_cache.clear()
 
+    def _limit_media_in_history(
+        self, history: list[dict[str, Any]], max_media: int
+    ) -> list[dict[str, Any]]:
+        """
+        Limit total number of media items and filter unsupported types in history.
+
+        Performs two types of filtering:
+        1. Removes unsupported media types (audio/video for Gemma models)
+        2. Limits total media count (removes oldest first if over limit)
+
+        Args:
+            history: List of message dicts with 'parts' containing media
+            max_media: Maximum number of media items to keep
+
+        Returns:
+            Modified history with filtered and limited media
+        """
+        import copy
+
+        # Create a deep copy to avoid modifying the original
+        modified_history = copy.deepcopy(history)
+
+        # Phase 1: Filter unsupported media types
+        filtered_by_type = 0
+        if self.gemini_client:
+            for msg_idx, msg in enumerate(modified_history):
+                parts = msg.get("parts", [])
+                new_parts = []
+
+                for part in parts:
+                    if isinstance(part, dict):
+                        # Check if this is media
+                        if "inline_data" in part:
+                            mime = part["inline_data"].get("mime_type", "")
+                            # Detect media kind from mime type
+                            kind = "unknown"
+                            if "audio" in mime.lower():
+                                kind = "audio"
+                            elif "video" in mime.lower():
+                                kind = "video"
+                            elif "image" in mime.lower():
+                                kind = "photo"
+
+                            # Check if supported
+                            if hasattr(self.gemini_client, "_is_media_supported"):
+                                if not self.gemini_client._is_media_supported(
+                                    mime, kind
+                                ):
+                                    # Replace with text placeholder
+                                    new_parts.append({"text": f"[{kind}: {mime}]"})
+                                    filtered_by_type += 1
+                                    continue
+
+                        elif "file_data" in part:
+                            # file_uri (YouTube URLs) - always supported
+                            pass
+
+                    # Keep the part (either supported media or text)
+                    new_parts.append(part)
+
+                # Update message parts
+                msg["parts"] = new_parts
+
+        if filtered_by_type > 0:
+            LOGGER.info(
+                f"Filtered {filtered_by_type} unsupported media item(s) from history"
+            )
+
+        # Phase 2: Limit total media count
+        total_media = 0
+        media_positions = []  # List of (message_idx, part_idx)
+
+        for msg_idx, msg in enumerate(modified_history):
+            parts = msg.get("parts", [])
+            for part_idx, part in enumerate(parts):
+                if isinstance(part, dict):
+                    # Check if this part is media (inline_data or file_data)
+                    is_media = "inline_data" in part or "file_data" in part
+                    if is_media:
+                        total_media += 1
+                        media_positions.append((msg_idx, part_idx))
+
+        # If under limit, return early
+        if total_media <= max_media:
+            if filtered_by_type > 0 or total_media > 0:
+                LOGGER.debug(
+                    f"Media count OK: {total_media} items (max: {max_media}, filtered: {filtered_by_type})"
+                )
+            return modified_history
+
+        # We need to remove (total_media - max_media) items
+        # Remove from oldest first (start of list)
+        to_remove = total_media - max_media
+        removed_count = 0
+
+        # Remove media from oldest messages first
+        for msg_idx, part_idx in media_positions:
+            if removed_count >= to_remove:
+                break
+
+            # Replace media part with a text placeholder
+            msg = modified_history[msg_idx]
+            parts = msg.get("parts", [])
+
+            if part_idx < len(parts):
+                part = parts[part_idx]
+                if "inline_data" in part:
+                    mime = part["inline_data"].get("mime_type", "media")
+                    parts[part_idx] = {"text": f"[media: {mime}]"}
+                    removed_count += 1
+                elif "file_data" in part:
+                    uri = part["file_data"].get("file_uri", "")
+                    parts[part_idx] = {"text": f"[media: {uri}]"}
+                    removed_count += 1
+
+        LOGGER.info(
+            f"Limited media in history: removed {removed_count} of {total_media} items (max: {max_media}, also filtered {filtered_by_type} by type)"
+        )
+
+        return modified_history
+
     def format_for_gemini(self, context: LayeredContext) -> dict[str, Any]:
         """
         Format layered context for Gemini API.
@@ -631,6 +754,11 @@ class MultiLevelContextManager:
 
         if context.recent:
             history.extend(context.recent.messages)
+
+        # Limit media/images to prevent Gemini API errors
+        # Use configured max (default 28 for Gemma models with 32 limit)
+        max_media = getattr(self.settings, "gemini_max_media_items", 28)
+        history = self._limit_media_in_history(history, max_media)
 
         # Relevant, Background, Episodes become system context
         system_parts = []

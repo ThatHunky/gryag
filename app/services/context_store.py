@@ -344,99 +344,11 @@ class ContextStore:
             )
         return results
 
-    async def count_requests_last_hour(self, chat_id: int, user_id: int) -> int:
-        await self.init()
-        cutoff = int(time.time()) - 3600
-        async with aiosqlite.connect(self._db_path) as db:
-            async with db.execute(
-                "SELECT COUNT(1) FROM quotas WHERE chat_id = ? AND user_id = ? AND ts >= ?",
-                (chat_id, user_id, cutoff),
-            ) as cursor:
-                row = await cursor.fetchone()
-                return int(row[0]) if row and row[0] is not None else 0
-
-    async def log_request(self, chat_id: int, user_id: int) -> None:
-        await self.init()
-        ts = int(time.time())
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(
-                "INSERT INTO quotas (chat_id, user_id, ts) VALUES (?, ?, ?)",
-                (chat_id, user_id, ts),
-            )
-            await db.commit()
-
-    async def reset_quotas(self, chat_id: int | None = None) -> None:
-        """Clear per-user quota counters (and notices) for a chat or globally."""
-
-        await self.init()
-        async with aiosqlite.connect(self._db_path) as db:
-            if chat_id is None:
-                await db.execute("DELETE FROM quotas")
-                await db.execute(
-                    "DELETE FROM notices WHERE kind = ?",
-                    ("quota_exceeded",),
-                )
-            else:
-                await db.execute(
-                    "DELETE FROM quotas WHERE chat_id = ?",
-                    (chat_id,),
-                )
-                await db.execute(
-                    "DELETE FROM notices WHERE chat_id = ? AND kind = ?",
-                    (chat_id, "quota_exceeded"),
-                )
-            await db.commit()
-
-    async def recent_request_times(
-        self,
-        chat_id: int,
-        user_id: int,
-        window_seconds: int = 3 * 3600,
-        limit: int = 20,
-    ) -> list[int]:
-        await self.init()
-        cutoff = int(time.time()) - window_seconds
-        async with aiosqlite.connect(self._db_path) as db:
-            async with db.execute(
-                "SELECT ts FROM quotas WHERE chat_id = ? AND user_id = ? AND ts >= ? ORDER BY ts DESC LIMIT ?",
-                (chat_id, user_id, cutoff, limit),
-            ) as cursor:
-                rows = await cursor.fetchall()
-        return [int(row[0]) for row in rows]
-
-    async def should_send_notice(
-        self,
-        chat_id: int,
-        user_id: int,
-        kind: str,
-        ttl_seconds: int | None = None,
-    ) -> bool:
-        await self.init()
-        now = int(time.time())
-        async with aiosqlite.connect(self._db_path) as db:
-            async with db.execute(
-                "SELECT ts FROM notices WHERE chat_id = ? AND user_id = ? AND kind = ?",
-                (chat_id, user_id, kind),
-            ) as cursor:
-                row = await cursor.fetchone()
-            if row:
-                last_ts = int(row[0])
-                if ttl_seconds is None or now - last_ts < ttl_seconds:
-                    return False
-            await db.execute(
-                "INSERT OR REPLACE INTO notices (chat_id, user_id, kind, ts) VALUES (?, ?, ?, ?)",
-                (chat_id, user_id, kind, now),
-            )
-            await db.commit()
-        return True
-
     async def prune_old(self, retention_days: int) -> None:
         await self.init()
         cutoff = int(time.time()) - retention_days * 86400
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute("DELETE FROM messages WHERE ts < ?", (cutoff,))
-            await db.execute("DELETE FROM quotas WHERE ts < ?", (cutoff,))
             await db.execute("DELETE FROM bans WHERE ts < ?", (cutoff,))
-            await db.execute("DELETE FROM notices WHERE ts < ?", (cutoff,))
             await db.commit()
         self._last_prune_ts = int(time.time())

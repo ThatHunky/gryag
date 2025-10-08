@@ -591,9 +591,6 @@ async def handle_group_message(
     bot_learning: BotLearningEngine | None = None,
     prompt_manager: SystemPromptManager | None = None,
     redis_client: RedisLike | None = None,
-    redis_quota: tuple[str, int] | None = None,
-    throttle_blocked: bool | None = None,
-    throttle_reason: dict[str, Any] | None = None,
 ):
     if message.from_user is None or message.from_user.is_bot:
         LOGGER.debug("Ignoring message: no from_user or is_bot")
@@ -675,11 +672,9 @@ async def handle_group_message(
             "chat_id": message.chat.id,
             "message_id": message.message_id,
             "user_id": message.from_user.id,
-            "throttle_blocked": throttle_blocked,
         },
     )
     user_id = message.from_user.id
-    blocked = bool(throttle_blocked)
 
     is_admin = user_id in settings.admin_user_ids_list
 
@@ -687,24 +682,6 @@ async def handle_group_message(
         telemetry.increment_counter("chat.banned_user")
         await message.reply(BANNED_REPLY)
         return
-
-    if not is_admin and not blocked:
-        await store.log_request(chat_id, user_id)
-
-    if redis_client is not None and redis_quota is not None:
-        key, ts = redis_quota
-        member = f"{ts}:{message.message_id}"
-        try:
-            await redis_client.zadd(key, {member: ts})
-            await redis_client.expire(key, 3600)
-        except Exception as e:
-            LOGGER.warning(
-                "Failed to update Redis quota for chat %s user %s: %s",
-                chat_id,
-                user_id,
-                e,
-                exc_info=True,
-            )
 
     # Build multi-level context if services are available
     use_multi_level = (
@@ -725,6 +702,7 @@ async def handle_group_message(
             profile_store=profile_store,
             hybrid_search=hybrid_search,
             episode_store=episodic_memory,
+            gemini_client=gemini_client,  # Pass for media capability detection
         )
 
         # Get query text for context retrieval
@@ -786,6 +764,9 @@ async def handle_group_message(
     else:
         # Multi-level context will be formatted later
         history = []
+
+    # Track reply context for later injection
+    reply_context_for_history: dict[str, Any] | None = None
 
     # Collect media from message (photos, videos, audio, etc.)
     media_raw = await collect_media_parts(bot, message)
@@ -874,6 +855,10 @@ async def handle_group_message(
                         else:
                             # Update existing context with media
                             reply_context["media_parts"] = reply_media_parts
+
+                        # Store for potential history injection
+                        reply_context_for_history = reply_context
+
                         LOGGER.debug(
                             "Collected %d media part(s) from reply message %s",
                             len(reply_media_parts),
@@ -883,6 +868,14 @@ async def handle_group_message(
                 LOGGER.exception(
                     "Failed to collect media from reply message %s", reply.message_id
                 )
+
+    # If we have reply context with media, store it for history injection
+    if (
+        reply_context
+        and reply_context.get("media_parts")
+        and not reply_context_for_history
+    ):
+        reply_context_for_history = reply_context
 
     fallback_context = reply_context or _get_recent_context(chat_id, thread_id)
     fallback_text = fallback_context.get("text") if fallback_context else None
@@ -948,19 +941,6 @@ async def handle_group_message(
                 extra={"chat_id": chat_id, "message_id": message.message_id},
             )
 
-    if blocked:
-        if throttle_reason:
-            LOGGER.info(
-                "Message throttled - skipping Gemini call",
-                extra={
-                    "chat_id": chat_id,
-                    "user_id": user_id,
-                    "reason": throttle_reason,
-                },
-            )
-        telemetry.increment_counter("chat.throttled")
-        return
-
     async def search_messages_tool(params: dict[str, Any]) -> str:
         query = (params or {}).get("query", "")
         if not isinstance(query, str) or not query.strip():
@@ -997,13 +977,10 @@ async def handle_group_message(
 
     tool_definitions: list[dict[str, Any]] = []
     if settings.enable_search_grounding:
+        # Modern google_search format for google-genai SDK (0.2+)
+        # Replaces legacy google_search_retrieval from google-generativeai SDK
         retrieval_tool: dict[str, Any] = {
-            "google_search_retrieval": {
-                "dynamic_retrieval_config": {
-                    "mode": "MODE_DYNAMIC",
-                    "dynamic_threshold": 0.5,
-                }
-            }
+            "google_search": {}
         }
         tool_definitions.append(retrieval_tool)
 
@@ -1133,6 +1110,59 @@ async def handle_group_message(
             base_system_prompt + timestamp_context + profile_context
         )
 
+    # Inject reply context with media into history if needed
+    # This ensures media from replied-to messages is visible even if outside context window
+    if reply_context_for_history:
+        reply_msg_id = reply_context_for_history.get("message_id")
+        # Check if this message is already in history
+        message_in_history = False
+        if reply_msg_id:
+            for hist_msg in history:
+                parts = hist_msg.get("parts", [])
+                for part in parts:
+                    if isinstance(part, dict) and "text" in part:
+                        text = part["text"]
+                        if f"message_id={reply_msg_id}" in text:
+                            message_in_history = True
+                            break
+                if message_in_history:
+                    break
+
+        # If not in history, inject it
+        if not message_in_history:
+            reply_parts: list[dict[str, Any]] = []
+
+            # Add metadata if available
+            reply_meta = {
+                "chat_id": chat_id,
+                "message_id": reply_msg_id,
+            }
+            if reply_context_for_history.get("user_id"):
+                reply_meta["user_id"] = reply_context_for_history["user_id"]
+            if reply_context_for_history.get("name"):
+                reply_meta["name"] = reply_context_for_history["name"]
+            if reply_context_for_history.get("username"):
+                reply_meta["username"] = reply_context_for_history["username"]
+
+            reply_parts.append({"text": format_metadata(reply_meta)})
+
+            # Add text if available
+            if reply_context_for_history.get("text"):
+                reply_parts.append({"text": reply_context_for_history["text"]})
+
+            # Add media parts
+            if reply_context_for_history.get("media_parts"):
+                reply_parts.extend(reply_context_for_history["media_parts"])
+
+            # Insert at beginning of history (chronologically first)
+            if reply_parts:
+                history.insert(0, {"role": "user", "parts": reply_parts})
+                LOGGER.debug(
+                    "Injected reply context with %d media part(s) into history for message %s",
+                    len(reply_context_for_history.get("media_parts", [])),
+                    reply_msg_id,
+                )
+
     # Bot Self-Learning: Track which tools are used in this request
     tools_used_in_request: list[str] = []
 
@@ -1239,10 +1269,6 @@ async def handle_group_message(
         )
     except GeminiError:
         telemetry.increment_counter("chat.reply_failure")
-        if not await store.should_send_notice(
-            chat_id, user_id, "api_limit", ttl_seconds=1800
-        ):
-            return
         reply_text = ERROR_FALLBACK
 
     # Comprehensive response cleaning

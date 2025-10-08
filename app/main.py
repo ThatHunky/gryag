@@ -15,7 +15,6 @@ from app.handlers.profile_admin import router as profile_admin_router, PROFILE_C
 from app.handlers.prompt_admin import router as prompt_admin_router, PROMPT_COMMANDS
 from app.middlewares.chat_filter import ChatFilterMiddleware
 from app.middlewares.chat_meta import ChatMetaMiddleware
-from app.middlewares.throttle import ThrottleMiddleware
 from app.services.context_store import ContextStore
 from app.services.gemini import GeminiClient
 from app.services.user_profile import UserProfileStore
@@ -64,12 +63,12 @@ async def setup_bot_commands(bot: Bot) -> None:
 
 
 async def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-    )
-
     settings = get_settings()
+
+    # Setup logging with rotation and cleanup
+    from app.core.logging_config import setup_logging
+
+    setup_logging(settings)
 
     # Phase 2: Initialize trigger patterns from configuration
     from app.services.triggers import initialize_triggers
@@ -309,11 +308,8 @@ async def main() -> None:
             redis_client=redis_client,
         )
     )
-    # Chat filter must come BEFORE throttle to prevent wasting quota on blocked chats
+    # Chat filter must come BEFORE other processing to prevent wasting resources on blocked chats
     dispatcher.message.middleware(ChatFilterMiddleware(settings))
-    dispatcher.message.middleware(
-        ThrottleMiddleware(store, settings, redis_client=redis_client)
-    )
 
     dispatcher.include_router(admin_router)
     dispatcher.include_router(profile_admin_router)

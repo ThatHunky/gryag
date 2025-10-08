@@ -29,12 +29,16 @@ class Settings(BaseSettings):
     db_path: Path = Field(Path("./gryag.db"), alias="DB_PATH")
     max_turns: int = Field(50, alias="MAX_TURNS", ge=1)
     context_summary_threshold: int = Field(30, alias="CONTEXT_SUMMARY_THRESHOLD", ge=5)
-    per_user_per_hour: int = Field(5, alias="PER_USER_PER_HOUR", ge=1)
     use_redis: bool = Field(False, alias="USE_REDIS")
     redis_url: str | None = Field("redis://localhost:6379/0", alias="REDIS_URL")
     admin_user_ids: str = Field("", alias="ADMIN_USER_IDS")
     retention_days: int = Field(30, alias="RETENTION_DAYS", ge=1)
     enable_search_grounding: bool = Field(False, alias="ENABLE_SEARCH_GROUNDING")
+
+    # Media handling configuration
+    gemini_max_media_items: int = Field(
+        28, alias="GEMINI_MAX_MEDIA_ITEMS", ge=1, le=100
+    )  # Conservative limit for Gemma (max 32), other models may support more
 
     # Weather API configuration
     openweather_api_key: str | None = Field(None, alias="OPENWEATHER_API_KEY")
@@ -309,9 +313,6 @@ class Settings(BaseSettings):
     bot_trigger_patterns: str = Field(
         "", alias="BOT_TRIGGER_PATTERNS"
     )  # Comma-separated trigger words, empty = use persona config
-    redis_namespace: str = Field(
-        "gryag", alias="REDIS_NAMESPACE"
-    )  # Redis key prefix for quota tracking
     command_prefix: str = Field(
         "gryag", alias="COMMAND_PREFIX"
     )  # Prefix for admin commands (/gryagban, etc.)
@@ -355,6 +356,24 @@ class Settings(BaseSettings):
     enable_persona_templates: bool = Field(
         False, alias="ENABLE_PERSONA_TEMPLATES"
     )  # Use template-based responses
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Logging Configuration
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    log_dir: Path = Field(Path("./logs"), alias="LOG_DIR")
+    log_level: str = Field("INFO", alias="LOG_LEVEL")
+    log_format: str = Field("text", alias="LOG_FORMAT")  # text or json
+    log_retention_days: int = Field(7, alias="LOG_RETENTION_DAYS", ge=1, le=90)
+    log_max_bytes: int = Field(
+        10 * 1024 * 1024,  # 10 MB
+        alias="LOG_MAX_BYTES",
+        ge=1024 * 1024,
+        le=100 * 1024 * 1024,
+    )
+    log_backup_count: int = Field(5, alias="LOG_BACKUP_COUNT", ge=1, le=30)
+    enable_console_logging: bool = Field(True, alias="ENABLE_CONSOLE_LOGGING")
+    enable_file_logging: bool = Field(True, alias="ENABLE_FILE_LOGGING")
 
     @property
     def db_path_str(self) -> str:
@@ -425,6 +444,25 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"bot_behavior_mode must be one of {valid_modes}, got '{v}'"
             )
+        return v
+
+    @field_validator("log_level")
+    @classmethod
+    def _validate_log_level(cls, v: str) -> str:
+        """Validate log level is valid."""
+        valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+        v_upper = v.upper()
+        if v_upper not in valid_levels:
+            raise ValueError(f"log_level must be one of {valid_levels}, got '{v}'")
+        return v_upper
+
+    @field_validator("log_format")
+    @classmethod
+    def _validate_log_format(cls, v: str) -> str:
+        """Validate log format is valid."""
+        valid_formats = {"text", "json"}
+        if v not in valid_formats:
+            raise ValueError(f"log_format must be one of {valid_formats}, got '{v}'")
         return v
 
     @field_validator("semantic_weight", "keyword_weight", "temporal_weight")

@@ -4,6 +4,283 @@ All notable changes to gryag's memory, context, and learning systems.
 
 ## [Unreleased]
 
+### 2025-10-08 - Google Search Grounding - SDK Compatibility Fix �
+
+**Issue**: Attempted to update search grounding to modern `google_search` format but discovered SDK incompatibility.
+
+**Root Cause**: Bot uses legacy `google.generativeai` SDK (0.8.x) which doesn't support the modern `google_search` format - only `google_search_retrieval` with dynamic_retrieval_config.
+
+**Error**: `ValueError: Unknown field for FunctionDeclaration: google_search`
+
+**Resolution**: Reverted to working `google_search_retrieval` format. Added documentation explaining SDK limitations.
+
+**Current Status**: ✅ Search grounding working with legacy format, compatible with Gemini 2.5 models.
+
+**Files Modified**:
+
+- `app/handlers/chat.py` - Reverted to `google_search_retrieval` format with detailed comment
+- `docs/fixes/SEARCH_GROUNDING_API_UPDATE.md` - Updated to document investigation and SDK limitations
+- `README.md` - Corrected to mention `google_search_retrieval` (legacy SDK)
+- `.github/copilot-instructions.md` - Updated to reflect actual SDK format used
+
+**Future**: To use modern `google_search`, would need to upgrade to `google-genai` SDK (major refactor).
+
+---
+
+### 2025-10-08 - Reply Message Media Visibility Fix 🔧
+
+**Issue**: When users replied to a message containing media (photo, video, etc.) and tagged the bot, the bot couldn't see the media from the replied-to message, even though it was being collected from Telegram API.
+
+**Root Cause**: Reply context with media was collected but never injected into the conversation history sent to Gemini. The `reply_context` was only used for fallback text and metadata, not for actual context. When the replied-to message was outside the context window (older than last N messages), its media wouldn't be visible at all.
+
+**Solution**: Explicit history injection - when we have a reply context with media, inject the replied-to message into the conversation history, ensuring media is visible regardless of context window size.
+
+**How It Works**:
+
+1. **Collection**: Collect media from `message.reply_to_message` via Telegram API (existing logic)
+2. **Storage**: Store complete reply context in `reply_context_for_history`
+3. **Check**: After history formatting, check if replied-to message is already in history
+4. **Inject**: If not present, construct proper Gemini message format and insert at beginning of history
+5. **Deduplication**: Skip injection if message already in context window
+
+**Files Changed**:
+
+- **Modified**: `app/handlers/chat.py` (+60 lines)
+  - Added `reply_context_for_history` tracking variable
+  - Store reply context when media is collected
+  - Inject into history after formatting (with deduplication check)
+  - Proper metadata and parts construction for Gemini
+- **New**: `docs/fixes/REPLY_MEDIA_CONTEXT_FIX.md` - Complete fix documentation
+
+**Impact**:
+
+- ✅ Bot sees media from replied-to messages regardless of context window size
+- ✅ Works with both multi-level context and simple history fallback
+- ✅ Prevents duplicate messages in history
+- ✅ Maintains chronological order
+
+**Logging**:
+
+```text
+DEBUG - Collected N media part(s) from reply message {message_id}
+DEBUG - Injected reply context with N media part(s) into history for message {message_id}
+```
+
+**Verification**: Reply to an old message with media and tag the bot → Bot should describe the media
+
+### 2025-10-07 - Function Calling Support Detection 🛠️
+
+**Issue**: Bot crashed with `400 Function calling is not enabled for models/gemma-3-27b-it` when using tools (calculator, weather, memory search) with Gemma models.
+
+**Root Cause**: Gemma models don't support function calling (tools), but bot always provided tools in API requests regardless of model capabilities.
+
+**Solution**: Comprehensive tool support detection and graceful disabling:
+
+**Detection Methods**:
+1. **Startup Detection**: Check model name for "gemma" → disable all tools
+2. **Runtime Detection**: If 400 error mentions "Function calling" → disable and retry
+3. **Automatic Fallback**: Retry API request without tools on error
+
+**Benefits**:
+- ✅ Works with all Gemini model families (Gemma, Gemini, Flash)
+- ✅ Automatic capability detection (no manual config)
+- ✅ Graceful degradation (responds without tools instead of crashing)
+- ✅ Clear logging for debugging
+
+**Trade-offs with Gemma**:
+- ❌ No semantic search in history
+- ❌ No calculator/weather/currency tools
+- ❌ No memory tools (remember/recall facts)
+- ✅ Much cheaper API costs (free tier)
+- ✅ Faster response times
+- ✅ Still responds to questions using training knowledge
+
+**Files Changed**:
+- **Modified**: `app/services/gemini.py` (+60 lines)
+  - Added `_tools_supported` capability flag
+  - Added `_detect_tools_support()` static method
+  - Enhanced `_filter_tools()` to check tool support
+  - Added `_maybe_disable_tools()` for runtime detection
+  - Updated exception handling for automatic retry
+- **New**: `docs/features/function-calling-support-detection.md` - Complete documentation with model comparison table
+
+**Logging**:
+```
+INFO - Function calling not supported by model models/gemma-3-27b-it - disabling 10 tool(s)
+WARNING - Function calling not supported - disabling tools
+INFO - Gemini request succeeded after disabling tools
+```
+
+**Verification**: Send message that would trigger tools → Bot responds without crashing, logs show tool disabling
+
+### 2025-10-07 - Historical Media Filtering 🔧
+
+**Issue**: After implementing current-message media filtering, bot still crashed with `400 Audio input modality is not enabled` because **historical messages** in context contained unsupported media.
+
+**Root Cause**: Media filtering only applied to current message, not to historical context loaded from database. When user sent audio in a previous message, that audio was included in subsequent conversation context.
+
+**Solution**: Enhanced `MultiLevelContextManager._limit_media_in_history()` with two-phase filtering:
+
+**Phase 1 - Filter by Type** (NEW):
+
+- Check each historical media item against model capabilities
+- Remove unsupported media (audio/video for Gemma models)
+- Replace with text placeholders: `[audio: audio/ogg]`
+
+**Phase 2 - Limit by Count** (EXISTING):
+
+- Count remaining media items
+- Remove oldest if over `GEMINI_MAX_MEDIA_ITEMS`
+- Keep recent media intact
+
+**Additional**: Better rate limit error handling with user-friendly messages.
+
+**Files Changed**:
+
+- **Modified**: `app/services/context/multi_level_context.py` (+40 lines)
+  - Added `gemini_client` parameter to `__init__()`
+  - Enhanced `_limit_media_in_history()` with two-phase filtering
+  - Added logging for type filtering vs count limiting
+- **Modified**: `app/handlers/chat.py` (1 line)
+  - Pass `gemini_client` to `MultiLevelContextManager`
+- **Modified**: `app/services/gemini.py` (+20 lines)
+  - Detect rate limit errors (429/ResourceExhausted)
+  - User-friendly rate limit messages with suggestions
+  - Added "modality" to media error keywords
+- **New**: `docs/fixes/historical-media-filtering.md` - Complete fix documentation
+
+**Logging**:
+
+```
+INFO - Filtered 2 unsupported media item(s) from history
+INFO - Limited media in history: removed 3 of 31 items (max: 28, also filtered 2 by type)
+WARNING - Gemini API rate limit exceeded. Consider reducing context size or upgrading plan
+```
+
+**How to verify**:
+
+```bash
+# Send voice message, then text message mentioning bot
+# Check logs - should see filtering, no audio errors
+docker compose logs bot | grep -E "Filtered.*from history|Audio input"
+```
+
+**Benefits**:
+
+- ✅ Handles unsupported media in historical context
+- ✅ Clear rate limit warnings with actionable advice
+- ✅ Automatic cleanup (no manual database intervention)
+- ✅ Works across all Gemini model families
+
+---
+
+### 2025-10-07 - Graceful Media Handling 🎯
+
+**Feature**: Automatic detection and filtering of unsupported media types based on model capabilities.
+
+**Problem**: Different Gemini models have different media support (Gemma models don't support audio/inline-video, causing `400 Audio input modality is not enabled` errors).
+
+**Solution**: 
+- **Model capability detection** - Automatically detects if model supports audio/video on startup
+- **Media filtering** - Filters out unsupported media types before API call
+- **Smart logging** - Logs what was filtered and why (no silent failures)
+- **Configurable limits** - `GEMINI_MAX_MEDIA_ITEMS` for fine-tuning
+
+**Model Support Matrix**:
+
+| Model Family | Images | Audio | Video | Max Items |
+|-------------|---------|-------|-------|-----------|
+| Gemma 3     | ✅      | ❌    | ⚠️*   | 32        |
+| Gemini 1.5+ | ✅      | ✅    | ✅    | 100+      |
+| Gemini Flash| ✅      | ✅    | ✅    | 50+       |
+
+*YouTube URLs supported via `file_uri`
+
+**Files Changed**:
+
+- **Modified**: `app/services/gemini.py` (+120 lines)
+  - Added `_detect_audio_support()` and `_detect_video_support()` methods
+  - Added `_is_media_supported()` filtering logic
+  - Changed `build_media_parts()` from static to instance method
+  - Added filtered media counting and logging
+- **Modified**: `app/services/context/multi_level_context.py` (4 lines)
+  - Use configurable `gemini_max_media_items` instead of hardcoded value
+- **Modified**: `app/config.py` (+5 lines)
+  - Added `gemini_max_media_items` field (default: 28)
+- **Modified**: `.env.example` (+6 lines)
+  - Added `GEMINI_MAX_MEDIA_ITEMS` with documentation
+- **New**: `docs/features/graceful-media-handling.md` - Complete feature guide
+
+**Configuration**:
+
+```bash
+# Model selection (auto-detects capabilities)
+GEMINI_MODEL=models/gemma-3-27b-it  # No audio support
+# or
+GEMINI_MODEL=gemini-2.5-flash       # Full media support
+
+# Media limit (adjust per model)
+GEMINI_MAX_MEDIA_ITEMS=28  # Conservative for Gemma (max 32)
+# For Gemini 1.5+: Can increase to 50+
+```
+
+**How to verify**:
+
+```bash
+# Check capability detection at startup
+docker compose logs bot | grep -E "audio_supported|video_supported"
+
+# Test filtering (send voice message to Gemma bot)
+docker compose logs bot | grep "Filtered unsupported media"
+
+# Monitor filtering frequency
+docker compose logs bot | grep -c "Filtered.*unsupported media"
+```
+
+**Benefits**:
+
+- ✅ No more API errors for unsupported media
+- ✅ Graceful degradation (text still processed)
+- ✅ Clear logging for debugging
+- ✅ Works across all Gemini model families
+- ✅ Zero configuration needed (auto-detection)
+
+---
+
+### 2025-10-07 - Gemma Media Limit Fix 🔧
+
+**Issue**: Bot crashed with `400 Please use fewer than 32 images` when using Gemma models in media-heavy conversations.
+
+**Root Cause**: Gemma 3 models have a hard limit of 32 images per request. The multi-level context manager was including media from all historical messages without checking the total count.
+
+**Solution**: Added `_limit_media_in_history()` method to `MultiLevelContextManager` that:
+- Counts total media items (inline_data and file_data) across all messages
+- Removes media from oldest messages first if count exceeds 28 (conservative limit)
+- Replaces removed media with text placeholders like `[media: image/jpeg]`
+- Preserves all text content and recent media
+
+**Files Changed**:
+- **Modified**: `app/services/context/multi_level_context.py` (+68 lines)
+  - Added `_limit_media_in_history()` method
+  - Modified `format_for_gemini()` to apply media limiting
+- **Modified**: `.env` - Set `GEMINI_MODEL=models/gemma-3-27b-it` (corrected from invalid `gemma-3`)
+- **New**: `docs/fixes/gemma-media-limit-fix.md` - Detailed fix documentation
+
+**Configuration**:
+```bash
+# In .env - now using correct model name
+GEMINI_MODEL=models/gemma-3-27b-it  # Was: gemma-3 (invalid)
+```
+
+**Media limit**: Hardcoded to 28 items (future: make configurable via `GEMINI_MAX_MEDIA_ITEMS`)
+
+**How to verify**:
+```bash
+docker compose logs bot | grep "Limited media in history"
+```
+
+---
+
 ### 2025-10-07 - Phase 2 Complete: Universal Bot Configuration ✅
 
 **Feature**: Bot now supports multiple deployments with different identities, all configurable via environment variables.

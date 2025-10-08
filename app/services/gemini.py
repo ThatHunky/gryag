@@ -24,9 +24,16 @@ class GeminiClient:
     def __init__(self, api_key: str, model: str, embed_model: str) -> None:
         genai.configure(api_key=api_key)  # type: ignore[attr-defined]
         self._model = genai.GenerativeModel(model_name=model)  # type: ignore[attr-defined]
+        self._model_name = model
         self._embed_model = embed_model
         self._logger = logging.getLogger(__name__)
         self._search_grounding_supported = True
+
+        # Model capability detection
+        self._audio_supported = self._detect_audio_support(model)
+        self._video_supported = self._detect_video_support(model)
+        self._tools_supported = self._detect_tools_support(model)
+
         try:
             signature = inspect.signature(self._model.generate_content_async)
         except (AttributeError, ValueError, TypeError):
@@ -59,11 +66,75 @@ class GeminiClient:
             for category in categories
         ]
 
+    @staticmethod
+    def _detect_audio_support(model_name: str) -> bool:
+        """
+        Detect if the model supports audio input.
+
+        Gemma models don't support audio. Most Gemini models do.
+        """
+        model_lower = model_name.lower()
+        # Gemma models (all variants) don't support audio
+        if "gemma" in model_lower:
+            return False
+        # Gemini Pro Vision and Flash (1.5+) support audio
+        if "gemini" in model_lower:
+            return True
+        # Default to False for unknown models
+        return False
+
+    @staticmethod
+    def _detect_video_support(model_name: str) -> bool:
+        """
+        Detect if the model supports video input.
+
+        Gemma models have limited video support (YouTube URLs only via file_uri).
+        Gemini 1.5+ supports video.
+        """
+        model_lower = model_name.lower()
+        # Gemma supports YouTube URLs but not inline video
+        if "gemma" in model_lower:
+            return False  # No inline video support
+        # Gemini 1.5+ supports video
+        if "gemini" in model_lower and ("1.5" in model_lower or "2." in model_lower):
+            return True
+        # Default to False for unknown models
+        return False
+
+    @staticmethod
+    def _detect_tools_support(model_name: str) -> bool:
+        """
+        Detect if the model supports function calling (tools).
+
+        Gemma models don't support function calling. Gemini models do.
+        """
+        model_lower = model_name.lower()
+        # Gemma models (all variants) don't support function calling
+        if "gemma" in model_lower:
+            return False
+        # Gemini models support function calling
+        if "gemini" in model_lower:
+            return True
+        # Default to True for unknown models (safer to try and fallback)
+        return True
+
     def _filter_tools(
         self, tools: list[dict[str, Any]] | None
     ) -> list[dict[str, Any]] | None:
         if not tools:
             return None
+
+        # If model doesn't support tools at all, return None
+        if not self._tools_supported:
+            if tools:
+                self._logger.info(
+                    "Function calling not supported by model %s - disabling %d tool(s)",
+                    self._model_name,
+                    len(tools),
+                )
+            return None
+
+        # Filter out search grounding if not supported
         if self._search_grounding_supported:
             return tools
         filtered: list[dict[str, Any]] = []
@@ -82,6 +153,24 @@ class GeminiClient:
         ):
             self._search_grounding_supported = False
             self._logger.warning("Disabling search grounding tools: %s", error_message)
+            return True
+        return False
+
+    def _maybe_disable_tools(self, error_message: str) -> bool:
+        """
+        Detect and disable function calling if not supported.
+
+        Returns True if tools were disabled, False otherwise.
+        """
+        if (
+            "Function calling is not enabled" in error_message
+            or "function_calling is not enabled" in error_message.lower()
+        ) and self._tools_supported:
+            self._tools_supported = False
+            self._logger.warning(
+                "Function calling not supported by model %s - disabling tools",
+                self._model_name,
+            )
             return True
         return False
 
@@ -131,8 +220,8 @@ class GeminiClient:
         except asyncio.TimeoutError as exc:
             raise GeminiError("Gemini request timed out") from exc
 
-    @staticmethod
     def build_media_parts(
+        self,
         media_items: Iterable[dict[str, Any]],
         logger: logging.Logger | None = None,
     ) -> list[dict[str, Any]]:
@@ -142,6 +231,8 @@ class GeminiClient:
         Supports:
         - Inline data (base64 encoded bytes) for files <20MB
         - File URIs for YouTube URLs
+
+        Filters out unsupported media types based on model capabilities.
 
         Args:
             media_items: List of dicts with either:
@@ -153,6 +244,8 @@ class GeminiClient:
             List of parts in Gemini API format
         """
         parts: list[dict[str, Any]] = []
+        filtered_count = 0
+
         for item in media_items:
             # YouTube URLs or Files API references
             if "file_uri" in item:
@@ -168,8 +261,22 @@ class GeminiClient:
             mime = item.get("mime")
             kind = item.get("kind", "unknown")
             size = item.get("size", 0)
+
             if not blob or not mime:
                 continue
+
+            # Filter unsupported media types
+            if not self._is_media_supported(mime, kind):
+                filtered_count += 1
+                if logger:
+                    logger.info(
+                        "Filtered unsupported media: mime=%s, kind=%s (model: %s)",
+                        mime,
+                        kind,
+                        self._model_name,
+                    )
+                continue
+
             data = base64.b64encode(blob).decode("ascii")
             parts.append({"inline_data": {"mime_type": mime, "data": data}})
             if logger:
@@ -180,7 +287,44 @@ class GeminiClient:
                     size,
                     len(data),
                 )
+
+        if filtered_count > 0 and logger:
+            logger.warning(
+                "Filtered %d unsupported media item(s) for model %s",
+                filtered_count,
+                self._model_name,
+            )
+
         return parts
+
+    def _is_media_supported(self, mime: str, kind: str) -> bool:
+        """
+        Check if a media type is supported by the current model.
+
+        Args:
+            mime: MIME type (e.g., "audio/ogg", "video/mp4")
+            kind: Media kind (e.g., "audio", "video", "photo")
+
+        Returns:
+            True if supported, False otherwise
+        """
+        mime_lower = mime.lower()
+        kind_lower = kind.lower()
+
+        # Audio check
+        if "audio" in mime_lower or kind_lower == "audio" or kind_lower == "voice":
+            if not self._audio_supported:
+                return False
+
+        # Video check (inline video, not YouTube URLs)
+        if "video" in mime_lower or kind_lower == "video":
+            if not self._video_supported:
+                return False
+
+        # Images are supported by all models
+        # Documents/PDFs are supported by Gemini 1.5+
+
+        return True
 
     async def generate(
         self,
@@ -236,10 +380,38 @@ class GeminiClient:
         except Exception as exc:  # pragma: no cover - network failure paths
             err_text = str(exc)
 
+            # Check for rate limit errors (429)
+            is_rate_limit = (
+                "429" in err_text
+                or "quota" in err_text.lower()
+                or "rate limit" in err_text.lower()
+                or "ResourceExhausted" in str(type(exc))
+            )
+
+            if is_rate_limit:
+                self._logger.warning(
+                    "Gemini API rate limit exceeded. "
+                    "Consider: 1) Reducing context size, 2) Upgrading API plan, "
+                    "3) Adding delays between requests. Error: %s",
+                    err_text[:200],
+                )
+                # Don't retry on rate limits - let circuit breaker handle it
+                self._record_failure()
+                raise GeminiError(
+                    "Rate limit exceeded. Please try again later."
+                ) from exc
+
             # Check if it's a media-related error
             is_media_error = any(
                 keyword in err_text.lower()
-                for keyword in ["image", "video", "audio", "media", "inline_data"]
+                for keyword in [
+                    "image",
+                    "video",
+                    "audio",
+                    "media",
+                    "inline_data",
+                    "modality",
+                ]
             )
 
             if is_media_error:
@@ -260,8 +432,12 @@ class GeminiClient:
                 call_contents = contents
 
             retried = False
-            if self._maybe_disable_search_grounding(err_text):
+            # Check if we need to disable tools
+            if self._maybe_disable_tools(err_text):
+                filtered_tools = None  # Disable all tools
+            elif self._maybe_disable_search_grounding(err_text):
                 filtered_tools = self._filter_tools(tools)
+
             try:
                 response = await self._invoke_model(
                     call_contents,

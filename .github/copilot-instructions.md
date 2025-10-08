@@ -66,7 +66,7 @@ globs: *
 
    - `gemini_client.generate()` with system prompt, history, user parts, tools
    - Tools: `search_messages`, `calculator`, `weather`, `currency`, `polls` (all return JSON strings)
-   - Google Search Grounding (if `ENABLE_SEARCH_GROUNDING=true`) - 500 req/day limit
+   - Google Search Grounding (if `ENABLE_SEARCH_GROUNDING=true`) - uses `google_search_retrieval` (legacy SDK format), 500 req/day limit on Free tier
    - Circuit breaker: 3 failures → 60s cooldown
    - Safety settings: `BLOCK_NONE` for all categories
 

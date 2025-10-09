@@ -74,20 +74,34 @@ class UserProfileStoreAdapter:
         self,
         user_id: int,
         chat_id: int,
+        fact_type: str | None = None,
         limit: int = 100,
+        min_confidence: float = 0.0,
     ) -> list[dict[str, Any]]:
         """
         Get facts (adapter method).
 
         Maps UnifiedFactRepository response to old format.
+
+        Args:
+            user_id: User ID (or chat ID if negative)
+            chat_id: Chat context for user facts
+            fact_type: Optional filter by fact type (maps to fact_category)
+            limit: Max number of facts to retrieve
+            min_confidence: Minimum confidence threshold (0.0-1.0)
         """
         entity_id = user_id
         chat_context = chat_id if user_id > 0 else None
 
+        # Convert fact_type to categories list if provided
+        categories = [fact_type] if fact_type else None
+
         facts = await self._fact_repo.get_facts(
             entity_id=entity_id,
             chat_context=chat_context,
+            categories=categories,
             limit=limit,
+            min_confidence=min_confidence,
         )
 
         # Map new schema to old schema format

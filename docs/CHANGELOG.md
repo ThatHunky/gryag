@@ -4,6 +4,37 @@ All notable changes to gryag's memory, context, and learning systems.
 
 ## [Unreleased]
 
+### 2025-10-09 - Fixed UserProfileStoreAdapter.get_facts() TypeError
+
+**Issue**: Production error - `TypeError: UserProfileStoreAdapter.get_facts() got an unexpected keyword argument 'fact_type'`
+
+**Impact**: 20+ exceptions in logs, `/gryagfacts @username <type>` command failing
+
+**Root Cause**: 
+- `UserProfileStoreAdapter.get_facts()` missing `fact_type` and `min_confidence` parameters
+- Parameters were expected by callers in `app/handlers/profile_admin.py` and `app/services/context/multi_level_context.py`
+- Adapter was incomplete compatibility layer for `UnifiedFactRepository`
+
+**Fix**:
+- Added `fact_type: str | None = None` parameter (maps to `categories` in repo)
+- Added `min_confidence: float = 0.0` parameter (passes through to repo)
+- Both parameters are optional with backward-compatible defaults
+- All existing callers remain compatible
+
+**Files Modified**:
+- `app/services/user_profile_adapter.py` - Enhanced `get_facts()` signature and implementation
+
+**Verification**:
+```bash
+# Should show 0 after deployment
+grep -c "TypeError.*get_facts.*fact_type" logs/gryag.log
+
+# Test the command
+/gryagfacts @username location
+```
+
+**Related**: Part of Unified Fact Storage implementation (2025-10-08)
+
 ### 2025-10-08 - Unified Fact Storage Implementation Complete ✅🎉
 
 **Summary**: Major architectural refactor - unified separate `user_facts` and `chat_facts` tables into single `facts` table. Fixed critical bug where chat facts were stored but not visible in `/gryagchatfacts` command. Complete implementation with migration, backend, tests, and deployment-ready code.

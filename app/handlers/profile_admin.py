@@ -45,6 +45,10 @@ def get_profile_commands(prefix: str = "gryag") -> list[BotCommand]:
             description="🔒 Експортувати профіль у JSON (тільки адміни)",
         ),
         BotCommand(
+            command=f"{prefix}users",
+            description="🔒 Перелік користувачів у чаті (тільки адміни)",
+        ),
+        BotCommand(
             command=f"{prefix}self",
             description="🔒 Показати self-learning профіль бота (тільки адміни)",
         ),
@@ -99,15 +103,43 @@ def _format_fact_type(fact_type: str) -> str:
     return f"{emojis.get(fact_type, '📌')} {fact_type}"
 
 
-def _format_timestamp(timestamp: str | None) -> str:
-    """Format ISO timestamp to readable format."""
-    if not timestamp:
+def _format_timestamp(timestamp: Any) -> str:
+    """Format timestamp-like value to readable format."""
+    if timestamp in (None, "", 0):
         return "невідомо"
+
     try:
-        dt = datetime.fromisoformat(timestamp)
+        if isinstance(timestamp, (int, float)):
+            dt = datetime.fromtimestamp(int(timestamp))
+        elif isinstance(timestamp, str):
+            if timestamp.isdigit():
+                dt = datetime.fromtimestamp(int(timestamp))
+            else:
+                dt = datetime.fromisoformat(timestamp)
+        else:
+            return "невідомо"
         return dt.strftime("%Y-%m-%d %H:%M")
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OSError):
         return "невідомо"
+
+
+def _parse_users_command_args(text: str | None) -> tuple[bool, int]:
+    """Parse optional arguments for /gryagusers command."""
+    include_inactive = True
+    limit = 20
+
+    if not text:
+        return include_inactive, limit
+
+    parts = text.split()[1:]
+    for token in parts:
+        lower = token.lower()
+        if lower in {"active", "members", "current"}:
+            include_inactive = False
+        elif token.isdigit():
+            limit = max(1, min(int(token), 100))
+
+    return include_inactive, limit
 
 
 async def _resolve_target_user(
@@ -140,6 +172,64 @@ async def _resolve_target_user(
         )
 
     return None
+
+
+@router.message(Command(commands=["gryagusers", "users"]))
+async def list_chat_users_command(
+    message: Message, settings: Settings, profile_store: UserProfileStore
+) -> None:
+    """List known users for the current chat."""
+    if not message.from_user or not _is_admin(message.from_user.id, settings):
+        await message.reply(ADMIN_ONLY)
+        return
+
+    include_inactive, limit = _parse_users_command_args(message.text)
+    chat_id = message.chat.id
+
+    users = await profile_store.list_chat_users(
+        chat_id=chat_id, limit=limit, include_inactive=include_inactive
+    )
+
+    if not users:
+        await message.reply("📭 Немає збережених користувачів для цього чату.")
+        return
+
+    status_icons = {
+        "member": "✅",
+        "administrator": "🛡️",
+        "creator": "👑",
+        "left": "🚪",
+        "kicked": "🚫",
+        "banned": "⛔",
+        "restricted": "⚠️",
+    }
+
+    lines: list[str] = []
+    for idx, user in enumerate(users, start=1):
+        user_id = user["user_id"]
+        display_name = user.get("display_name") or "—"
+        username = user.get("username")
+        username_text = f"@{username.lstrip('@')}" if username else "—"
+        status = user.get("membership_status", "unknown")
+        status_icon = status_icons.get(status, "❔")
+        last_seen = _format_timestamp(user.get("last_seen"))
+        interactions = user.get("interaction_count", 0)
+
+        lines.append(
+            f"{idx}. <b>{display_name}</b> ({username_text})\n"
+            f"   ID: <code>{user_id}</code> • Статус: {status_icon} {status}\n"
+            f"   Остання активність: {last_seen} • Взаємодій: {interactions}"
+        )
+
+    header = "📇 <b>Учасники чату</b>\n"
+    header += (
+        "Показую лише активних користувачів.\n"
+        if not include_inactive
+        else "Показую активних та архівованих користувачів.\n"
+    )
+    header += f"Разом: {len(users)} (ліміт {limit})\n\n"
+
+    await message.reply(header + "\n".join(lines), parse_mode="HTML")
 
 
 @router.message(Command(commands=["gryagprofile", "profile"]))

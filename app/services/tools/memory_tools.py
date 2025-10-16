@@ -10,12 +10,52 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from app.repositories.fact_repository import UnifiedFactRepository
 from app.services import telemetry
 
+if TYPE_CHECKING:
+    from app.services.user_profile import UserProfileStore
+    from app.services.user_profile_adapter import UserProfileStoreAdapter
+    from app.services.context_store import ContextStore
+
 LOGGER = logging.getLogger(__name__)
+
+
+def _resolve_fact_repo(
+    profile_store: "UserProfileStore | UserProfileStoreAdapter | None",
+    explicit_repo: UnifiedFactRepository | None,
+) -> UnifiedFactRepository | None:
+    """Prefer explicit repo, then profile_store-backed repo, else None."""
+    if explicit_repo:
+        return explicit_repo
+
+    if profile_store is None:
+        return None
+
+    repo = getattr(profile_store, "fact_repository", None)
+    if isinstance(repo, UnifiedFactRepository):
+        return repo
+
+    repo = getattr(profile_store, "_fact_repo", None)
+    if isinstance(repo, UnifiedFactRepository):
+        return repo
+
+    return None
+
+
+def _resolve_db_path(
+    profile_store: "UserProfileStore | UserProfileStoreAdapter | None",
+) -> str | None:
+    """Fetch legacy db path if available for fallback operations."""
+    if profile_store is None:
+        return None
+
+    db_path = getattr(profile_store, "_db_path", None)
+    if db_path is None:
+        return None
+    return str(db_path)
 
 
 async def remember_fact_tool(
@@ -28,6 +68,7 @@ async def remember_fact_tool(
     # Injected by handler
     chat_id: int | None = None,
     message_id: int | None = None,
+    profile_store: "UserProfileStore | UserProfileStoreAdapter | None" = None,
     fact_repo: UnifiedFactRepository | None = None,
 ) -> str:
     """
@@ -54,13 +95,16 @@ async def remember_fact_tool(
     start_time = time.time()
 
     try:
-        if not fact_repo:
+        if not profile_store:
             return json.dumps(
                 {"status": "error", "message": "Profile store not available"}
             )
 
         if not chat_id:
             return json.dumps({"status": "error", "message": "Chat ID not provided"})
+
+        # Resolve fact repository for compatibility (unused for legacy path)
+        fact_repo = _resolve_fact_repo(profile_store, fact_repo)
 
         # Check if fact already exists (basic duplicate detection)
         existing_facts = await profile_store.get_facts(
@@ -164,7 +208,8 @@ async def recall_facts_tool(
     limit: int = 10,
     # Injected by handler
     chat_id: int | None = None,
-    profile_store: UserProfileStore | None = None,
+    profile_store: "UserProfileStore | UserProfileStoreAdapter | None" = None,
+    fact_repo: UnifiedFactRepository | None = None,
 ) -> str:
     """
     Tool handler for recalling existing facts.
@@ -190,6 +235,8 @@ async def recall_facts_tool(
 
         if not chat_id:
             return json.dumps({"status": "error", "message": "Chat ID not provided"})
+
+        fact_repo = _resolve_fact_repo(profile_store, fact_repo)
 
         # Get facts from profile store
         facts = await profile_store.get_facts(
@@ -285,7 +332,8 @@ async def update_fact_tool(
     # Injected by handler
     chat_id: int | None = None,
     message_id: int | None = None,
-    profile_store: UserProfileStore | None = None,
+    profile_store: "UserProfileStore | UserProfileStoreAdapter | None" = None,
+    fact_repo: UnifiedFactRepository | None = None,
 ) -> str:
     """
     Tool handler for updating existing facts.
@@ -315,6 +363,8 @@ async def update_fact_tool(
 
         if not chat_id:
             return json.dumps({"status": "error", "message": "Chat ID not provided"})
+
+        fact_repo = _resolve_fact_repo(profile_store, fact_repo)
 
         # Find the existing fact
         existing_facts = await profile_store.get_facts(
@@ -348,22 +398,50 @@ async def update_fact_tool(
         old_value = target_fact.get("fact_value")
         fact_id = target_fact.get("id")
 
-        # Update the fact directly via SQL (force update regardless of confidence)
-        import aiosqlite
-
+        # Update the fact
         try:
-            now = int(time.time())
-            async with aiosqlite.connect(profile_store._db_path) as db:
-                await db.execute(
-                    """
-                    UPDATE user_facts 
-                    SET fact_value = ?, confidence = ?, updated_at = ?, last_mentioned = ?,
-                        evidence_text = COALESCE(?, evidence_text)
-                    WHERE id = ?
-                    """,
-                    (new_value, confidence, now, now, source_excerpt, fact_id),
+            if fact_repo:
+                updated = await fact_repo.update_fact(
+                    fact_id=fact_id,
+                    fact_value=new_value,
+                    confidence=confidence,
+                    evidence_text=source_excerpt,
                 )
-                await db.commit()
+            else:
+                # Legacy fallback to direct SQL
+                import aiosqlite
+
+                db_path = _resolve_db_path(profile_store)
+                if not db_path:
+                    raise RuntimeError("Database path unavailable for legacy profile store")
+
+                now = int(time.time())
+                async with aiosqlite.connect(db_path) as db:
+                    await db.execute(
+                        """
+                        UPDATE user_facts 
+                        SET fact_value = ?, confidence = ?, updated_at = ?, last_mentioned = ?,
+                            evidence_text = COALESCE(?, evidence_text)
+                        WHERE id = ?
+                        """,
+                        (new_value, confidence, now, now, source_excerpt, fact_id),
+                    )
+                    await db.commit()
+                updated = True
+
+            if not updated:
+                telemetry.increment_counter(
+                    "memory_tool_not_found",
+                    tool="update_fact",
+                    fact_type=fact_type,
+                )
+                return json.dumps(
+                    {
+                        "status": "not_found",
+                        "message": f"Unable to update fact {fact_type}.{fact_key}; record missing.",
+                    }
+                )
+
         except Exception as e:
             telemetry.increment_counter(
                 "memory_tool_error", tool="update_fact", error=type(e).__name__
@@ -436,7 +514,9 @@ async def forget_all_facts_tool(
     # Injected by handler
     chat_id: int | None = None,
     message_id: int | None = None,
-    profile_store: UserProfileStore | None = None,
+    profile_store: "UserProfileStore | UserProfileStoreAdapter | None" = None,
+    fact_repo: UnifiedFactRepository | None = None,
+    context_store: "ContextStore | None" = None,
 ) -> str:
     """
     Tool handler for forgetting ALL facts about a user (bulk delete).
@@ -465,33 +545,50 @@ async def forget_all_facts_tool(
         if not chat_id:
             return json.dumps({"status": "error", "message": "Chat ID not provided"})
 
-        # Soft delete ALL active facts for this user
-        import aiosqlite
+        fact_repo = _resolve_fact_repo(profile_store, fact_repo)
+
+        messages_deleted = 0
 
         try:
-            now = int(time.time())
-            async with aiosqlite.connect(profile_store._db_path) as db:
-                # Get count before deletion
-                cursor = await db.execute(
-                    """
-                    SELECT COUNT(*) FROM user_facts 
-                    WHERE user_id = ? AND chat_id = ? AND is_active = 1
-                    """,
-                    (user_id, chat_id),
+            if fact_repo:
+                count_before = await fact_repo.delete_all_facts(
+                    entity_id=user_id,
+                    chat_context=chat_id,
+                    soft=False,
                 )
-                row = await cursor.fetchone()
-                count_before = row[0] if row else 0
+            else:
+                # Legacy fallback: deactivate facts in user_facts table
+                import aiosqlite
 
-                # Update all facts to mark as inactive
-                await db.execute(
-                    """
-                    UPDATE user_facts 
-                    SET is_active = 0, updated_at = ?
-                    WHERE user_id = ? AND chat_id = ? AND is_active = 1
-                    """,
-                    (now, user_id, chat_id),
+                db_path = _resolve_db_path(profile_store)
+                if not db_path:
+                    raise RuntimeError("Database path unavailable for legacy profile store")
+
+                async with aiosqlite.connect(db_path) as db:
+                    cursor = await db.execute(
+                        """
+                        SELECT COUNT(*) FROM user_facts 
+                        WHERE user_id = ? AND chat_id = ? AND is_active = 1
+                        """,
+                        (user_id, chat_id),
+                    )
+                    row = await cursor.fetchone()
+                    count_before = row[0] if row else 0
+
+                    await db.execute(
+                        """
+                        DELETE FROM user_facts
+                        WHERE user_id = ? AND chat_id = ?
+                        """,
+                        (user_id, chat_id),
+                    )
+                    await db.commit()
+
+            if context_store:
+                messages_deleted = await context_store.delete_user_messages(
+                    chat_id=chat_id,
+                    user_id=user_id,
                 )
-                await db.commit()
 
         except Exception as e:
             telemetry.increment_counter(
@@ -513,6 +610,7 @@ async def forget_all_facts_tool(
             tool="forget_all_facts",
             count=count_before,
             reason=reason,
+            messages_deleted=messages_deleted,
             status="success",
         )
         telemetry.set_gauge(
@@ -528,6 +626,7 @@ async def forget_all_facts_tool(
                 "chat_id": chat_id,
                 "count": count_before,
                 "reason": reason,
+                "messages_deleted": messages_deleted,
                 "latency_ms": latency_ms,
             },
         )
@@ -537,7 +636,11 @@ async def forget_all_facts_tool(
                 "status": "success",
                 "count": count_before,
                 "reason": reason,
-                "message": f"Forgot all {count_before} facts about user (reason: {reason})",
+                "messages_deleted": messages_deleted,
+                "message": (
+                    f"Forgot all {count_before} facts about user (reason: {reason}); "
+                    f"removed {messages_deleted} stored messages."
+                ),
             }
         )
 
@@ -557,6 +660,75 @@ async def forget_all_facts_tool(
         )
 
 
+async def set_pronouns_tool(
+    user_id: int,
+    pronouns: str,
+    # Injected by handler
+    chat_id: int | None = None,
+    profile_store: "UserProfileStore | UserProfileStoreAdapter | None" = None,
+) -> str:
+    """Update or clear a user's pronouns."""
+    start_time = time.time()
+
+    try:
+        if not profile_store:
+            return json.dumps(
+                {"status": "error", "message": "Profile store not available"}
+            )
+
+        if not chat_id:
+            return json.dumps({"status": "error", "message": "Chat ID not provided"})
+
+        normalized = (pronouns or "").strip()
+        stored = normalized if normalized else None
+
+        # Cap length to avoid flooding
+        if stored and len(stored) > 64:
+            stored = stored[:64]
+
+        await profile_store.update_pronouns(
+            user_id=user_id,
+            chat_id=chat_id,
+            pronouns=stored,
+        )
+
+        latency_ms = int((time.time() - start_time) * 1000)
+        telemetry.increment_counter(
+            "memory_tool_used",
+            tool="set_pronouns",
+            status="cleared" if stored is None else "success",
+        )
+        telemetry.set_gauge("memory_tool_latency_ms", latency_ms, tool="set_pronouns")
+
+        if stored:
+            message = f"Stored pronouns: {stored}"
+        else:
+            message = "Cleared stored pronouns"
+
+        return json.dumps(
+            {
+                "status": "success",
+                "pronouns": stored or "",
+                "message": message,
+            }
+        )
+
+    except Exception as e:
+        LOGGER.error(f"set_pronouns tool failed: {e}", exc_info=True)
+        telemetry.increment_counter(
+            "memory_tool_error",
+            tool="set_pronouns",
+            error_type=type(e).__name__,
+        )
+
+        return json.dumps(
+            {
+                "status": "error",
+                "message": str(e),
+            }
+        )
+
+
 async def forget_fact_tool(
     user_id: int,
     fact_type: str,
@@ -566,7 +738,9 @@ async def forget_fact_tool(
     # Injected by handler
     chat_id: int | None = None,
     message_id: int | None = None,
-    profile_store: UserProfileStore | None = None,
+    profile_store: "UserProfileStore | UserProfileStoreAdapter | None" = None,
+    fact_repo: UnifiedFactRepository | None = None,
+    context_store: "ContextStore | None" = None,
 ) -> str:
     """
     Tool handler for forgetting (archiving) facts.
@@ -594,6 +768,8 @@ async def forget_fact_tool(
 
         if not chat_id:
             return json.dumps({"status": "error", "message": "Chat ID not provided"})
+
+        fact_repo = _resolve_fact_repo(profile_store, fact_repo)
 
         # Find the existing fact
         existing_facts = await profile_store.get_facts(
@@ -630,25 +806,39 @@ async def forget_fact_tool(
 
         fact_id = target_fact.get("id")
         fact_value = target_fact.get("fact_value")
+        source_message_id = target_fact.get("source_message_id")
 
-        # Soft delete: set is_active = 0
-        import aiosqlite
-
+        # Soft delete the fact
         try:
-            now = int(time.time())
-            async with aiosqlite.connect(profile_store._db_path) as db:
-                # Update the fact to mark as inactive
-                await db.execute(
-                    """
-                    UPDATE user_facts 
-                    SET is_active = 0, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (now, fact_id),
-                )
-                await db.commit()
+            if fact_repo:
+                deleted = await fact_repo.delete_fact(fact_id=fact_id, soft=False)
+            else:
+                import aiosqlite
 
-                # TODO: In future, store reason and replacement_fact_id in fact_versions table
+                db_path = _resolve_db_path(profile_store)
+                if not db_path:
+                    raise RuntimeError("Database path unavailable for legacy profile store")
+
+                async with aiosqlite.connect(db_path) as db:
+                    cursor = await db.execute(
+                        "DELETE FROM user_facts WHERE id = ?",
+                        (fact_id,),
+                    )
+                    await db.commit()
+                    deleted = cursor.rowcount > 0
+
+            if not deleted:
+                telemetry.increment_counter(
+                    "memory_tool_not_found",
+                    tool="forget_fact",
+                    fact_type=fact_type,
+                )
+                return json.dumps(
+                    {
+                        "status": "not_found",
+                        "message": f"Fact {fact_type}.{fact_key} already forgotten or missing.",
+                    }
+                )
 
         except Exception as e:
             telemetry.increment_counter(
@@ -662,6 +852,21 @@ async def forget_fact_tool(
                     "message": str(e),
                 }
             )
+
+        message_deleted = False
+        if context_store and source_message_id:
+            try:
+                message_deleted = await context_store.delete_message_by_external_id(
+                    chat_id=chat_id,
+                    external_message_id=source_message_id,
+                )
+            except Exception as e:
+                LOGGER.warning(
+                    "Failed to delete source message %s for fact %s: %s",
+                    source_message_id,
+                    fact_id,
+                    e,
+                )
 
         # Telemetry
         latency_ms = int((time.time() - start_time) * 1000)
@@ -686,6 +891,7 @@ async def forget_fact_tool(
                 "fact_id": fact_id,
                 "reason": reason,
                 "replacement_fact_id": replacement_fact_id,
+                "message_deleted": message_deleted,
                 "latency_ms": latency_ms,
             },
         )
@@ -697,6 +903,7 @@ async def forget_fact_tool(
                 "forgotten_value": fact_value,
                 "reason": reason,
                 "replacement_fact_id": replacement_fact_id,
+                "message_deleted": message_deleted,
                 "message": f"Forgot {fact_type}.{fact_key} = {fact_value} ({reason})",
             }
         )

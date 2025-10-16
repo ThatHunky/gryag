@@ -193,11 +193,15 @@ class EpisodicMemoryStore:
                 SELECT * FROM episodes 
                 WHERE chat_id = ? 
                   AND importance >= ?
-                  AND participant_ids LIKE ?
+                  AND EXISTS (
+                      SELECT 1
+                      FROM json_each(episodes.participant_ids)
+                      WHERE CAST(value AS INTEGER) = ?
+                  )
                 ORDER BY created_at DESC
                 LIMIT ?
                 """,
-                (chat_id, min_importance, f"%{user_id}%", limit * 3),
+                (chat_id, min_importance, user_id, limit * 3),
             ) as cursor:
                 rows = await cursor.fetchall()
 

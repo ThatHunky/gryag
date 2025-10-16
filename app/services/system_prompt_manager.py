@@ -37,6 +37,7 @@ class SystemPromptManager:
     - Chat-specific prompts (override global for specific chat)
     - Personal chat prompts (for direct messages with bot)
     - Version history and rollback
+    - Prompt caching for token efficiency
     """
 
     def __init__(self, db_path: str | Path):
@@ -46,6 +47,11 @@ class SystemPromptManager:
             db_path: Path to SQLite database
         """
         self.db_path = Path(db_path)
+
+        # Cache for assembled prompts (reduces token overhead)
+        self._prompt_cache: dict[int | None, tuple[SystemPrompt | None, float]] = {}
+        self._cache_ttl = 3600  # 1 hour cache TTL
+        self._last_cache_hit = False
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get database connection."""
@@ -77,15 +83,39 @@ class SystemPromptManager:
         2. Global prompt
         3. None (use default hardcoded prompt)
 
+        Uses caching to reduce database lookups.
+
         Args:
             chat_id: Telegram chat ID. None for global context.
 
         Returns:
             Active SystemPrompt or None if no custom prompt
         """
+        cache_key = chat_id
+        now = time.time()
+
+        cached_entry = self._prompt_cache.get(cache_key)
+        if cached_entry:
+            prompt_obj, cached_at = cached_entry
+            if now - cached_at < self._cache_ttl:
+                self._last_cache_hit = True
+                return prompt_obj
+            self._prompt_cache.pop(cache_key, None)
+
+        # Try using cached global prompt for chat-specific requests
+        if chat_id is not None:
+            global_cached = self._prompt_cache.get(None)
+            if global_cached:
+                prompt_obj, cached_at = global_cached
+                if now - cached_at < self._cache_ttl:
+                    self._cache_prompt(chat_id, prompt_obj)
+                    self._last_cache_hit = True
+                    return prompt_obj
+
+        self._last_cache_hit = False
+
         conn = self._get_connection()
         try:
-            # First try chat-specific prompt
             if chat_id is not None:
                 cursor = conn.execute(
                     """
@@ -98,9 +128,10 @@ class SystemPromptManager:
                 )
                 row = cursor.fetchone()
                 if row:
-                    return self._row_to_prompt(row)
+                    prompt = self._row_to_prompt(row)
+                    self._cache_prompt(chat_id, prompt)
+                    return prompt
 
-            # Fall back to global prompt
             cursor = conn.execute(
                 """
                 SELECT * FROM system_prompts
@@ -111,8 +142,15 @@ class SystemPromptManager:
             )
             row = cursor.fetchone()
             if row:
-                return self._row_to_prompt(row)
+                prompt = self._row_to_prompt(row)
+                # Cache for global key and requesting chat (if any)
+                self._cache_prompt(None, prompt)
+                if chat_id is not None:
+                    self._cache_prompt(chat_id, prompt)
+                return prompt
 
+            # No active prompts found; cache sentinel for this chat
+            self._cache_prompt(chat_id, None)
             return None
         finally:
             conn.close()
@@ -205,7 +243,14 @@ class SystemPromptManager:
             cursor = conn.execute(
                 "SELECT * FROM system_prompts WHERE id = ?", (prompt_id,)
             )
-            return self._row_to_prompt(cursor.fetchone())
+            prompt = self._row_to_prompt(cursor.fetchone())
+            if scope == "global":
+                self._invalidate_cache()
+                self._cache_prompt(None, prompt)
+            else:
+                self._invalidate_cache(chat_id)
+                self._cache_prompt(chat_id, prompt)
+            return prompt
 
         finally:
             conn.close()
@@ -246,6 +291,10 @@ class SystemPromptManager:
                     f"Reset system prompt: admin={admin_id}, scope={scope}, "
                     f"chat_id={chat_id}, deactivated={count}"
                 )
+                if scope == "global":
+                    self._invalidate_cache()
+                else:
+                    self._invalidate_cache(chat_id)
 
             return count > 0
 
@@ -352,7 +401,14 @@ class SystemPromptManager:
             cursor = conn.execute(
                 "SELECT * FROM system_prompts WHERE id = ?", (target_row["id"],)
             )
-            return self._row_to_prompt(cursor.fetchone())
+            prompt = self._row_to_prompt(cursor.fetchone())
+            if scope == "global":
+                self._invalidate_cache()
+                self._cache_prompt(None, prompt)
+            else:
+                self._invalidate_cache(chat_id)
+                self._cache_prompt(chat_id, prompt)
+            return prompt
 
         finally:
             conn.close()
@@ -372,3 +428,30 @@ class SystemPromptManager:
             updated_at=row["updated_at"],
             activated_at=row["activated_at"],
         )
+
+    @property
+    def last_cache_hit(self) -> bool:
+        """Return whether the last get_active_prompt call hit the cache."""
+        return self._last_cache_hit
+
+    def _cache_prompt(
+        self, chat_id: int | None, prompt: SystemPrompt | None, timestamp: float | None = None
+    ) -> None:
+        """Store prompt result in local cache."""
+        self._prompt_cache[chat_id] = (prompt, timestamp or time.time())
+
+    def _invalidate_cache(self, chat_id: int | None = None) -> None:
+        """Invalidate prompt cache for a specific chat or all chats."""
+        if chat_id is not None:
+            self._prompt_cache.pop(chat_id, None)
+        else:
+            # Invalidate all
+            self._prompt_cache.clear()
+        self._last_cache_hit = False
+        logger.debug(f"Invalidated prompt cache for chat_id={chat_id}")
+
+    def clear_cache(self) -> None:
+        """Clear all cached prompts (for testing or manual refresh)."""
+        self._prompt_cache.clear()
+        self._last_cache_hit = False
+        logger.info("Cleared all prompt caches")

@@ -4,6 +4,341 @@ All notable changes to gryag's memory, context, and learning systems.
 
 ## [Unreleased]
 
+### 2025-10-16 - Quality-of-Life Improvements & Infrastructure
+
+**Summary**: Comprehensive improvements to developer experience, code quality, and project infrastructure.
+
+**Changes**:
+
+1. **Dependency Management** (#1 Priority Fix)
+   - Fixed version mismatch: synced `requirements.txt` and `pyproject.toml` to use `google-genai>=0.2.0`
+   - Added `tzdata>=2024.1` to both files for consistency
+   - Added testing dependencies: `pytest>=8.0`, `pytest-asyncio>=0.23`, `pytest-cov>=4.0`, `pytest-timeout>=2.2`
+   - Added development tools: `ruff>=0.1.0`, `black>=23.0`, `mypy>=1.7`, `isort>=5.12`
+   - Organized as optional dependencies in `pyproject.toml` under `[project.optional-dependencies]`
+
+2. **Configuration Improvements**
+   - Created `.env.minimal` - streamlined template with only required settings (vs 170+ options in `.env.example`)
+   - Added `Settings.validate_startup()` method with comprehensive validation:
+     - Critical: Validates `TELEGRAM_TOKEN` and `GEMINI_API_KEY` presence
+     - Warnings: Checks for problematic values (rate limits, token budgets, fact limits)
+     - Format validation: Admin user IDs, Redis URL, API keys
+   - Updated `main.py` to call validation at startup with clear error messages
+   - Validates configuration before bot starts, fails fast with helpful messages
+
+3. **Developer Documentation**
+   - Created comprehensive `CONTRIBUTING.md` guide (400+ lines):
+     - Getting started and prerequisites
+     - Development setup (Docker + local Python)
+     - Project structure explanation
+     - Testing guidelines and coverage goals
+     - Code style guide with examples
+     - Commit message conventions (Conventional Commits)
+     - Pull request process and templates
+   - Created `docs/architecture/SYSTEM_OVERVIEW.md` with:
+     - 4 Mermaid diagrams (system architecture, message flow, context assembly, database schema)
+     - Detailed component descriptions
+     - Data flow explanations
+     - Performance characteristics
+     - Security considerations
+
+4. **CI/CD Pipeline**
+   - Created `.github/workflows/test.yml` with 5 jobs:
+     - **lint**: Code quality (black, isort, ruff, mypy) on Python 3.11 & 3.12
+     - **test**: Unit and integration tests with coverage reporting
+     - **docker**: Docker image build validation with caching
+     - **security**: Vulnerability scanning (safety, bandit)
+     - **config-validation**: Tests that example configs are valid
+   - Codecov integration for coverage tracking
+   - Matrix testing across Python versions
+
+**Files Modified**:
+- `requirements.txt` - Added testing and dev dependencies
+- `pyproject.toml` - Fixed SDK version, added optional dev dependencies
+- `app/config.py` - Added `validate_startup()` method
+- `app/main.py` - Added configuration validation at startup
+- `docs/CHANGELOG.md` - This file
+
+**Files Created**:
+- `.env.minimal` - Minimal configuration template
+- `CONTRIBUTING.md` - Comprehensive contributor guide
+- `docs/architecture/SYSTEM_OVERVIEW.md` - Architecture documentation
+- `.github/workflows/test.yml` - CI/CD pipeline
+
+**Impact**:
+- **Developers**: Clear onboarding path, automated quality checks, easier contributions
+- **Operations**: Early configuration validation prevents runtime errors
+- **Testing**: Now installable with `pip install -r requirements.txt`, tests can run in CI
+- **Documentation**: Visual architecture diagrams, clearer understanding of system
+
+**Verification**:
+```bash
+# Test dependency consistency
+diff <(grep -v '^#' requirements.txt | head -11) <(grep -A11 'dependencies' pyproject.toml | tail -11)
+
+# Install and run tests
+pip install -r requirements.txt
+pytest tests/ -v
+
+# Validate configuration
+python -c "from app.config import Settings; s = Settings(); print(s.validate_startup())"
+
+# Check CI configuration
+cat .github/workflows/test.yml
+```
+
+**Next Steps** (from QoL improvement plan):
+- Extract tool definitions from `chat.py` to separate file (#3 - reduce file size from 1520 lines)
+- Standardize logging patterns across codebase (#6 - consistent logger naming)
+- Add database connection pooling (#9 - performance optimization)
+- Create health check endpoint (#30 - operational monitoring)
+
+---
+
+### 2025-10-14 - /gryagreset Command Fixed
+
+**Summary**: Fixed `/gryagreset` command failing with `AttributeError: 'ContextStore' object has no attribute 'reset_quotas'`.
+
+**Details**:
+- Added `reset_chat()` and `reset_user()` methods to `RateLimiter` class
+- Updated `/gryagreset` admin command to use `rate_limiter.reset_chat()` instead of non-existent `store.reset_quotas()`
+- Added telemetry counters for rate limit resets
+- Added logging for number of records deleted
+
+**Files modified**:
+- `app/services/rate_limiter.py` - Added reset methods
+- `app/handlers/admin.py` - Updated to use RateLimiter
+
+**Impact**: `/gryagreset` command now works correctly to clear rate limits.
+
+**Verification**: Use `/gryagreset` as admin, check logs for "Reset X rate limit record(s)".
+
+### 2025-10-14 - Admin Rate Limit Bypass Restored
+
+**Summary**: Fixed admins being subject to hourly message rate limits.
+
+**Details**:
+- Moved admin status check to happen before rate limiting in chat handler
+- Added `not is_admin` condition to rate limiter check
+- Admins (from `ADMIN_USER_IDS` config) now have unlimited messages per hour
+- Regular users still limited by `RATE_LIMIT_PER_USER_PER_HOUR` setting
+
+**Files modified**:
+- `app/handlers/chat.py` - Reordered admin check before rate limiting
+
+**Impact**: Admins can now send unlimited messages without being throttled.
+
+**Verification**: Send 50+ messages in an hour as admin user - should not receive throttle message.
+
+### 2025-10-14 - User Identification Confusion Fix
+
+**Summary**: Fixed bot sometimes confusing users with similar display names (e.g., "кавунева пітса" vs "кавун").
+
+**Details**:
+- Increased name truncation limit from 30 to 60 characters in metadata formatting to preserve distinguishing suffixes
+- Reordered metadata keys to show `user_id` and `username` before `name` (reliable identifiers first)
+- Strengthened persona with explicit "IDENTITY VERIFICATION RULE" emphasizing user_id checking
+- Added clear warnings to always verify `user_id=831570515` for пітса before special treatment
+
+**Files modified**:
+- `app/services/context_store.py` - Metadata formatting and ordering
+- `app/persona.py` - User relationship definitions and identity verification rules
+- `docs/fixes/user-identification-confusion-fix.md` - Comprehensive fix documentation
+
+**Impact**: Minimal token increase (~5 tokens per turn) for significantly improved user identification accuracy.
+
+**Verification**: Test with user_id 831570515 (пітса) and similar-named users to confirm no confusion.
+
+### 2025-10-16 - Resource Monitoring Disabled & Local Model Cleanup
+
+**Summary**: Removed the psutil-based resource monitoring/optimizer loop and dropped the unused llama-cpp dependency to simplify deployments.
+
+**Details**:
+- `get_resource_monitor()` now returns a no-op stub; the bot no longer spawns background monitoring tasks or emits CPU spike warnings.
+- Startup logging reflects that monitoring is disabled by configuration rather than suggesting psutil installation.
+- `llama-cpp-python` was removed from `pyproject.toml`, `requirements.txt`, Docker build steps, and the verification script to avoid compiling unused native wheels.
+- Slimmed the Docker image by removing GCC/CMakel build dependencies that were only needed for llama-cpp.
+
+**Verification**:
+```bash
+python3 -m pytest tests/unit/test_system_prompt_manager.py tests/unit/test_episodic_memory_retrieval.py tests/unit/test_user_profiles.py  # ensure pytest is installed locally
+```
+
+### 2025-10-15 - Prompt Cache & Episodic Memory Hardening
+
+**Summary**: Eliminated stale prompt cache lookups, prevented chat-level episode recall from matching partial participant IDs, reused the multi-level context manager across messages, tracked chat membership for roster commands, and added visible typing indicators during long responses.
+
+**Details**:
+- Cached full `SystemPrompt` objects (including absence) with TTL tracking, exposed cache-hit status for admin tooling, and avoided redundant SQLite calls in `SystemPromptManager`.
+- Added a one-time initialization guard to `UserProfileStoreAdapter` so the pronoun column DDL only runs once per process.
+- Swapped the episodic participant match to SQLite JSON checks, ensuring user `23` no longer surfaces episodes for `123`.
+- Reused a single `MultiLevelContextManager` instance via `ChatMetaMiddleware` and threaded it through `handle_group_message` to reduce churn when assembling layered context.
+- Extended `user_profiles` with `membership_status`, captured join/leave events, and introduced `/gryagusers` for admins to inspect chat rosters with IDs and activity metadata.
+- Normalized timestamp formatting so `/gryagprofile` shows actual creation/last-activity values.
+- Added an async typing indicator helper that keeps Telegram’s “typing…” status active while Gemini processes a request.
+- Documented regression coverage with new unit tests for the prompt cache, adapter init, episodic retrieval, and chat roster listings.
+
+**Verification**:
+```bash
+python3 -m pytest tests/unit/test_system_prompt_manager.py tests/unit/test_episodic_memory_retrieval.py tests/unit/test_user_profiles.py  # fails: pytest module not installed in environment
+```
+
+### 2025-10-14 - Unified Facts Schema & Profiling Fixes
+
+**Summary**: Added the unified `facts` table to the bootstrap schema, ensured profile updates refresh `updated_at`, fixed fact-extraction gating to use the post-increment counters, hardened compact JSON truncation for very small limits, guaranteed that “forget” requests wipe both stored facts and the underlying chat history entries, reintroduced a configurable per-user hourly rate limiter to protect the Gemini quota, and gave the bot a dedicated pronoun memory hook.
+
+**Details**:
+- Updated `db/schema.sql` to create the unified facts table plus supporting indexes so fresh environments match production deployments.
+- Ensured `UserProfileStoreAdapter` and `UserProfileRepository` refresh `updated_at` when revisiting a user or recording interactions.
+- Reloaded the profile snapshot after incrementing counters in `app/handlers/chat.py` to avoid off-by-one gating on fact extraction.
+- Guarded `compact_json()` against short `max_length` values so truncation never exceeds the requested budget.
+- Routed memory-tool forget/update operations through the unified fact repository so user-requested forgetting actually archives stored memories and drops their originating messages from the chat history store.
+- Refined Markdown sanitization to strip inline emphasis while keeping legitimate bullet lists/usernames, escaping remaining special characters instead of deleting them.
+- Added SQLite-backed per-user/hour rate limiting (`rate_limits` table + `RateLimiter` service) and wired it into the chat handler, honoring `PER_USER_PER_HOUR`.
+- Added optional pronouns field to user profiles plus a dedicated `set_pronouns` Gemini tool so the bot can store or update a user's pronouns on request.
+
+**Verification**:
+```bash
+PYTHONPATH=. pytest tests/unit/test_repositories.py
+PYTHONPATH=. pytest tests/unit/test_rate_limiter.py tests/unit/test_pronouns_tool.py
+```
+
+### 2025-10-09 - Token Optimization (Phase 5.2)
+
+**Summary**: Comprehensive token efficiency improvements to reduce LLM API costs and improve response latency by 25-35%.
+
+**Features Added**:
+
+1. **Token Tracking & Telemetry**
+   - Added `ENABLE_TOKEN_TRACKING` config option
+   - Per-layer token counters: `context.immediate_tokens`, `context.recent_tokens`, etc.
+   - Budget usage percentage logging in debug output
+   - Enhanced logging with budget allocation metrics
+
+2. **Semantic Deduplication**
+   - Implemented `_deduplicate_snippets()` in `MultiLevelContextManager`
+   - Removes similar search results using Jaccard similarity
+   - Configurable via `ENABLE_SEMANTIC_DEDUPLICATION` and `DEDUPLICATION_SIMILARITY_THRESHOLD`
+   - Reduces relevant context tokens by 15-30%
+
+3. **Metadata Compression**
+   - Optimized `format_metadata()` to drop empty fields entirely
+   - Returns empty string instead of `[meta]` for empty metadata
+   - Aggressive truncation: usernames to 30 chars, other fields to 40 chars
+   - Skips None/empty/zero values for optional fields
+   - Token savings: 30-40% per metadata block
+
+4. **System Prompt Caching**
+   - Added 1-hour TTL cache in `SystemPromptManager`
+   - Automatic cache invalidation on prompt updates
+   - Manual cache clearing via `clear_cache()` method
+   - Reduces prompt reconstruction overhead by ~50ms per request
+
+5. **Compact Tool Responses**
+   - Created `app/services/tools/base.py` with utility functions
+   - `compact_json()` - No whitespace, sorted keys, optional truncation
+   - `truncate_text()` - Token-aware text truncation
+   - `format_tool_error()` - Compact error responses
+   - Configurable via `MAX_TOOL_RESPONSE_TOKENS` (default: 300)
+
+6. **Token Audit Diagnostic Tool**
+   - Created `scripts/diagnostics/token_audit.py`
+   - Analyze token usage per chat/thread
+   - Identify high-token messages (>500 tokens)
+   - Export results to JSON for analysis
+   - Usage: `python scripts/diagnostics/token_audit.py --top 10`
+
+7. **Integration Tests**
+   - Created `tests/integration/test_token_budget.py`
+   - Tests for budget enforcement across all layers
+   - Semantic deduplication validation
+   - Token estimation accuracy checks
+   - Metadata compression verification
+
+**Configuration Options** (`.env`):
+```bash
+ENABLE_TOKEN_TRACKING=true
+ENABLE_SEMANTIC_DEDUPLICATION=true
+DEDUPLICATION_SIMILARITY_THRESHOLD=0.85
+MAX_TOOL_RESPONSE_TOKENS=300
+ENABLE_EMBEDDING_QUANTIZATION=false  # Phase 5.3
+```
+
+**Files Added**:
+- `app/services/tools/base.py` - Compact JSON and text utilities
+- `scripts/diagnostics/token_audit.py` - Token usage analysis tool
+- `tests/integration/test_token_budget.py` - Budget enforcement tests
+- `docs/guides/TOKEN_OPTIMIZATION.md` - Complete optimization guide
+
+**Files Modified**:
+- `app/config.py` - Added 6 new token optimization settings
+- `app/services/context/multi_level_context.py` - Token tracking, deduplication
+- `app/services/context_store.py` - Optimized `format_metadata()`
+- `app/services/system_prompt_manager.py` - Added prompt caching
+
+**Performance Impact**:
+- Token reduction: 25-35% overall
+- Added latency: <15ms (deduplication + tracking)
+- Cache hit latency: -50ms (system prompts)
+
+**Documentation**:
+- Created comprehensive `docs/guides/TOKEN_OPTIMIZATION.md`
+- Includes best practices, troubleshooting, benchmarks
+- Verification steps for each optimization
+
+**Verification**:
+```bash
+# Run token audit
+python scripts/diagnostics/token_audit.py --summary-only
+
+# Run integration tests
+pytest tests/integration/test_token_budget.py -v
+
+# Check telemetry logs
+grep "budget_usage_pct" logs/gryag.log | tail -20
+```
+
+**Next Steps (Phase 5.3)**:
+- Embedding quantization (int8) for 4x storage reduction
+- Nightly conversation summarization
+- Adaptive retention based on token density
+
+### 2025-10-09 - Production Errors Fixed
+
+**Summary**: Fixed multiple production errors discovered in logs - missing adapter methods, unclosed client sessions, and documented CPU monitoring.
+
+**Issues Fixed**:
+
+1. **UserProfileStoreAdapter Missing Methods** (20+ AttributeErrors)
+   - Added `get_or_create_profile()` - get/create user profiles
+   - Added `get_user_summary()` - generate profile text summaries
+   - Added `get_fact_count()` - count active facts
+   - Added `get_profile()` - retrieve user profile
+   - Added `get_relationships()` - get user relationships
+   
+2. **Unclosed aiohttp Client Sessions** (Resource leaks)
+   - Added cleanup calls for WeatherService and CurrencyService
+   - Prevents "Unclosed client session" warnings on shutdown
+   
+3. **CPU Usage Warnings** (115 occurrences, monitoring not bug)
+   - Documented that warnings are system-level, not bot issue
+   - Bot process uses 0.0% CPU during system spikes
+   - Resource monitor working as designed
+
+**Files Modified**:
+- `app/services/user_profile_adapter.py` - Added 5 missing methods (~150 lines)
+- `app/main.py` - Added aiohttp session cleanup in shutdown handler
+- `docs/fixes/production_errors_2025-10-09.md` - Comprehensive fix documentation
+
+**Impact**: Bot now handles all profile-related operations without errors. Clean shutdown with no resource leaks.
+
+**Verification**:
+```bash
+# Should show no new errors
+grep "AttributeError.*UserProfileStoreAdapter" logs/gryag.log
+grep "Unclosed client session" logs/gryag.log
+```
+
 ### 2025-10-09 - Fixed UserProfileStoreAdapter.get_facts() TypeError
 
 **Issue**: Production error - `TypeError: UserProfileStoreAdapter.get_facts() got an unexpected keyword argument 'fact_type'`

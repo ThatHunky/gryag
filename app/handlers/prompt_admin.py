@@ -95,11 +95,13 @@ async def view_prompt_command(
 
     # Get active prompt
     prompt = await prompt_manager.get_active_prompt(chat_id=chat_id_filter)
+    cache_label = "hit ✅" if prompt_manager.last_cache_hit else "miss ❌"
 
     if prompt is None:
         response = (
             f"📋 <b>Системний промпт ({scope})</b>\n\n"
             f"Статус: Використовується дефолтний промпт\n"
+            f"Кеш: {cache_label}\n"
             f"Джерело: app/persona.py (SYSTEM_PERSONA)\n\n"
             f"Щоб переглянути дефолтний промпт, використайте /gryagprompt default"
         )
@@ -115,6 +117,7 @@ async def view_prompt_command(
         f"Створено: {_format_timestamp(prompt.created_at)}\n"
         f"Активовано: {_format_timestamp(prompt.activated_at) if prompt.activated_at else 'N/A'}\n"
         f"Адмін ID: {prompt.admin_id}\n"
+        f"Кеш: {cache_label}\n"
     )
 
     if prompt.notes:

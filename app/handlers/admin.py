@@ -9,6 +9,7 @@ from aiogram.types import BotCommand, Message
 from app.config import Settings
 from app.services.context_store import ContextStore
 from app.services.redis_types import RedisLike
+from app.services.rate_limiter import RateLimiter
 
 router = Router()
 
@@ -128,6 +129,7 @@ async def reset_quotas_command(
     message: Message,
     settings: Settings,
     store: ContextStore,
+    rate_limiter: RateLimiter | None = None,
     redis_client: RedisLike | None = None,
 ) -> None:
     # Support both legacy "gryagreset" and dynamic "{prefix}reset"
@@ -136,10 +138,15 @@ async def reset_quotas_command(
         return
 
     chat_id = message.chat.id
-    await store.reset_quotas(chat_id)
 
+    # Reset rate limiter (SQLite-backed)
+    if rate_limiter is not None:
+        deleted = await rate_limiter.reset_chat(chat_id)
+        LOGGER.info(f"Reset {deleted} rate limit record(s) for chat {chat_id}")
+
+    # Also clear Redis quotas if available (legacy cleanup with hardcoded namespace)
     if redis_client is not None:
-        pattern = f"{settings.redis_namespace}quota:{chat_id}:*"
+        pattern = f"gryag:quota:{chat_id}:*"
         cursor = 0
         try:
             while True:

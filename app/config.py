@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     )
     db_path: Path = Field(Path("./gryag.db"), alias="DB_PATH")
     max_turns: int = Field(50, alias="MAX_TURNS", ge=1)
+    per_user_per_hour: int = Field(5, alias="PER_USER_PER_HOUR", ge=1)
     context_summary_threshold: int = Field(30, alias="CONTEXT_SUMMARY_THRESHOLD", ge=5)
     use_redis: bool = Field(False, alias="USE_REDIS")
     redis_url: str | None = Field("redis://localhost:6379/0", alias="REDIS_URL")
@@ -247,6 +248,24 @@ class Settings(BaseSettings):
     base_retention_days: int = Field(
         90, alias="BASE_RETENTION_DAYS", ge=30, le=365
     )  # Base for adaptive calculation
+
+    # Token Optimization (Phase 5.2)
+    enable_token_tracking: bool = Field(True, alias="ENABLE_TOKEN_TRACKING")
+    enable_embedding_quantization: bool = Field(
+        False, alias="ENABLE_EMBEDDING_QUANTIZATION"
+    )  # 8-bit quantization to reduce storage
+    enable_response_compression: bool = Field(
+        True, alias="ENABLE_RESPONSE_COMPRESSION"
+    )  # Compress long responses before storage
+    enable_semantic_deduplication: bool = Field(
+        True, alias="ENABLE_SEMANTIC_DEDUPLICATION"
+    )  # Collapse similar search results
+    deduplication_similarity_threshold: float = Field(
+        0.85, alias="DEDUPLICATION_SIMILARITY_THRESHOLD", ge=0.7, le=0.99
+    )  # Threshold for considering snippets duplicates
+    max_tool_response_tokens: int = Field(
+        300, alias="MAX_TOOL_RESPONSE_TOKENS", ge=100, le=1000
+    )  # Maximum tokens per tool response
 
     # Performance & Caching
     enable_result_caching: bool = Field(True, alias="ENABLE_RESULT_CACHING")
@@ -525,6 +544,82 @@ class Settings(BaseSettings):
                     f"keyword_weight={self.keyword_weight}, "
                     f"temporal_weight={self.temporal_weight}"
                 )
+
+    def validate_startup(self) -> list[str]:
+        """Validate critical configuration at startup.
+
+        Returns:
+            List of validation warnings (empty if all OK)
+
+        Raises:
+            ValueError: If critical configuration is invalid
+        """
+        warnings: list[str] = []
+
+        # Critical: Check required tokens
+        if not self.telegram_token or self.telegram_token == "":
+            raise ValueError(
+                "TELEGRAM_TOKEN is required. Get one from @BotFather on Telegram."
+            )
+
+        if not self.gemini_api_key or self.gemini_api_key == "":
+            raise ValueError(
+                "GEMINI_API_KEY is required. Get one from https://aistudio.google.com/app/apikey"
+            )
+
+        # Warn about potentially problematic configurations
+        if self.per_user_per_hour < 1:
+            warnings.append(
+                f"PER_USER_PER_HOUR is {self.per_user_per_hour}, which may cause issues. "
+                "Consider using at least 1."
+            )
+
+        if self.max_turns > 100:
+            warnings.append(
+                f"MAX_TURNS is {self.max_turns}, which may cause high token usage. "
+                "Consider reducing to 50-70 for better performance."
+            )
+
+        if self.context_token_budget > 30000:
+            warnings.append(
+                f"CONTEXT_TOKEN_BUDGET is {self.context_token_budget}, which is very high. "
+                "This may exceed model limits. Consider 8000-16000."
+            )
+
+        if self.enable_user_profiling and self.max_facts_per_user > 500:
+            warnings.append(
+                f"MAX_FACTS_PER_USER is {self.max_facts_per_user}, which may affect performance. "
+                "Consider 100-200 for optimal operation."
+            )
+
+        # Validate admin user IDs format
+        if self.admin_user_ids:
+            try:
+                self.admin_user_ids_list  # This will raise if format is invalid
+            except Exception as e:
+                raise ValueError(
+                    f"Invalid ADMIN_USER_IDS format: {e}. "
+                    "Use comma-separated integers: 123456789,987654321"
+                )
+
+        # Check Redis configuration if enabled
+        if self.use_redis and not self.redis_url:
+            warnings.append(
+                "USE_REDIS is true but REDIS_URL is not set. Redis features will be disabled."
+            )
+
+        # Check API keys for optional services
+        if self.openweather_api_key and len(self.openweather_api_key) < 10:
+            warnings.append(
+                "OPENWEATHER_API_KEY appears invalid. Weather tools may not work."
+            )
+
+        if self.exchange_rate_api_key and len(self.exchange_rate_api_key) < 10:
+            warnings.append(
+                "EXCHANGE_RATE_API_KEY appears invalid. Currency tools may not work."
+            )
+
+        return warnings
 
 
 @lru_cache(maxsize=1)

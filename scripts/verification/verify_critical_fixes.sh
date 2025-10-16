@@ -21,10 +21,9 @@ else
 fi
 
 # Check specific dependencies
-if grep -q "llama-cpp-python" pyproject.toml && \
-   grep -q "apscheduler" pyproject.toml && \
+if grep -q "apscheduler" pyproject.toml && \
    grep -q "psutil" pyproject.toml; then
-    echo "✅ All critical dependencies present in pyproject.toml"
+    echo "✅ Critical dependencies present in pyproject.toml"
 else
     echo "❌ Missing critical dependencies in pyproject.toml"
     exit 1
@@ -113,7 +112,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "🎉 All critical fixes verified successfully!"
 echo ""
 echo "Summary:"
-echo "  ✅ Dependencies synced (11 packages)"
+echo "  ✅ Dependencies synced"
 echo "  ✅ Configuration validation added"
 echo "  ✅ Exception logging improved"
 echo "  ✅ Documentation complete"

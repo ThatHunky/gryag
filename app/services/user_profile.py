@@ -16,6 +16,36 @@ from app.services import telemetry
 LOGGER = logging.getLogger(__name__)
 
 
+def _coerce_timestamp(value: Any) -> int | None:
+    """Convert timestamp-like values to integer seconds."""
+    if value in (None, "", 0):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _augment_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    """Ensure derived fields and normalized values on profile dict."""
+    result = dict(profile)
+    result["membership_status"] = result.get("membership_status") or "unknown"
+
+    created_at = _coerce_timestamp(result.get("created_at"))
+    if created_at is not None:
+        result["created_at"] = created_at
+
+    last_seen = _coerce_timestamp(result.get("last_seen"))
+    if last_seen is not None:
+        result["last_seen"] = last_seen
+
+    # Provide backward-compatible alias for handlers
+    result.setdefault("last_interaction_at", result.get("last_seen"))
+
+    return result
+
+
 FACT_EXTRACTION_PROMPT = """Analyze the following conversation and extract facts about the user.
 
 Focus on:
@@ -220,6 +250,25 @@ class UserProfileStore:
                     # Column already exists
                     pass
 
+                try:
+                    await db.execute(
+                        "ALTER TABLE user_profiles ADD COLUMN pronouns TEXT"
+                    )
+                    await db.commit()
+                    LOGGER.info("Added pronouns column to user_profiles")
+                except aiosqlite.OperationalError:
+                    pass
+                try:
+                    await db.execute(
+                        "ALTER TABLE user_profiles ADD COLUMN membership_status TEXT DEFAULT 'unknown'"
+                    )
+                    await db.commit()
+                    LOGGER.info(
+                        "Added membership_status column to user_profiles"
+                    )
+                except aiosqlite.OperationalError:
+                    pass
+
             self._initialized = True
 
     async def get_or_create_profile(
@@ -248,9 +297,13 @@ class UserProfileStore:
                 row = await cursor.fetchone()
 
             if row:
-                # Update last_seen and names if provided
-                updates = ["last_seen = ?"]
-                params: list[Any] = [now]
+                # Update last_seen, membership, and optional names
+                updates = [
+                    "last_seen = ?",
+                    "updated_at = ?",
+                    "membership_status = ?",
+                ]
+                params: list[Any] = [now, now, "member"]
 
                 if display_name:
                     updates.append("display_name = ?")
@@ -273,17 +326,28 @@ class UserProfileStore:
                     (user_id, chat_id),
                 ) as cursor:
                     row = await cursor.fetchone()
-                    return dict(row) if row else {}
+                    return _augment_profile(dict(row)) if row else {}
 
             # Create new profile
             await db.execute(
                 """
                 INSERT INTO user_profiles 
-                (user_id, chat_id, display_name, username, first_seen, last_seen, 
+                (user_id, chat_id, display_name, username, pronouns, membership_status, first_seen, last_seen, 
                  interaction_count, message_count, profile_version, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, 0, 0, 1, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 1, ?, ?)
                 """,
-                (user_id, chat_id, display_name, username, now, now, now, now),
+                (
+                    user_id,
+                    chat_id,
+                    display_name,
+                    username,
+                    None,
+                    "member",
+                    now,
+                    now,
+                    now,
+                    now,
+                ),
             )
             await db.commit()
 
@@ -299,7 +363,7 @@ class UserProfileStore:
                 (user_id, chat_id),
             ) as cursor:
                 row = await cursor.fetchone()
-                return dict(row) if row else {}
+                return _augment_profile(dict(row)) if row else {}
 
     async def get_profile(
         self, user_id: int, chat_id: int | None = None, limit: int | None = None
@@ -334,7 +398,7 @@ class UserProfileStore:
                     row = await cursor.fetchone()
                     if not row:
                         return None
-                    profile = dict(row)
+                    profile = _augment_profile(dict(row))
 
                 # Get facts across all chats
                 query = """
@@ -359,7 +423,7 @@ class UserProfileStore:
                 (user_id, chat_id),
             ) as cursor:
                 row = await cursor.fetchone()
-                return dict(row) if row else None
+                return _augment_profile(dict(row)) if row else None
 
     async def update_profile(self, user_id: int, chat_id: int, **kwargs: Any) -> None:
         """
@@ -401,8 +465,10 @@ class UserProfileStore:
                 "interaction_count = interaction_count + 1",
                 "message_count = message_count + 1",
                 "last_seen = ?",
+                "updated_at = ?",
+                "membership_status = 'member'",
             ]
-            params: list[Any] = [now]
+            params: list[Any] = [now, now]
 
             if thread_id is not None:
                 updates.append("last_active_thread = ?")
@@ -415,6 +481,47 @@ class UserProfileStore:
                 params,
             )
             await db.commit()
+
+    async def list_chat_users(
+        self,
+        chat_id: int,
+        limit: int | None = None,
+        include_inactive: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Return users known in a chat ordered by activity."""
+        await self.init()
+
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            query = """
+                SELECT user_id, display_name, username, pronouns, membership_status,
+                       interaction_count, message_count, last_seen, created_at, updated_at
+                FROM user_profiles
+                WHERE chat_id = ?
+            """
+            params: list[Any] = [chat_id]
+
+            if not include_inactive:
+                query += " AND membership_status IN ('member', 'administrator', 'creator')"
+
+            query += """
+                ORDER BY 
+                    CASE membership_status
+                        WHEN 'member' THEN 0
+                        WHEN 'administrator' THEN 0
+                        WHEN 'creator' THEN 0
+                        ELSE 1
+                    END,
+                    last_seen DESC
+            """
+
+            if limit:
+                query += " LIMIT ?"
+                params.append(limit)
+
+            async with db.execute(query, params) as cursor:
+                rows = await cursor.fetchall()
+                return [_augment_profile(dict(row)) for row in rows]
 
     async def add_fact(
         self,
@@ -720,6 +827,10 @@ class UserProfileStore:
         else:
             parts.append(f"User #{user_id}")
 
+        pronouns = (profile.get("pronouns") or "").strip()
+        if pronouns:
+            parts.append(f" [{pronouns}]")
+
         # Summary
         summary = profile.get("summary")
         if summary:
@@ -752,6 +863,32 @@ class UserProfileStore:
                     parts.append(f". Relationships: {', '.join(rel_strs)}")
 
         return "".join(parts)
+
+    async def update_pronouns(
+        self, user_id: int, chat_id: int, pronouns: str | None
+    ) -> None:
+        """Set or clear pronouns for a user profile."""
+        await self.init()
+        await self.get_or_create_profile(user_id, chat_id)
+
+        normalized = pronouns.strip() if pronouns else None
+        if normalized == "":
+            normalized = None
+
+        now = int(time.time())
+
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                """
+                UPDATE user_profiles
+                SET pronouns = ?, updated_at = ?
+                WHERE user_id = ? AND chat_id = ?
+                """,
+                (normalized, now, user_id, chat_id),
+            )
+            await db.commit()
+
+        telemetry.increment_counter("profiles_updated")
 
     async def delete_profile(self, user_id: int, chat_id: int) -> None:
         """

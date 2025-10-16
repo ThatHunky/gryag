@@ -40,11 +40,11 @@ META_KEY_ORDER = [
     "chat_id",
     "thread_id",
     "message_id",
-    "user_id",
-    "name",
-    "username",
+    "user_id",  # User ID FIRST - most reliable identifier
+    "username",  # Username second
+    "name",  # Display name last (can be truncated/ambiguous)
     "reply_to_message_id",
-    "reply_to_user_id",
+    "reply_to_user_id",  # Reply user ID before name for same reason
     "reply_to_username",
     "reply_to_name",
     "reply_excerpt",
@@ -52,35 +52,67 @@ META_KEY_ORDER = [
 
 
 def format_metadata(meta: dict[str, Any]) -> str:
-    """Format metadata dict into a compact text snippet for Gemini."""
+    """
+    Format metadata dict into a compact text snippet for Gemini.
+
+    Optimized for token efficiency:
+    - Only includes non-empty values
+    - Drops optional fields when null/empty
+    - Truncates long values aggressively
+    - Uses shortest possible format
+    """
+    if not meta:
+        return ""  # Drop empty metadata block entirely
 
     pieces: list[str] = []
     for key in META_KEY_ORDER:
         if key not in meta:
             continue
         value = meta[key]
+
+        # Skip None, empty strings, and zero values for optional fields
         if value is None or value == "":
             continue
+        if (
+            key in ("thread_id", "reply_to_message_id", "reply_to_user_id")
+            and value == 0
+        ):
+            continue
+
         if isinstance(value, str):
-            # More aggressive sanitization to prevent leakage
+            # Aggressive sanitization and truncation
             sanitized = (
                 value.replace("\n", " ")
                 .replace('"', '\\"')
                 .replace("[", "")
                 .replace("]", "")
+                .strip()
             )
-            # Truncate very long values
-            if len(sanitized) > 50:
-                sanitized = sanitized[:47] + "..."
-            pieces.append(f'{key}="{sanitized}"')
+            # Truncate usernames and names to preserve distinguishing info
+            # Increased from 30 to 60 to avoid cutting off name suffixes that help identify users
+            max_len = (
+                60
+                if key in ("name", "username", "reply_to_name", "reply_to_username")
+                else 80
+            )
+            if len(sanitized) > max_len:
+                sanitized = sanitized[: max_len - 2] + ".."
+
+            if sanitized:  # Only add if non-empty after sanitization
+                pieces.append(f'{key}="{sanitized}"')
         else:
             pieces.append(f"{key}={value}")
 
-    # Create a more compact and less intrusive metadata format
+    # Return compact format or empty string
     if pieces:
         return "[meta] " + " ".join(pieces)
     else:
-        return "[meta]"
+        return ""  # No metadata to include
+
+
+def _chunked(seq: list[int], size: int) -> Iterable[list[int]]:
+    for i in range(0, len(seq), size):
+        yield seq[i : i + size]
 
 
 class ContextStore:
@@ -176,6 +208,68 @@ class ContextStore:
             )
             await db.commit()
 
+    async def delete_user_messages(self, chat_id: int, user_id: int) -> int:
+        """Remove all stored messages for a user within a chat."""
+        await self.init()
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute(
+                "SELECT id FROM messages WHERE chat_id = ? AND user_id = ?",
+                (chat_id, user_id),
+            )
+            rows = await cursor.fetchall()
+            message_ids = [row[0] for row in rows]
+
+            if not message_ids:
+                return 0
+
+            for chunk in _chunked(message_ids, 500):
+                placeholders = ",".join("?" * len(chunk))
+                await db.execute(
+                    f"DELETE FROM message_metadata WHERE message_id IN ({placeholders})",
+                    chunk,
+                )
+                await db.execute(
+                    f"DELETE FROM messages WHERE id IN ({placeholders})",
+                    chunk,
+                )
+
+            # Clear derived aggregates that may still reference removed messages
+            await db.execute(
+                "DELETE FROM conversation_windows WHERE chat_id = ?", (chat_id,)
+            )
+            await db.execute(
+                "DELETE FROM proactive_events WHERE chat_id = ?", (chat_id,)
+            )
+            await db.commit()
+
+        return len(message_ids)
+
+    async def delete_message_by_external_id(
+        self, chat_id: int, external_message_id: int
+    ) -> bool:
+        """Remove a stored message by its original Telegram message ID."""
+        await self.init()
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute(
+                """
+                SELECT id FROM messages 
+                WHERE chat_id = ? AND json_extract(media, '$.meta.message_id') = ?
+                """,
+                (chat_id, external_message_id),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return False
+
+            internal_id = row[0]
+            await db.execute(
+                "DELETE FROM message_metadata WHERE message_id = ?",
+                (internal_id,),
+            )
+            await db.execute("DELETE FROM messages WHERE id = ?", (internal_id,))
+            await db.commit()
+            return True
+
     async def unban_user(self, chat_id: int, user_id: int) -> None:
         await self.init()
         async with aiosqlite.connect(self._db_path) as db:
@@ -249,7 +343,9 @@ class ContextStore:
                     pass
 
             if stored_meta:
-                parts.append({"text": format_metadata(stored_meta)})
+                meta_text = format_metadata(stored_meta)
+                if meta_text:  # Only add if format_metadata returned non-empty
+                    parts.append({"text": meta_text})
             if text:
                 parts.append({"text": text})
             if stored_media:

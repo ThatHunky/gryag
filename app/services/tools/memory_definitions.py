@@ -245,3 +245,30 @@ FORGET_ALL_FACTS_DEFINITION = {
         }
     ]
 }
+
+
+SET_PRONOUNS_DEFINITION = {
+    "function_declarations": [
+        {
+            "name": "set_pronouns",
+            "description": (
+                "Update the user's pronouns. Use when the user explicitly tells you their pronouns "
+                "or asks you to change them. Send an empty string to clear stored pronouns."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "type": "integer",
+                        "description": "Telegram user ID",
+                    },
+                    "pronouns": {
+                        "type": "string",
+                        "description": "User's pronouns in a short format (e.g., 'she/her'). Use an empty string to clear.",
+                    },
+                },
+                "required": ["user_id", "pronouns"],
+            },
+        }
+    ]
+}

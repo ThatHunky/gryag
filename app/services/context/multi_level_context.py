@@ -23,6 +23,7 @@ from typing import Any
 import aiosqlite
 
 from app.config import Settings
+from app.services import telemetry
 
 LOGGER = logging.getLogger(__name__)
 
@@ -248,18 +249,57 @@ class MultiLevelContextManager:
 
         assembly_time = (time.time() - start_time) * 1000  # milliseconds
 
+        # Enhanced token tracking with telemetry
+        if self.settings.enable_token_tracking:
+            telemetry.increment_counter("context.total_tokens", total_tokens)
+            telemetry.increment_counter(
+                "context.immediate_tokens", immediate.token_count
+            )
+            if recent and not isinstance(recent, Exception):
+                telemetry.increment_counter("context.recent_tokens", recent.token_count)
+            if relevant and not isinstance(relevant, Exception):
+                telemetry.increment_counter(
+                    "context.relevant_tokens", relevant.token_count
+                )
+            if background and not isinstance(background, Exception):
+                telemetry.increment_counter(
+                    "context.background_tokens", background.token_count
+                )
+            if episodes and not isinstance(episodes, Exception):
+                telemetry.increment_counter(
+                    "context.episodic_tokens", episodes.token_count
+                )
+
         LOGGER.debug(
             f"Assembled context: {total_tokens} tokens in {assembly_time:.1f}ms",
             extra={
                 "chat_id": chat_id,
                 "total_tokens": total_tokens,
+                "budget": max_tokens,
+                "budget_usage_pct": round((total_tokens / max_tokens) * 100, 1),
                 "assembly_time_ms": assembly_time,
                 "levels": {
                     "immediate": immediate.token_count,
-                    "recent": recent.token_count if recent else 0,
-                    "relevant": relevant.token_count if relevant else 0,
-                    "background": background.token_count if background else 0,
-                    "episodic": episodes.token_count if episodes else 0,
+                    "recent": (
+                        recent.token_count
+                        if recent and not isinstance(recent, Exception)
+                        else 0
+                    ),
+                    "relevant": (
+                        relevant.token_count
+                        if relevant and not isinstance(relevant, Exception)
+                        else 0
+                    ),
+                    "background": (
+                        background.token_count
+                        if background and not isinstance(background, Exception)
+                        else 0
+                    ),
+                    "episodic": (
+                        episodes.token_count
+                        if episodes and not isinstance(episodes, Exception)
+                        else 0
+                    ),
                 },
             },
         )
@@ -413,6 +453,10 @@ class MultiLevelContextManager:
             snippets.append(snippet)
             total_relevance += result.final_score
 
+        # Apply semantic deduplication if enabled
+        if self.settings.enable_semantic_deduplication:
+            snippets = self._deduplicate_snippets(snippets)
+
         # Truncate to budget
         snippets = self._truncate_snippets_to_budget(snippets, max_tokens)
 
@@ -490,7 +534,7 @@ class MultiLevelContextManager:
                     # Get top chat facts
                     chat_facts_raw = await self.chat_profile_store.get_top_chat_facts(
                         chat_id=chat_id,
-                        max_facts=self.settings.max_chat_facts_in_context,
+                        limit=self.settings.max_chat_facts_in_context,
                         min_confidence=self.settings.chat_fact_min_confidence,
                     )
 
@@ -679,6 +723,61 @@ class MultiLevelContextManager:
             total_tokens += tokens
 
         return truncated
+
+    def _deduplicate_snippets(
+        self,
+        snippets: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """
+        Remove semantically duplicate snippets.
+
+        Uses simple text similarity: if snippet text is very similar to
+        a higher-scored snippet, it's considered a duplicate.
+
+        Args:
+            snippets: List of snippet dicts sorted by score (descending)
+
+        Returns:
+            Deduplicated list of snippets
+        """
+        if not snippets or len(snippets) < 2:
+            return snippets
+
+        threshold = self.settings.deduplication_similarity_threshold
+        deduplicated = [snippets[0]]  # Always keep the highest-scored snippet
+
+        for candidate in snippets[1:]:
+            candidate_text = candidate.get("text", "").lower()
+            candidate_words = set(candidate_text.split())
+
+            is_duplicate = False
+            for kept in deduplicated:
+                kept_text = kept.get("text", "").lower()
+                kept_words = set(kept_text.split())
+
+                if not candidate_words or not kept_words:
+                    continue
+
+                # Jaccard similarity: intersection / union
+                intersection = len(candidate_words & kept_words)
+                union = len(candidate_words | kept_words)
+                similarity = intersection / union if union > 0 else 0.0
+
+                if similarity >= threshold:
+                    is_duplicate = True
+                    LOGGER.debug(
+                        f"Deduplicated snippet (similarity={similarity:.2f}): {candidate_text[:50]}..."
+                    )
+                    break
+
+            if not is_duplicate:
+                deduplicated.append(candidate)
+
+        if len(deduplicated) < len(snippets):
+            removed = len(snippets) - len(deduplicated)
+            LOGGER.info(f"Removed {removed} duplicate snippet(s) from relevant context")
+
+        return deduplicated
 
     def clear_cache(self) -> None:
         """Clear immediate context cache."""

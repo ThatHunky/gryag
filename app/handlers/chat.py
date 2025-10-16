@@ -29,11 +29,13 @@ from app.services.tools import (
     update_fact_tool,
     forget_fact_tool,
     forget_all_facts_tool,
+    set_pronouns_tool,
     REMEMBER_FACT_DEFINITION,
     RECALL_FACTS_DEFINITION,
     UPDATE_FACT_DEFINITION,
     FORGET_FACT_DEFINITION,
     FORGET_ALL_FACTS_DEFINITION,
+    SET_PRONOUNS_DEFINITION,
 )
 from app.services.context_store import ContextStore, format_metadata
 from app.services.gemini import GeminiClient, GeminiError
@@ -50,17 +52,20 @@ from app.services.context import (
 )
 from app.services.bot_profile import BotProfileStore
 from app.services.bot_learning import BotLearningEngine
+from app.services.rate_limiter import RateLimiter
 from app.handlers.bot_learning_integration import (
     track_bot_interaction,
     process_potential_reaction,
     estimate_token_count,
 )
+from app.services.typing import typing_indicator
 
 router = Router()
 
 ERROR_FALLBACK = "Ґеміні знову тупить. Спробуй пізніше."
 EMPTY_REPLY = "Скажи конкретніше, бо зараз з цього нічого не зробити."
 BANNED_REPLY = "Ти для гряга в бані. Йди погуляй."
+THROTTLED_REPLY = "Занадто багато повідомлень. Почекай {minutes} хв."
 
 
 LOGGER = logging.getLogger(__name__)
@@ -461,6 +466,20 @@ async def _update_user_profile_background(
             thread_id=thread_id,
         )
 
+        # Refresh profile snapshot so gating logic sees the latest counters
+        refreshed_profile = await profile_store.get_profile(
+            user_id=user_id, chat_id=chat_id
+        )
+        if refreshed_profile:
+            profile = refreshed_profile
+        else:
+            # Fallback: assume counters incremented by one even if fetch fails
+            profile = {
+                **profile,
+                "interaction_count": profile.get("interaction_count", 0) + 1,
+                "message_count": profile.get("message_count", 0) + 1,
+            }
+
         # Check if we should extract facts
         if not settings.fact_extraction_enabled:
             return
@@ -520,20 +539,39 @@ def _escape_markdown(text: str) -> str:
     """
     Clean up text that might break Telegram Markdown parsing.
 
-    Since the bot is instructed to never use markdown formatting,
-    we remove formatting characters instead of escaping them.
+    Since we send replies using Markdown parse mode, we strip unwanted
+    emphasis markers while keeping legitimate list bullets and usernames.
     """
     if not text:
         return text
 
-    # Remove asterisks and underscores used for emphasis (bot shouldn't use these)
-    # Keep them if they appear to be part of actual content (e.g., math expressions)
-    text = re.sub(r"\*+", "", text)  # Remove all asterisks
-    text = re.sub(r"_+", "", text)  # Remove all underscores
+    def _strip_inline(pattern: re.Pattern[str], value: str) -> str:
+        return pattern.sub(r"\1", value)
+
+    emphasis_star = re.compile(r"(?<!\S)\*(?!\s)([^*]+?)(?<!\s)\*(?!\S)")
+    emphasis_underscore = re.compile(r"(?<!\S)_(?!\s)([^_]+?)(?<!\s)_(?!\S)")
+
+    text = _strip_inline(emphasis_star, text)
+    text = _strip_inline(emphasis_underscore, text)
+
+    # Collapse excessive decorative runs while leaving bullets intact
+    text = re.sub(r"\*{3,}", "**", text)
+    text = re.sub(r"_{3,}", "__", text)
+
+    # Protect valid Markdown bullets so we do not escape their marker
+    bullet_placeholder = "\ufff0"
+
+    def _protect_bullet(match: re.Match[str]) -> str:
+        return f"{match.group(1)}{match.group(2)}{bullet_placeholder} "
+
+    text = re.sub(r"(^|\n)(\s*)\* (?=\S)", _protect_bullet, text)
 
     # Escape special Telegram markdown characters that might break rendering
-    # but keep the actual useful punctuation
     text = text.replace("\\", "\\\\")
+    text = re.sub(r"(?<!\\)_", r"\_", text)
+    text = text.replace("*", r"\*")
+    text = text.replace(bullet_placeholder, "*")
+
     # Only escape brackets and backticks that could break formatting
     text = re.sub(r"([`\[\]])", r"\\\1", text)
 
@@ -592,6 +630,8 @@ async def handle_group_message(
     bot_learning: BotLearningEngine | None = None,
     prompt_manager: SystemPromptManager | None = None,
     redis_client: RedisLike | None = None,
+    rate_limiter: RateLimiter | None = None,
+    multi_level_context_manager: MultiLevelContextManager | None = None,
 ):
     if message.from_user is None or message.from_user.is_bot:
         LOGGER.debug("Ignoring message: no from_user or is_bot")
@@ -677,7 +717,24 @@ async def handle_group_message(
     )
     user_id = message.from_user.id
 
+    # Check admin status first (admins bypass rate limiting)
     is_admin = user_id in settings.admin_user_ids_list
+
+    # Rate limiting (skip for admins)
+    if not is_admin and rate_limiter is not None:
+        allowed, remaining, retry_after = await rate_limiter.check_and_increment(
+            user_id=message.from_user.id
+        )
+        if not allowed:
+            wait_minutes = max((retry_after + 59) // 60, 1)
+            throttle_text = THROTTLED_REPLY.format(minutes=wait_minutes)
+            telemetry.increment_counter(
+                "chat.rate_limited",
+                user_id=message.from_user.id,
+                remaining=remaining,
+            )
+            await message.reply(throttle_text)
+            return
 
     if not is_admin and await store.is_banned(chat_id, user_id):
         telemetry.increment_counter("chat.banned_user")
@@ -685,26 +742,26 @@ async def handle_group_message(
         return
 
     # Build multi-level context if services are available
-    use_multi_level = (
-        settings.enable_multi_level_context
-        and hybrid_search is not None
-        and episodic_memory is not None
+    context_manager = multi_level_context_manager
+    use_multi_level = settings.enable_multi_level_context and (
+        context_manager is not None
+        or (hybrid_search is not None and episodic_memory is not None)
     )
 
-    context_manager = None
     context_assembly = None
 
     if use_multi_level:
         # Phase 3: Use multi-level context manager
-        context_manager = MultiLevelContextManager(
-            db_path=settings.db_path,
-            settings=settings,
-            context_store=store,
-            profile_store=profile_store,
-            hybrid_search=hybrid_search,
-            episode_store=episodic_memory,
-            gemini_client=gemini_client,  # Pass for media capability detection
-        )
+        if context_manager is None:
+            context_manager = MultiLevelContextManager(
+                db_path=settings.db_path,
+                settings=settings,
+                context_store=store,
+                profile_store=profile_store,
+                hybrid_search=hybrid_search,
+                episode_store=episodic_memory,
+                gemini_client=gemini_client,  # Pass for media capability detection
+            )
 
         # Get query text for context retrieval
         text_content = (message.text or message.caption or "").strip()
@@ -1033,6 +1090,7 @@ async def handle_group_message(
         tool_definitions.append(UPDATE_FACT_DEFINITION)
         tool_definitions.append(FORGET_FACT_DEFINITION)
         tool_definitions.append(FORGET_ALL_FACTS_DEFINITION)
+        tool_definitions.append(SET_PRONOUNS_DEFINITION)
 
     # Enrich with user profile context
     # Note: If using multi-level context, profile is already included
@@ -1227,6 +1285,7 @@ async def handle_group_message(
                 chat_id=chat_id,
                 message_id=message.message_id,
                 profile_store=profile_store,
+                context_store=store,
             ),
         )
         tracked_tool_callbacks["forget_all_facts"] = make_tracked_tool_callback(
@@ -1236,101 +1295,114 @@ async def handle_group_message(
                 chat_id=chat_id,
                 message_id=message.message_id,
                 profile_store=profile_store,
+                context_store=store,
+            ),
+        )
+        tracked_tool_callbacks["set_pronouns"] = make_tracked_tool_callback(
+            "set_pronouns",
+            lambda params: set_pronouns_tool(
+                **params,
+                chat_id=chat_id,
+                profile_store=profile_store,
             ),
         )
 
     # Bot Self-Learning: Track generation timing
-    generation_start_time = time.time()
     response_time_ms = 0  # Initialize in case of error
 
-    try:
-        reply_text = await gemini_client.generate(
-            system_prompt=system_prompt_with_profile,
-            history=history,
-            user_parts=user_parts,
-            tools=tool_definitions,
-            tool_callbacks=tracked_tool_callbacks,  # type: ignore[arg-type]
-        )
+    async with typing_indicator(bot, chat_id):
+        generation_start_time = time.time()
 
-        # Calculate response time
-        generation_end_time = time.time()
-        response_time_ms = int((generation_end_time - generation_start_time) * 1000)
-
-        telemetry.increment_counter("chat.reply_success")
-
-        # Update user profile in background (fire-and-forget)
-        asyncio.create_task(
-            _update_user_profile_background(
-                profile_store=profile_store,
-                fact_extractor=fact_extractor,
-                user_id=user_id,
-                chat_id=chat_id,
-                thread_id=thread_id,
-                user_message=text_content,
-                display_name=message.from_user.full_name if message.from_user else None,
-                username=message.from_user.username if message.from_user else None,
-                settings=settings,
+        try:
+            reply_text = await gemini_client.generate(
+                system_prompt=system_prompt_with_profile,
                 history=history,
+                user_parts=user_parts,
+                tools=tool_definitions,
+                tool_callbacks=tracked_tool_callbacks,  # type: ignore[arg-type]
             )
+
+            # Calculate response time
+            generation_end_time = time.time()
+            response_time_ms = int((generation_end_time - generation_start_time) * 1000)
+
+            telemetry.increment_counter("chat.reply_success")
+
+            # Update user profile in background (fire-and-forget)
+            asyncio.create_task(
+                _update_user_profile_background(
+                    profile_store=profile_store,
+                    fact_extractor=fact_extractor,
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    thread_id=thread_id,
+                    user_message=text_content,
+                    display_name=(
+                        message.from_user.full_name if message.from_user else None
+                    ),
+                    username=message.from_user.username if message.from_user else None,
+                    settings=settings,
+                    history=history,
+                )
+            )
+        except GeminiError:
+            telemetry.increment_counter("chat.reply_failure")
+            reply_text = ERROR_FALLBACK
+
+        # Comprehensive response cleaning
+        original_reply = reply_text
+        reply_text = _clean_response_text(reply_text)
+
+        # Log if we had to clean metadata from the response
+        if original_reply != reply_text and original_reply:
+            LOGGER.warning(
+                "Cleaned metadata from response in chat %s: original_length=%d, cleaned_length=%d",
+                chat_id,
+                len(original_reply),
+                len(reply_text),
+            )
+            LOGGER.debug("Original response contained: %s", original_reply[:200])
+
+        if not reply_text or reply_text.isspace():
+            reply_text = EMPTY_REPLY
+
+        reply_trimmed = reply_text[:4096]
+        reply_markdown_safe = _escape_markdown(reply_trimmed)
+        try:
+            response_message = await message.reply(
+                reply_markdown_safe,
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True,
+            )
+        except TelegramBadRequest:
+            LOGGER.warning(
+                "Failed to render Markdown reply; falling back to plain text",
+                exc_info=True,
+            )
+            response_message = await message.reply(reply_trimmed)
+
+        model_meta = _build_model_metadata(
+            response=response_message,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            bot_username=bot_username,
+            original=message,
+            original_text=text_content,
         )
-    except GeminiError:
-        telemetry.increment_counter("chat.reply_failure")
-        reply_text = ERROR_FALLBACK
 
-    # Comprehensive response cleaning
-    original_reply = reply_text
-    reply_text = _clean_response_text(reply_text)
+        model_embedding = await gemini_client.embed_text(reply_trimmed)
 
-    # Log if we had to clean metadata from the response
-    if original_reply != reply_text and original_reply:
-        LOGGER.warning(
-            "Cleaned metadata from response in chat %s: original_length=%d, cleaned_length=%d",
-            chat_id,
-            len(original_reply),
-            len(reply_text),
+        await store.add_turn(
+            chat_id=chat_id,
+            thread_id=thread_id,
+            user_id=None,
+            role="model",
+            text=reply_trimmed,
+            media=None,
+            metadata=model_meta,
+            embedding=model_embedding,
+            retention_days=settings.retention_days,
         )
-        LOGGER.debug("Original response contained: %s", original_reply[:200])
-
-    if not reply_text or reply_text.isspace():
-        reply_text = EMPTY_REPLY
-
-    reply_trimmed = reply_text[:4096]
-    reply_markdown_safe = _escape_markdown(reply_trimmed)
-    try:
-        response_message = await message.reply(
-            reply_markdown_safe,
-            parse_mode=ParseMode.MARKDOWN,
-            disable_web_page_preview=True,
-        )
-    except TelegramBadRequest:
-        LOGGER.warning(
-            "Failed to render Markdown reply; falling back to plain text",
-            exc_info=True,
-        )
-        response_message = await message.reply(reply_trimmed)
-
-    model_meta = _build_model_metadata(
-        response=response_message,
-        chat_id=chat_id,
-        thread_id=thread_id,
-        bot_username=bot_username,
-        original=message,
-        original_text=text_content,
-    )
-
-    model_embedding = await gemini_client.embed_text(reply_trimmed)
-
-    await store.add_turn(
-        chat_id=chat_id,
-        thread_id=thread_id,
-        user_id=None,
-        role="model",
-        text=reply_trimmed,
-        media=None,
-        metadata=model_meta,
-        embedding=model_embedding,
-        retention_days=settings.retention_days,
-    )
 
     # Bot Self-Learning: Track this interaction for learning
     if (

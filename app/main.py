@@ -14,6 +14,7 @@ from app.handlers.chat import router as chat_router
 from app.handlers.profile_admin import router as profile_admin_router, PROFILE_COMMANDS
 from app.handlers.chat_admin import router as chat_admin_router, CHAT_COMMANDS
 from app.handlers.prompt_admin import router as prompt_admin_router, PROMPT_COMMANDS
+from app.handlers.chat_members import router as chat_members_router
 from app.middlewares.chat_filter import ChatFilterMiddleware
 from app.middlewares.chat_meta import ChatMetaMiddleware
 from app.services.context_store import ContextStore
@@ -22,6 +23,7 @@ from app.services.user_profile_adapter import UserProfileStoreAdapter
 from app.repositories.chat_profile import ChatProfileRepository
 from app.services.fact_extractors import create_hybrid_extractor
 from app.services.profile_summarization import ProfileSummarizer
+from app.services.rate_limiter import RateLimiter
 from app.services.resource_monitor import get_resource_monitor
 from app.services.system_prompt_manager import SystemPromptManager
 from app.services.resource_optimizer import (
@@ -67,6 +69,17 @@ async def setup_bot_commands(bot: Bot) -> None:
 async def main() -> None:
     settings = get_settings()
 
+    # Validate configuration at startup
+    try:
+        warnings = settings.validate_startup()
+        if warnings:
+            logging.warning("Configuration warnings detected:")
+            for warning in warnings:
+                logging.warning(f"  - {warning}")
+    except ValueError as e:
+        logging.error(f"Configuration validation failed: {e}")
+        raise SystemExit(1) from e
+
     # Setup logging with rotation and cleanup
     from app.core.logging_config import setup_logging
 
@@ -92,6 +105,9 @@ async def main() -> None:
 
     store = ContextStore(settings.db_path)
     await store.init()
+
+    rate_limiter = RateLimiter(settings.db_path, settings.per_user_per_hour)
+    await rate_limiter.init()
 
     gemini_client = GeminiClient(
         settings.gemini_api_key,
@@ -247,10 +263,7 @@ async def main() -> None:
         # Log initial stats
         resource_monitor.log_resource_summary()
     else:
-        logging.warning(
-            "Resource monitoring unavailable (psutil not installed). "
-            "Install with: pip install psutil"
-        )
+        logging.info("Resource monitoring disabled by configuration")
 
     # Phase 3: Create background task for periodic resource monitoring with optimization
     resource_optimizer = get_resource_optimizer()
@@ -327,6 +340,7 @@ async def main() -> None:
             bot_learning=bot_learning,
             prompt_manager=prompt_manager,
             redis_client=redis_client,
+            rate_limiter=rate_limiter,
         )
     )
     # Chat filter must come BEFORE other processing to prevent wasting resources on blocked chats
@@ -336,6 +350,7 @@ async def main() -> None:
     dispatcher.include_router(profile_admin_router)
     dispatcher.include_router(chat_admin_router)
     dispatcher.include_router(prompt_admin_router)
+    dispatcher.include_router(chat_members_router)
     dispatcher.include_router(chat_router)
 
     # Setup bot commands with descriptions
@@ -364,6 +379,17 @@ async def main() -> None:
 
         # Cleanup profile summarizer
         await profile_summarizer.stop()
+
+        # Cleanup: Close aiohttp sessions for external services
+        from app.services.weather import cleanup_weather_service
+        from app.services.currency import cleanup_currency_service
+
+        try:
+            await cleanup_weather_service()
+            await cleanup_currency_service()
+            logging.info("External service clients closed")
+        except Exception as e:
+            logging.warning(f"Error closing external service clients: {e}")
 
         if redis_client is not None:
             try:

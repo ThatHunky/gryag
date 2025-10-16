@@ -98,14 +98,43 @@ def mock_settings():
 
 
 @pytest.fixture
-def mock_gemini_client():
+def mock_gemini_client(monkeypatch):
     """Mock Gemini client for testing.
 
     Returns:
         AsyncMock of GeminiClient
     """
     from unittest.mock import AsyncMock
-    from app.services.gemini import GeminiClient
+    from types import ModuleType, SimpleNamespace
+    import sys
+
+    try:
+        from app.services.gemini import GeminiClient
+    except ImportError:
+        google_module = ModuleType("google")
+        genai_module = ModuleType("google.genai")
+        types_module = ModuleType("google.genai.types")
+
+        class _DummySafetySetting:
+            def __init__(self, *args, **kwargs):
+                pass
+
+        class _DummyGenerateContentConfig:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        types_module.SafetySetting = _DummySafetySetting
+        types_module.GenerateContentConfig = _DummyGenerateContentConfig
+
+        genai_module.Client = SimpleNamespace
+        genai_module.types = types_module
+
+        google_entry = sys.modules.setdefault("google", google_module)
+        setattr(google_entry, "genai", genai_module)
+        sys.modules["google.genai"] = genai_module
+        sys.modules["google.genai.types"] = types_module
+
+        from app.services.gemini import GeminiClient
 
     client = AsyncMock(spec=GeminiClient)
     client.generate.return_value = "Test response"

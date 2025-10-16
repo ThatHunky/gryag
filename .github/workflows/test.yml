@@ -1,0 +1,175 @@
+name: Tests and Quality Checks
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  lint:
+    name: Code Quality Checks
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Check code formatting with Black
+      run: |
+        black --check app/ tests/
+
+    - name: Check import sorting with isort
+      run: |
+        isort --check-only app/ tests/
+
+    - name: Lint with Ruff
+      run: |
+        ruff check app/ tests/
+
+    - name: Type check with MyPy
+      run: |
+        mypy app/
+      continue-on-error: true  # Don't fail build on type errors yet
+
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run unit tests
+      env:
+        TELEGRAM_TOKEN: "test_token_12345:ABCdefGHIjklMNOpqrsTUVwxyz"
+        GEMINI_API_KEY: "test_key_1234567890"
+      run: |
+        pytest tests/unit/ -v --cov=app --cov-report=xml --cov-report=term-missing
+
+    - name: Run integration tests
+      env:
+        TELEGRAM_TOKEN: "test_token_12345:ABCdefGHIjklMNOpqrsTUVwxyz"
+        GEMINI_API_KEY: "test_key_1234567890"
+      run: |
+        pytest tests/integration/ -v --cov=app --cov-append --cov-report=xml
+      continue-on-error: true  # Integration tests may require external services
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-${{ matrix.python-version }}
+        fail_ci_if_error: false
+
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: false
+        tags: gryag:test
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.12"
+
+    - name: Install safety
+      run: pip install safety
+
+    - name: Check dependencies for vulnerabilities
+      run: |
+        pip install -r requirements.txt
+        safety check --json
+      continue-on-error: true  # Don't fail on vulnerabilities yet, just report
+
+    - name: Run Bandit security linter
+      run: |
+        pip install bandit
+        bandit -r app/ -f json -o bandit-report.json
+      continue-on-error: true
+
+  config-validation:
+    name: Configuration Validation
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.12"
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Validate example configs
+      run: |
+        # Test that minimal config template is valid
+        cp .env.minimal .env.test
+        # Add dummy values for required fields
+        echo "TELEGRAM_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz12345678" >> .env.test
+        echo "GEMINI_API_KEY=AIzaSyDummyKeyForTestingPurposesOnly1234567" >> .env.test
+
+        # Test config loading
+        python -c "
+        import os
+        os.environ['TELEGRAM_TOKEN'] = '1234567890:ABCdefGHIjklMNOpqrsTUVwxyz12345678'
+        os.environ['GEMINI_API_KEY'] = 'AIzaSyDummyKeyForTestingPurposesOnly1234567'
+        from app.config import Settings
+        s = Settings()
+        warnings = s.validate_startup()
+        print(f'Config validation: {len(warnings)} warnings')
+        for w in warnings:
+            print(f'  - {w}')
+        "

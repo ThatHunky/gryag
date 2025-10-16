@@ -20,6 +20,17 @@ CREATE TABLE IF NOT EXISTS bans (
     PRIMARY KEY (chat_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS rate_limits (
+    user_id INTEGER NOT NULL,
+    window_start INTEGER NOT NULL,
+    request_count INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL,
+    PRIMARY KEY (user_id, window_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_rate_limits_window
+    ON rate_limits(window_start);
+
 CREATE TABLE IF NOT EXISTS polls (
     id TEXT PRIMARY KEY,
     chat_id INTEGER NOT NULL,
@@ -72,6 +83,8 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     chat_id INTEGER NOT NULL,
     display_name TEXT,
     username TEXT,
+    pronouns TEXT,
+    membership_status TEXT DEFAULT 'unknown',
     first_seen INTEGER NOT NULL,
     last_seen INTEGER NOT NULL,
     last_active_thread INTEGER,
@@ -83,6 +96,73 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (user_id, chat_id)
 );
+
+-- Unified fact storage shared by user and chat memories
+CREATE TABLE IF NOT EXISTS facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    -- Entity identification
+    entity_type TEXT NOT NULL CHECK(entity_type IN ('user', 'chat')),
+    entity_id INTEGER NOT NULL,  -- user_id or chat_id
+    chat_context INTEGER,  -- chat_id where this was learned (for user facts only)
+
+    -- Fact taxonomy (unified categories)
+    fact_category TEXT NOT NULL CHECK(fact_category IN (
+        -- User-level categories
+        'personal', 'preference', 'skill', 'trait', 'opinion', 'relationship',
+        -- Chat-level categories
+        'tradition', 'rule', 'norm', 'topic', 'culture', 'event', 'shared_knowledge'
+    )),
+
+    -- Fact content
+    fact_key TEXT NOT NULL,
+    fact_value TEXT NOT NULL,
+    fact_description TEXT,
+
+    -- Confidence and evidence
+    confidence REAL DEFAULT 0.7 CHECK(confidence >= 0 AND confidence <= 1),
+    evidence_count INTEGER DEFAULT 1,
+    evidence_text TEXT,
+    source_message_id INTEGER,
+
+    -- Consensus (for chat facts)
+    participant_consensus REAL,
+    participant_ids TEXT,  -- JSON array
+
+    -- Lifecycle
+    first_observed INTEGER NOT NULL,
+    last_reinforced INTEGER NOT NULL,
+    is_active INTEGER DEFAULT 1,
+    decay_rate REAL DEFAULT 0.0,
+
+    -- Metadata
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+
+    -- Embedding for semantic search
+    embedding TEXT,
+
+    -- Composite unique constraint
+    UNIQUE(entity_type, entity_id, chat_context, fact_category, fact_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_facts_entity
+    ON facts(entity_type, entity_id);
+
+CREATE INDEX IF NOT EXISTS idx_facts_chat_context
+    ON facts(chat_context) WHERE entity_type = 'user';
+
+CREATE INDEX IF NOT EXISTS idx_facts_category
+    ON facts(fact_category);
+
+CREATE INDEX IF NOT EXISTS idx_facts_active
+    ON facts(is_active) WHERE is_active = 1;
+
+CREATE INDEX IF NOT EXISTS idx_facts_confidence
+    ON facts(confidence);
+
+CREATE INDEX IF NOT EXISTS idx_facts_last_reinforced
+    ON facts(last_reinforced);
 
 CREATE TABLE IF NOT EXISTS user_facts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -738,5 +818,3 @@ CREATE INDEX IF NOT EXISTS idx_chat_fact_quality_chat
     ON chat_fact_quality_metrics(chat_id);
 CREATE INDEX IF NOT EXISTS idx_chat_fact_quality_fact 
     ON chat_fact_quality_metrics(fact_id);
-
-

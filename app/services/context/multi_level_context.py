@@ -333,17 +333,58 @@ class MultiLevelContextManager:
             messages, cache_time = self._immediate_cache[cache_key]
             if now - cache_time < self._cache_ttl:
                 tokens = self._estimate_tokens(messages)
+
+                # Debug: Log media presence
+                media_count = sum(
+                    1
+                    for msg in messages
+                    for part in msg.get("parts", [])
+                    if isinstance(part, dict)
+                    and ("inline_data" in part or "file_data" in part)
+                )
+                if media_count > 0:
+                    LOGGER.debug(
+                        f"Immediate context (cached) contains {media_count} media items"
+                    )
+
                 return ImmediateContext(
                     messages=messages,
                     token_count=tokens,
                 )
 
         # Fetch recent messages
-        limit = self.settings.immediate_context_size
+        # immediate_context_size is in messages, but recent() expects turns (pairs)
+        # Convert message count to turn count (divide by 2, round up)
+        limit = (self.settings.immediate_context_size + 1) // 2
         messages = await self.context_store.recent(chat_id, thread_id, limit)
+
+        # Debug: Log media presence before truncation
+        media_count_before = sum(
+            1
+            for msg in messages
+            for part in msg.get("parts", [])
+            if isinstance(part, dict) and ("inline_data" in part or "file_data" in part)
+        )
+        if media_count_before > 0:
+            LOGGER.debug(
+                f"Retrieved {len(messages)} messages with {media_count_before} media items"
+            )
 
         # Truncate to budget
         messages = self._truncate_to_budget(messages, max_tokens)
+
+        # Debug: Log media presence after truncation
+        media_count_after = sum(
+            1
+            for msg in messages
+            for part in msg.get("parts", [])
+            if isinstance(part, dict) and ("inline_data" in part or "file_data" in part)
+        )
+        if media_count_before > 0:
+            LOGGER.debug(
+                f"After truncation: {len(messages)} messages with {media_count_after} media items "
+                f"(lost {media_count_before - media_count_after})"
+            )
 
         # Cache it
         self._immediate_cache[cache_key] = (messages, now)
@@ -366,7 +407,9 @@ class MultiLevelContextManager:
 
         Returns messages from active conversation window.
         """
-        limit = self.settings.recent_context_size
+        # recent_context_size is in messages, but recent() expects turns (pairs)
+        # Convert message count to turn count (divide by 2, round up)
+        limit = (self.settings.recent_context_size + 1) // 2
 
         # Get recent messages beyond immediate
         all_recent = await self.context_store.recent(chat_id, thread_id, limit)
@@ -377,8 +420,33 @@ class MultiLevelContextManager:
             all_recent[immediate_size:] if len(all_recent) > immediate_size else []
         )
 
+        # Debug: Log media presence before truncation
+        media_count_before = sum(
+            1
+            for msg in recent_only
+            for part in msg.get("parts", [])
+            if isinstance(part, dict) and ("inline_data" in part or "file_data" in part)
+        )
+        if media_count_before > 0:
+            LOGGER.debug(
+                f"Recent context has {media_count_before} media items before truncation"
+            )
+
         # Truncate to budget
         recent_only = self._truncate_to_budget(recent_only, max_tokens)
+
+        # Debug: Log media presence after truncation
+        media_count_after = sum(
+            1
+            for msg in recent_only
+            for part in msg.get("parts", [])
+            if isinstance(part, dict) and ("inline_data" in part or "file_data" in part)
+        )
+        if media_count_before > 0 or media_count_after > 0:
+            LOGGER.debug(
+                f"Recent context after truncation: {media_count_after} media items "
+                f"(lost {media_count_before - media_count_after})"
+            )
 
         # Calculate time span
         time_span = 0
@@ -673,16 +741,27 @@ class MultiLevelContextManager:
         """
         Estimate token count for messages.
 
-        Rough heuristic: words * 1.3 (accounts for tokenization)
+        Rough heuristic:
+        - Text: words * 1.3 (accounts for tokenization)
+        - Media (inline_data): ~258 tokens per item (Gemini's image token cost)
+        - Media (file_data/URI): ~100 tokens per item (YouTube URLs, etc.)
         """
         total = 0
         for msg in messages:
             parts = msg.get("parts", [])
             for part in parts:
-                if isinstance(part, dict) and "text" in part:
-                    text = part["text"]
-                    words = len(text.split())
-                    total += int(words * 1.3)
+                if isinstance(part, dict):
+                    if "text" in part:
+                        text = part["text"]
+                        words = len(text.split())
+                        total += int(words * 1.3)
+                    elif "inline_data" in part:
+                        # Images/audio/video consume significant tokens
+                        # Gemini uses ~258 tokens per image
+                        total += 258
+                    elif "file_data" in part:
+                        # File URIs (e.g., YouTube URLs) are cheaper
+                        total += 100
         return total
 
     def _truncate_to_budget(

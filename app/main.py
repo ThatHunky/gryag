@@ -220,6 +220,33 @@ async def main() -> None:
         },
     )
 
+    # Initialize image generation service
+    image_gen_service = None
+    if settings.enable_image_generation:
+        from app.services.image_generation import ImageGenerationService
+
+        # Use separate API key if provided, otherwise fall back to main Gemini key
+        image_api_key = settings.image_generation_api_key or settings.gemini_api_key
+
+        image_gen_service = ImageGenerationService(
+            api_key=image_api_key,
+            db_path=settings.db_path,
+            daily_limit=settings.image_generation_daily_limit,
+            admin_user_ids=settings.admin_user_ids_list,
+        )
+
+        using_separate_key = settings.image_generation_api_key is not None
+        logging.info(
+            "Image generation service initialized",
+            extra={
+                "daily_limit": settings.image_generation_daily_limit,
+                "model": "gemini-2.5-flash-image",
+                "separate_api_key": using_separate_key,
+            },
+        )
+    else:
+        logging.info("Image generation disabled (ENABLE_IMAGE_GENERATION=false)")
+
     # Phase 5: Initialize bot self-learning system
     bot_profile: BotProfileStore | None = None
     bot_learning: BotLearningEngine | None = None
@@ -341,6 +368,7 @@ async def main() -> None:
             prompt_manager=prompt_manager,
             redis_client=redis_client,
             rate_limiter=rate_limiter,
+            image_gen_service=image_gen_service,
         )
     )
     # Chat filter must come BEFORE other processing to prevent wasting resources on blocked chats

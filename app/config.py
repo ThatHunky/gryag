@@ -55,6 +55,15 @@ class Settings(BaseSettings):
         "https://v6.exchangerate-api.com", alias="EXCHANGE_RATE_BASE_URL"
     )
 
+    # Image generation configuration
+    enable_image_generation: bool = Field(False, alias="ENABLE_IMAGE_GENERATION")
+    image_generation_api_key: str | None = Field(
+        None, alias="IMAGE_GENERATION_API_KEY"
+    )  # Optional separate API key for image generation (defaults to gemini_api_key)
+    image_generation_daily_limit: int = Field(
+        1, alias="IMAGE_GENERATION_DAILY_LIMIT", ge=1, le=10
+    )  # Images per user per day (admins unlimited)
+
     # User profiling configuration
     enable_user_profiling: bool = Field(True, alias="ENABLE_USER_PROFILING")
     user_profile_retention_days: int = Field(

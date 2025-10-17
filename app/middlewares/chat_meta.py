@@ -47,6 +47,7 @@ class ChatMetaMiddleware(BaseMiddleware):
         prompt_manager: SystemPromptManager | None = None,
         redis_client: RedisLike | None = None,
         rate_limiter: RateLimiter | None = None,
+        image_gen_service: Any | None = None,
     ) -> None:
         self._bot = bot
         self._settings = settings
@@ -64,11 +65,12 @@ class ChatMetaMiddleware(BaseMiddleware):
         self._prompt_manager = prompt_manager
         self._redis = redis_client
         self._rate_limiter = rate_limiter
+        self._image_gen_service = image_gen_service
         self._bot_username: str | None = None
         self._bot_id: int | None = None
         self._lock = asyncio.Lock()
         self._multi_level_context_manager: MultiLevelContextManager | None = None
-        
+
         # Phase 3: Initialize PersonaLoader for response templates
         self._persona_loader: PersonaLoader | None = None
         if settings.enable_persona_templates:
@@ -134,4 +136,6 @@ class ChatMetaMiddleware(BaseMiddleware):
             data["rate_limiter"] = self._rate_limiter
         if self._persona_loader is not None:
             data["persona_loader"] = self._persona_loader
+        if self._image_gen_service is not None:
+            data["image_gen_service"] = self._image_gen_service
         return await handler(event, data)

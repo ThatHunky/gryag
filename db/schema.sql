@@ -818,3 +818,25 @@ CREATE INDEX IF NOT EXISTS idx_chat_fact_quality_chat
     ON chat_fact_quality_metrics(chat_id);
 CREATE INDEX IF NOT EXISTS idx_chat_fact_quality_fact 
     ON chat_fact_quality_metrics(fact_id);
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- Image Generation Quotas - Daily limits for image generation per user
+-- Added: October 17, 2025
+-- Tracks daily image generation usage to enforce rate limits
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS image_quotas (
+    user_id INTEGER NOT NULL,
+    chat_id INTEGER NOT NULL,
+    generation_date TEXT NOT NULL,  -- YYYY-MM-DD format
+    images_generated INTEGER DEFAULT 0,
+    last_generation_ts INTEGER,
+    PRIMARY KEY (user_id, chat_id, generation_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_image_quotas_user_date 
+    ON image_quotas(user_id, generation_date);
+CREATE INDEX IF NOT EXISTS idx_image_quotas_chat_date 
+    ON image_quotas(chat_id, generation_date);
+CREATE INDEX IF NOT EXISTS idx_image_quotas_last_gen 
+    ON image_quotas(last_generation_ts);

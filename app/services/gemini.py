@@ -50,6 +50,9 @@ class GeminiClient:
         self._failure_count = 0
         self._circuit_open_until = 0.0
         self._embed_semaphore = asyncio.Semaphore(8)
+        self._tools_fallback_disabled = (
+            False  # Track if tools were disabled in last call
+        )
         # Gemini 1.5 renamed some safety categories and dropped the SafetySetting class
         # Safety settings for new SDK
         self._safety_settings = [
@@ -200,6 +203,11 @@ class GeminiClient:
         self._failure_count = 0
         self._circuit_open_until = 0.0
         telemetry.increment_counter("gemini.success")
+
+    @property
+    def tools_fallback_disabled(self) -> bool:
+        """Check if tools were disabled during the last API call due to errors."""
+        return self._tools_fallback_disabled
 
     async def _invoke_model(
         self,
@@ -380,6 +388,9 @@ class GeminiClient:
         call_contents = contents
         response: Any | None = None
 
+        # Reset fallback flag at start of new request
+        self._tools_fallback_disabled = False
+
         try:
             response = await self._invoke_model(
                 call_contents,
@@ -459,6 +470,9 @@ class GeminiClient:
             # Check if we need to disable tools
             if self._maybe_disable_tools(err_text):
                 filtered_tools = None  # Disable all tools
+                self._tools_fallback_disabled = (
+                    True  # Mark tools as temporarily disabled
+                )
             elif self._maybe_disable_search_grounding(err_text):
                 filtered_tools = self._filter_tools(tools)
 
@@ -477,6 +491,9 @@ class GeminiClient:
                             None,
                             system_instruction,
                         )
+                        self._tools_fallback_disabled = (
+                            True  # Mark tools as temporarily disabled
+                        )
                         retried = True
                     except Exception as final_exc:  # pragma: no cover
                         self._record_failure()
@@ -486,6 +503,9 @@ class GeminiClient:
                     raise GeminiError("Gemini request failed") from fallback_exc
 
         if tool_callbacks and response is not None:
+            self._logger.debug(
+                f"Processing response with {len(tool_callbacks)} tool callbacks available"
+            )
             try:
                 response = await self._handle_tools(
                     initial_contents=call_contents,
@@ -494,6 +514,7 @@ class GeminiClient:
                     callbacks=tool_callbacks,
                     system_instruction=system_instruction,
                 )
+                self._logger.debug("Tool handling completed successfully")
             except GeminiError:
                 self._record_failure()
                 raise
@@ -504,7 +525,13 @@ class GeminiClient:
 
         self._record_success()
 
-        return self._extract_text(response)
+        # Log final response structure
+        extracted_text = self._extract_text(response)
+        self._logger.info(
+            f"Extracted text length: {len(extracted_text)}, is_empty: {not extracted_text or extracted_text.isspace()}"
+        )
+
+        return extracted_text
 
     @staticmethod
     def _extract_text(response: Any) -> str:
@@ -545,23 +572,32 @@ class GeminiClient:
         callbacks: dict[str, Callable[[dict[str, Any]], Awaitable[str]]],
         system_instruction: str | None,
     ) -> Any:
+        self._logger.info(f"_handle_tools called with {len(callbacks)} callbacks")
         contents = list(initial_contents)
         attempt = 0
         current_response = response
         filtered_tools = self._filter_tools(tools)
         while attempt < 2:  # allow one round-trip
             attempt += 1
+            self._logger.info(f"Tool handling attempt {attempt}")
             candidates = getattr(current_response, "candidates", None) or []
+            self._logger.info(f"Found {len(candidates)} candidates in response")
             function_called = False
             for candidate in candidates:
                 content = getattr(candidate, "content", None)
                 if not content or not getattr(content, "parts", None):
+                    self._logger.info("Candidate has no content or no parts, skipping")
                     continue
+                parts = getattr(content, "parts", None)
+                self._logger.info(f"Candidate has {len(parts) if parts else 0} parts")
                 parts_payload: list[dict[str, Any]] = []
                 tool_calls: list[tuple[str, dict[str, Any]]] = []
                 for part in content.parts:
                     function_call = getattr(part, "function_call", None)
                     if function_call:
+                        self._logger.info(
+                            f"Found function_call in part: {getattr(function_call, 'name', 'UNKNOWN')}"
+                        )
                         name = getattr(function_call, "name", "")
                         raw_args = getattr(function_call, "args", {}) or {}
                         if isinstance(raw_args, dict):
@@ -583,13 +619,21 @@ class GeminiClient:
                     elif getattr(part, "text", None) is not None:
                         parts_payload.append({"text": part.text})
                 if not tool_calls:
+                    self._logger.info("No tool_calls found in this candidate's parts")
                     continue
 
+                self._logger.info(
+                    f"Found {len(tool_calls)} tool calls: {[name for name, _ in tool_calls]}"
+                )
                 local_tool_calls = [
                     (name, args) for (name, args) in tool_calls if name in callbacks
                 ]
                 if not local_tool_calls:
+                    self._logger.warning(
+                        f"No matching callbacks for tool calls: {[name for name, _ in tool_calls]}"
+                    )
                     continue
+                self._logger.info(f"Matched {len(local_tool_calls)} local tool calls")
 
                 contents.append(
                     {"role": getattr(content, "role", "model"), "parts": parts_payload}
@@ -597,9 +641,11 @@ class GeminiClient:
 
                 for name, args in local_tool_calls:
                     function_called = True
+                    self._logger.info(f"Calling tool: {name} with args: {args}")
                     callback = callbacks[name]
                     try:
                         result = await callback(args)
+                        self._logger.info(f"Tool {name} returned: {str(result)[:200]}")
                     except (
                         Exception
                     ) as exc:  # pragma: no cover - runtime handler errors

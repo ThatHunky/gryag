@@ -296,20 +296,24 @@ class ContextStore:
         max_turns: int,
     ) -> list[dict[str, Any]]:
         await self.init()
+        # Each turn = 1 user message + 1 bot response = 2 messages
+        # So we need to fetch max_turns * 2 to get the full conversation history
+        message_limit = max_turns * 2
+
         if thread_id is None:
             query = (
                 "SELECT role, text, media FROM messages "
                 "WHERE chat_id = ? AND thread_id IS NULL "
                 "ORDER BY id DESC LIMIT ?"
             )
-            params: tuple[Any, ...] = (chat_id, max_turns)
+            params: tuple[Any, ...] = (chat_id, message_limit)
         else:
             query = (
                 "SELECT role, text, media FROM messages "
                 "WHERE chat_id = ? AND thread_id = ? "
                 "ORDER BY id DESC LIMIT ?"
             )
-            params = (chat_id, thread_id, max_turns)
+            params = (chat_id, thread_id, message_limit)
 
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row

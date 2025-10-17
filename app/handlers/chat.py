@@ -22,6 +22,12 @@ from app.services.weather import weather_tool, WEATHER_TOOL_DEFINITION
 from app.services.currency import currency_tool, CURRENCY_TOOL_DEFINITION
 from app.services.polls import polls_tool, POLLS_TOOL_DEFINITION
 from app.services.search_tool import search_web_tool, SEARCH_WEB_TOOL_DEFINITION
+from app.services.image_generation import (
+    ImageGenerationService,
+    GENERATE_IMAGE_TOOL_DEFINITION,
+    QuotaExceededError,
+    ImageGenerationError,
+)
 from app.services.system_prompt_manager import SystemPromptManager
 from app.services.tools import (
     remember_fact_tool,
@@ -715,6 +721,7 @@ async def handle_group_message(
     rate_limiter: RateLimiter | None = None,
     multi_level_context_manager: MultiLevelContextManager | None = None,
     persona_loader: Any | None = None,
+    image_gen_service: ImageGenerationService | None = None,
 ):
     if message.from_user is None or message.from_user.is_bot:
         LOGGER.debug("Ignoring message: no from_user or is_bot")
@@ -1176,6 +1183,10 @@ async def handle_group_message(
     # Add polls tool
     tool_definitions.append(POLLS_TOOL_DEFINITION)
 
+    # Add image generation tool
+    if settings.enable_image_generation:
+        tool_definitions.append(GENERATE_IMAGE_TOOL_DEFINITION)
+
     # Add memory tools (Phase 5.1)
     if settings.enable_tool_based_memory:
         tool_definitions.append(REMEMBER_FACT_DEFINITION)
@@ -1399,6 +1410,65 @@ async def handle_group_message(
         "polls": make_tracked_tool_callback("polls", polls_tool),
     }
 
+    # Add image generation callback (if enabled)
+    if settings.enable_image_generation and image_gen_service is not None:
+
+        async def generate_image_tool(params: dict[str, Any]) -> str:
+            """Tool callback for image generation."""
+            prompt = params.get("prompt", "")
+            aspect_ratio = params.get("aspect_ratio", "1:1")
+
+            if not prompt:
+                return json.dumps(
+                    {"success": False, "error": "Потрібен опис зображення"}
+                )
+
+            try:
+                # Generate image
+                image_bytes = await image_gen_service.generate_image(
+                    prompt=prompt,
+                    aspect_ratio=aspect_ratio,
+                    user_id=user_id,
+                    chat_id=chat_id,
+                )
+
+                # Send image to chat
+                from aiogram.types import BufferedInputFile
+
+                photo = BufferedInputFile(image_bytes, filename="generated.png")
+                await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=photo,
+                    caption=f"🎨 {prompt[:100]}",
+                    message_thread_id=thread_id,
+                    reply_to_message_id=message.message_id,
+                )
+
+                # Get usage stats
+                stats = await image_gen_service.get_usage_stats(user_id, chat_id)
+                remaining = stats.get("remaining", 0)
+                limit = stats.get("daily_limit", 1)
+
+                result_msg = "Зображення згенеровано! "
+                if not stats.get("is_admin"):
+                    result_msg += f"Залишилось сьогодні: {remaining}/{limit}"
+
+                return json.dumps({"success": True, "message": result_msg})
+
+            except QuotaExceededError as e:
+                return json.dumps({"success": False, "error": str(e)})
+            except ImageGenerationError as e:
+                return json.dumps({"success": False, "error": str(e)})
+            except Exception as e:
+                LOGGER.error(f"Image generation failed: {e}", exc_info=True)
+                return json.dumps(
+                    {"success": False, "error": "Помилка при генерації зображення"}
+                )
+
+        tracked_tool_callbacks["generate_image"] = make_tracked_tool_callback(
+            "generate_image", generate_image_tool
+        )
+
     # Add web search callback (if enabled)
     if settings.enable_search_grounding:
         tracked_tool_callbacks["search_web"] = make_tracked_tool_callback(
@@ -1469,6 +1539,20 @@ async def handle_group_message(
     async with typing_indicator(bot, chat_id):
         generation_start_time = time.time()
 
+        # Log what we're sending to Gemini
+        LOGGER.info(
+            f"Sending to Gemini: history_length={len(history)}, "
+            f"user_parts_count={len(user_parts)}, "
+            f"tools_count={len(tool_definitions) if tool_definitions else 0}, "
+            f"system_prompt_length={len(system_prompt_with_profile) if system_prompt_with_profile else 0}"
+        )
+
+        # Log first user part (text only, not media)
+        if user_parts:
+            first_part = user_parts[0]
+            if isinstance(first_part, dict) and "text" in first_part:
+                LOGGER.info(f"First user part text: {first_part['text'][:200]}")
+
         try:
             reply_text = await gemini_client.generate(
                 system_prompt=system_prompt_with_profile,
@@ -1477,6 +1561,46 @@ async def handle_group_message(
                 tools=tool_definitions,
                 tool_callbacks=tracked_tool_callbacks,  # type: ignore[arg-type]
             )
+
+            # Check if tools were disabled during generation (API overload fallback)
+            if gemini_client.tools_fallback_disabled and tool_definitions:
+                LOGGER.warning(
+                    "Tools were disabled during Gemini call due to API errors. "
+                    "Some features (image generation, web search, etc.) may not work."
+                )
+                # Check if user asked for a tool feature
+                user_text_lower = (text_content or "").lower()
+                tool_keywords = [
+                    "намалюй",
+                    "малюнок",
+                    "зображення",
+                    "картинк",
+                    "фото",
+                    "generate",
+                    "draw",
+                    "image",
+                    "picture",
+                    "photo",
+                    "пошук",
+                    "знайди",
+                    "search",
+                    "погода",
+                    "weather",
+                ]
+                if any(keyword in user_text_lower for keyword in tool_keywords):
+                    # User likely asked for a tool feature - provide helpful error
+                    if not reply_text or reply_text.isspace():
+                        # Empty response - replace entirely
+                        reply_text = (
+                            "⚠️ Зараз API перевантажений і ця функція тимчасово недоступна. "
+                            "Спробуй пізніше (через 5-10 хвилин)."
+                        )
+                    else:
+                        # Prepend warning to existing response
+                        reply_text = (
+                            "⚠️ Зараз API перевантажений і деякі функції тимчасово недоступні. "
+                            "Спробуй пізніше.\n\n" + reply_text
+                        )
 
             # Calculate response time
             generation_end_time = time.time()

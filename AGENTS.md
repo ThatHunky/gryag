@@ -56,6 +56,12 @@ The repository root must remain clean. **Only these files are allowed at root:**
 
 **Historical context**: On 2025-10-02 a large reorganization moved many top-level Markdown docs into `docs/`. On 2025-10-08, all remaining scripts and utilities were organized into `scripts/` subdirectories. See `docs/CHANGELOG.md` for the full history.
 
+
+## Conversation Pattern Reference
+
+- The canonical conversation format is documented in `docs/overview/CURRENT_CONVERSATION_PATTERN.md`.
+- If the pattern changes, update that file and update this file and `.github/copilot-instructions.md` to reference the new pattern.
+
 If you need to create new files:
 
 1. **Never create files at repository root** - use the organization rules above

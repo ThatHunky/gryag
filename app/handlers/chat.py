@@ -62,6 +62,7 @@ from app.services.typing import typing_indicator
 
 router = Router()
 
+# Default responses (will be overridden by PersonaLoader templates if enabled)
 ERROR_FALLBACK = "Ґеміні знову тупить. Спробуй пізніше."
 EMPTY_REPLY = "Скажи конкретніше, бо зараз з цього нічого не зробити."
 BANNED_REPLY = "Ти для гряга в бані. Йди погуляй."
@@ -69,6 +70,28 @@ THROTTLED_REPLY = "Занадто багато повідомлень. Поче�
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _get_response(
+    key: str,
+    persona_loader: Any | None,
+    default: str,
+    **kwargs: Any,
+) -> str:
+    """Get response from PersonaLoader if available, otherwise use default.
+
+    Args:
+        key: Template key (e.g., 'error_fallback', 'banned_reply')
+        persona_loader: PersonaLoader instance (if enabled)
+        default: Fallback response if template not found
+        **kwargs: Variables for template substitution
+
+    Returns:
+        Response string with variables substituted
+    """
+    if persona_loader is not None:
+        return persona_loader.get_response(key, **kwargs)
+    return default
 
 
 _META_PREFIX_RE = re.compile(
@@ -611,6 +634,65 @@ def _summarize_long_context(
     return recent_messages
 
 
+def _truncate_history_to_tokens(
+    history: list[dict[str, Any]], max_tokens: int
+) -> list[dict[str, Any]]:
+    """
+    Truncate history to fit within token budget.
+
+    Keeps most recent messages and truncates from the beginning.
+    Uses rough token estimation: words * 1.3
+
+    Args:
+        history: List of message dicts with 'role' and 'parts'
+        max_tokens: Maximum token budget
+
+    Returns:
+        Truncated history within token budget
+    """
+    if not history:
+        return history
+
+    def estimate_message_tokens(msg: dict[str, Any]) -> int:
+        """Estimate tokens for a single message."""
+        total = 0
+        parts = msg.get("parts", [])
+        for part in parts:
+            if isinstance(part, dict) and "text" in part:
+                text = part["text"]
+                words = len(text.split())
+                total += int(words * 1.3)
+        return total
+
+    # Start from the end (most recent) and work backwards
+    truncated = []
+    current_tokens = 0
+
+    for msg in reversed(history):
+        msg_tokens = estimate_message_tokens(msg)
+
+        if current_tokens + msg_tokens > max_tokens:
+            # Would exceed budget, stop here
+            if truncated:
+                # Add a summary message at the beginning
+                summary_text = f"[Попередні {len(history) - len(truncated)} повідомлень пропущено через ліміт токенів]"
+                summary_msg = {"role": "user", "parts": [{"text": summary_text}]}
+                truncated.insert(0, summary_msg)
+            break
+
+        truncated.insert(0, msg)
+        current_tokens += msg_tokens
+
+    if len(truncated) < len(history):
+        LOGGER.warning(
+            f"Truncated history from {len(history)} to {len(truncated)} messages "
+            f"(estimated {current_tokens}/{max_tokens} tokens)"
+        )
+        telemetry.increment_counter("context.token_truncation")
+
+    return truncated if truncated else history[:1]  # Keep at least 1 message
+
+
 @router.message()
 async def handle_group_message(
     message: Message,
@@ -632,6 +714,7 @@ async def handle_group_message(
     redis_client: RedisLike | None = None,
     rate_limiter: RateLimiter | None = None,
     multi_level_context_manager: MultiLevelContextManager | None = None,
+    persona_loader: Any | None = None,
 ):
     if message.from_user is None or message.from_user.is_bot:
         LOGGER.debug("Ignoring message: no from_user or is_bot")
@@ -727,7 +810,9 @@ async def handle_group_message(
         )
         if not allowed:
             wait_minutes = max((retry_after + 59) // 60, 1)
-            throttle_text = THROTTLED_REPLY.format(minutes=wait_minutes)
+            throttle_text = _get_response(
+                "throttle_notice", persona_loader, THROTTLED_REPLY, minutes=wait_minutes
+            )
             telemetry.increment_counter(
                 "chat.rate_limited",
                 user_id=message.from_user.id,
@@ -738,7 +823,7 @@ async def handle_group_message(
 
     if not is_admin and await store.is_banned(chat_id, user_id):
         telemetry.increment_counter("chat.banned_user")
-        await message.reply(BANNED_REPLY)
+        await message.reply(_get_response("banned_reply", persona_loader, BANNED_REPLY))
         return
 
     # Build multi-level context if services are available
@@ -806,6 +891,7 @@ async def handle_group_message(
                 exc_info=e,
                 extra={"chat_id": chat_id, "user_id": user_id},
             )
+            telemetry.increment_counter("context.fallback_to_simple")
             use_multi_level = False
             context_manager = None
             context_assembly = None
@@ -817,7 +903,14 @@ async def handle_group_message(
             thread_id=thread_id,
             max_turns=settings.max_turns,
         )
+
+        # Apply token-based truncation to prevent overflow
+        history = _truncate_history_to_tokens(
+            history, max_tokens=settings.context_token_budget
+        )
+
         # Summarize context if it's getting too long to prevent confusion
+        history = _summarize_long_context(history, settings.context_summary_threshold)
         history = _summarize_long_context(history, settings.context_summary_threshold)
     else:
         # Multi-level context will be formatted later
@@ -1138,29 +1231,92 @@ async def handle_group_message(
 
     # Format context for Gemini
     if use_multi_level and context_manager and context_assembly:
-        # Use multi-level formatted context
-        formatted_context = context_manager.format_for_gemini(context_assembly)
-        history = formatted_context["history"]
-
-        # Append multi-level system context
-        if formatted_context.get("system_context"):
-            system_prompt_with_profile = (
-                base_system_prompt
-                + timestamp_context
-                + "\n\n"
-                + formatted_context["system_context"]
+        # Check if compact format is enabled
+        if settings.enable_compact_conversation_format:
+            # Use compact plain text format (70-80% token savings)
+            formatted_context = context_manager.format_for_gemini_compact(
+                context_assembly
             )
 
-        LOGGER.debug(
-            "Using multi-level context for Gemini",
-            extra={
-                "history_length": len(history),
-                "system_context_length": (
-                    len(formatted_context.get("system_context") or "")
-                ),
-                "total_tokens": formatted_context.get("token_count", 0),
-            },
-        )
+            # In compact format, conversation goes in user_parts, not history
+            conversation_text = formatted_context["conversation_text"]
+            history = []  # No separate history, all in current message
+
+            # Append multi-level system context
+            if formatted_context.get("system_context"):
+                system_prompt_with_profile = (
+                    base_system_prompt
+                    + timestamp_context
+                    + "\n\n"
+                    + formatted_context["system_context"]
+                )
+
+            # Replace user_parts with compact conversation text
+            # Add current message to conversation text
+            current_message_line = ""
+            if raw_text or media_summary:
+                from app.services.conversation_formatter import format_message_compact
+
+                current_username = (
+                    message.from_user.full_name if message.from_user else "User"
+                )
+                current_user_id = message.from_user.id if message.from_user else None
+                current_message_line = format_message_compact(
+                    user_id=current_user_id,
+                    username=current_username,
+                    text=raw_text or media_summary or "",
+                    media_description=media_summary if media_parts else "",
+                )
+
+            # Combine conversation history with current message
+            if conversation_text and current_message_line:
+                full_conversation = (
+                    f"{conversation_text}\n{current_message_line}\n[RESPOND]"
+                )
+            elif current_message_line:
+                full_conversation = f"{current_message_line}\n[RESPOND]"
+            else:
+                full_conversation = conversation_text or "[RESPOND]"
+
+            user_parts = [{"text": full_conversation}]
+            # Add media parts if present (for analysis)
+            if media_parts:
+                user_parts.extend(media_parts)
+
+            LOGGER.debug(
+                "Using compact conversation format for Gemini",
+                extra={
+                    "conversation_lines": len(full_conversation.split("\n")),
+                    "system_context_length": (
+                        len(formatted_context.get("system_context") or "")
+                    ),
+                    "estimated_tokens": formatted_context.get("token_count", 0),
+                },
+            )
+        else:
+            # Use traditional JSON format
+            formatted_context = context_manager.format_for_gemini(context_assembly)
+            history = formatted_context["history"]
+
+            # Append multi-level system context
+            if formatted_context.get("system_context"):
+                system_prompt_with_profile = (
+                    base_system_prompt
+                    + timestamp_context
+                    + "\n\n"
+                    + formatted_context["system_context"]
+                )
+
+            LOGGER.debug(
+                "Using multi-level context for Gemini",
+                extra={
+                    "history_length": len(history),
+                    "system_context_length": (
+                        len(formatted_context.get("system_context") or "")
+                    ),
+                    "total_tokens": formatted_context.get("token_count", 0),
+                },
+            )
     elif profile_context:
         # Fallback: Simple history + profile context
         system_prompt_with_profile = (
@@ -1347,7 +1503,7 @@ async def handle_group_message(
             )
         except GeminiError:
             telemetry.increment_counter("chat.reply_failure")
-            reply_text = ERROR_FALLBACK
+            reply_text = _get_response("error_fallback", persona_loader, ERROR_FALLBACK)
 
         # Comprehensive response cleaning
         original_reply = reply_text
@@ -1364,7 +1520,7 @@ async def handle_group_message(
             LOGGER.debug("Original response contained: %s", original_reply[:200])
 
         if not reply_text or reply_text.isspace():
-            reply_text = EMPTY_REPLY
+            reply_text = _get_response("empty_reply", persona_loader, EMPTY_REPLY)
 
         reply_trimmed = reply_text[:4096]
         reply_markdown_safe = _escape_markdown(reply_trimmed)

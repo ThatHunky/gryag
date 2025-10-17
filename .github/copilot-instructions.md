@@ -24,6 +24,12 @@ globs: *
 
 See `AGENTS.md` and `scripts/README.md` for complete organization structure.
 
+## Conversation Pattern Reference
+
+**Canonical conversation format:** See `docs/overview/CURRENT_CONVERSATION_PATTERN.md` for the up-to-date message flow and formatting used by gryag and Gemini.
+
+- If the conversation pattern changes, update `CURRENT_CONVERSATION_PATTERN.md` and update this file and `AGENTS.md` to reference the new pattern.
+
 ## Architecture Overview
 
 **gryag** is a Telegram group bot with a sarcastic Ukrainian personality, powered by Google Gemini 2.5 Flash. It features multi-level context management, user profiling, episodic memory, and hybrid fact extraction (local LLM + regex patterns).

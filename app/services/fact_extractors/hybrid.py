@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from .base import FactExtractor
+from .normalizers import get_dedup_key
 from .rule_based import RuleBasedFactExtractor
 
 logger = logging.getLogger(__name__)
@@ -157,6 +158,8 @@ class HybridFactExtractor(FactExtractor):
         """
         Remove duplicate facts, keeping highest confidence.
 
+        Uses normalized values for better semantic deduplication.
+
         Args:
             facts: List of fact dicts
 
@@ -166,15 +169,12 @@ class HybridFactExtractor(FactExtractor):
         if not facts:
             return []
 
-        # Group by (fact_type, fact_key, fact_value)
+        # Group by normalized dedup key
         seen: dict[tuple[str, str, str], dict[str, Any]] = {}
 
         for fact in facts:
-            key = (
-                fact.get("fact_type", ""),
-                fact.get("fact_key", ""),
-                fact.get("fact_value", "").lower().strip(),
-            )
+            # Use normalized dedup key
+            key = get_dedup_key(fact)
 
             # Keep fact with highest confidence
             if key not in seen or fact.get("confidence", 0) > seen[key].get(

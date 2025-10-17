@@ -27,7 +27,9 @@ class Settings(BaseSettings):
         "models/text-embedding-004", alias="GEMINI_EMBED_MODEL"
     )
     db_path: Path = Field(Path("./gryag.db"), alias="DB_PATH")
-    max_turns: int = Field(50, alias="MAX_TURNS", ge=1)
+    max_turns: int = Field(
+        20, alias="MAX_TURNS", ge=1
+    )  # Reduced from 50 to prevent token overflow
     per_user_per_hour: int = Field(5, alias="PER_USER_PER_HOUR", ge=1)
     context_summary_threshold: int = Field(30, alias="CONTEXT_SUMMARY_THRESHOLD", ge=5)
     use_redis: bool = Field(False, alias="USE_REDIS")
@@ -267,6 +269,14 @@ class Settings(BaseSettings):
         300, alias="MAX_TOOL_RESPONSE_TOKENS", ge=100, le=1000
     )  # Maximum tokens per tool response
 
+    # Compact Conversation Format (Phase 6 - October 2025)
+    enable_compact_conversation_format: bool = Field(
+        False, alias="ENABLE_COMPACT_CONVERSATION_FORMAT"
+    )  # Use plain text format instead of JSON (70-80% token savings)
+    compact_format_max_history: int = Field(
+        50, alias="COMPACT_FORMAT_MAX_HISTORY", ge=10, le=100
+    )  # More messages due to efficiency
+
     # Performance & Caching
     enable_result_caching: bool = Field(True, alias="ENABLE_RESULT_CACHING")
     cache_ttl_seconds: int = Field(3600, alias="CACHE_TTL_SECONDS", ge=60, le=86400)
@@ -410,8 +420,8 @@ class Settings(BaseSettings):
         False, alias="ENABLE_CUSTOM_COMMANDS"
     )  # Use configurable command names
     enable_persona_templates: bool = Field(
-        False, alias="ENABLE_PERSONA_TEMPLATES"
-    )  # Use template-based responses
+        True, alias="ENABLE_PERSONA_TEMPLATES"
+    )  # Use template-based responses (default enabled for universality)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Logging Configuration

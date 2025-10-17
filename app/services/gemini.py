@@ -12,6 +12,7 @@ from google import genai
 from google.genai import types
 
 from app.services import telemetry
+from app.services.embedding_cache import EmbeddingCache
 
 
 class GeminiError(Exception):
@@ -21,11 +22,18 @@ class GeminiError(Exception):
 class GeminiClient:
     """Async wrapper around Google Gemini models."""
 
-    def __init__(self, api_key: str, model: str, embed_model: str) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        embed_model: str,
+        embedding_cache: EmbeddingCache | None = None,
+    ) -> None:
         self._client = genai.Client(api_key=api_key)
         self._model = None  # Not needed in new SDK - we call client.models.generate_content directly
         self._model_name = model
         self._embed_model = embed_model
+        self._embedding_cache = embedding_cache
         self._logger = logging.getLogger(__name__)
         self._search_grounding_supported = True
 
@@ -666,6 +674,13 @@ class GeminiClient:
         if not text or not text.strip():
             return []
 
+        # Check cache first
+        if self._embedding_cache:
+            cached = await self._embedding_cache.get(text, model=self._embed_model)
+            if cached is not None:
+                telemetry.increment_counter("embedding_cache_hits")
+                return cached
+
         async with self._embed_semaphore:
             try:
                 response = await self._client.aio.models.embed_content(
@@ -676,8 +691,18 @@ class GeminiClient:
                 if hasattr(response, "embeddings") and response.embeddings:
                     embedding = response.embeddings[0]
                     if hasattr(embedding, "values"):
-                        return list(embedding.values)
+                        result = list(embedding.values)
+
+                        # Cache the result
+                        if self._embedding_cache and result:
+                            await self._embedding_cache.put(
+                                text, result, model=self._embed_model
+                            )
+                            telemetry.increment_counter("embedding_cache_stores")
+
+                        return result
                 return []
             except Exception as exc:
                 self._logger.warning("Embedding failed: %s", exc)
+                telemetry.increment_counter("embedding_cache_misses")
                 return []

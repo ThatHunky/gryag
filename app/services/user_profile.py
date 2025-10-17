@@ -156,10 +156,23 @@ class FactExtractor:
 
                 try:
                     data = json.loads(response_text)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
                     LOGGER.warning(
-                        f"Failed to parse fact extraction JSON: {response_text[:200]}",
-                        extra={"user_id": user_id},
+                        f"Failed to parse fact extraction JSON from Gemini",
+                        extra={
+                            "user_id": user_id,
+                            "error": str(e),
+                            "error_position": e.pos,
+                            "response_preview": response_text[:500],
+                        },
+                    )
+                    LOGGER.debug(
+                        f"Full Gemini response for fact extraction (user {user_id}): {response_text}",
+                        extra={
+                            "user_id": user_id,
+                            "message_preview": message[:100],
+                            "full_response": response_text,
+                        },
                     )
                     telemetry.increment_counter("fact_extraction_errors")
                     return []
@@ -263,9 +276,7 @@ class UserProfileStore:
                         "ALTER TABLE user_profiles ADD COLUMN membership_status TEXT DEFAULT 'unknown'"
                     )
                     await db.commit()
-                    LOGGER.info(
-                        "Added membership_status column to user_profiles"
-                    )
+                    LOGGER.info("Added membership_status column to user_profiles")
                 except aiosqlite.OperationalError:
                     pass
 
@@ -502,7 +513,9 @@ class UserProfileStore:
             params: list[Any] = [chat_id]
 
             if not include_inactive:
-                query += " AND membership_status IN ('member', 'administrator', 'creator')"
+                query += (
+                    " AND membership_status IN ('member', 'administrator', 'creator')"
+                )
 
             query += """
                 ORDER BY 
@@ -539,6 +552,7 @@ class UserProfileStore:
 
         Returns the fact ID.
         Checks for similar existing facts and updates if found.
+        Records fact versions for tracking changes over time.
         """
         await self.init()
         now = int(time.time())
@@ -547,7 +561,7 @@ class UserProfileStore:
             # Check if similar fact exists (same type and key)
             async with db.execute(
                 """
-                SELECT id, confidence, is_active 
+                SELECT id, confidence, is_active, fact_value 
                 FROM user_facts 
                 WHERE user_id = ? AND chat_id = ? AND fact_type = ? AND fact_key = ? 
                 ORDER BY created_at DESC LIMIT 1
@@ -557,10 +571,37 @@ class UserProfileStore:
                 existing = await cursor.fetchone()
 
             if existing:
-                existing_id, existing_confidence, is_active = existing
+                existing_id, existing_confidence, is_active, existing_value = existing
+
+                # Determine change type and whether to update
+                value_changed = existing_value != fact_value
+                confidence_changed = abs(confidence - existing_confidence) > 0.01
 
                 # If new confidence is higher or fact was inactive, update it
                 if confidence > existing_confidence or not is_active:
+                    # Get current version count
+                    async with db.execute(
+                        "SELECT COALESCE(MAX(version_number), 0) FROM fact_versions WHERE fact_id = ?",
+                        (existing_id,),
+                    ) as cursor:
+                        row = await cursor.fetchone()
+                        current_version = row[0] if row else 0
+
+                    # Determine change type
+                    if not is_active:
+                        change_type = "correction"
+                    elif value_changed:
+                        change_type = (
+                            "evolution"
+                            if confidence > existing_confidence
+                            else "correction"
+                        )
+                    elif confidence_changed:
+                        change_type = "reinforcement"
+                    else:
+                        change_type = "reinforcement"
+
+                    # Update fact
                     await db.execute(
                         """
                         UPDATE user_facts 
@@ -571,22 +612,59 @@ class UserProfileStore:
                         """,
                         (fact_value, confidence, now, now, evidence_text, existing_id),
                     )
+
+                    # Record version
+                    await db.execute(
+                        """
+                        INSERT INTO fact_versions 
+                        (fact_id, version_number, change_type, confidence_delta, created_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            existing_id,
+                            current_version + 1,
+                            change_type,
+                            confidence - existing_confidence,
+                            now,
+                        ),
+                    )
+
                     await db.commit()
                     LOGGER.debug(
-                        f"Updated fact {existing_id} for user {user_id}: {fact_key}={fact_value}",
+                        f"Updated fact {existing_id} for user {user_id}: {fact_key}={fact_value} ({change_type})",
                         extra={
                             "user_id": user_id,
                             "fact_id": existing_id,
                             "fact_type": fact_type,
+                            "change_type": change_type,
                         },
                     )
                     return existing_id
                 else:
-                    # Just update last_mentioned
+                    # Just update last_mentioned and record reinforcement
                     await db.execute(
                         "UPDATE user_facts SET last_mentioned = ? WHERE id = ?",
                         (now, existing_id),
                     )
+
+                    # Get current version count for reinforcement record
+                    async with db.execute(
+                        "SELECT COALESCE(MAX(version_number), 0) FROM fact_versions WHERE fact_id = ?",
+                        (existing_id,),
+                    ) as cursor:
+                        row = await cursor.fetchone()
+                        current_version = row[0] if row else 0
+
+                    # Record reinforcement
+                    await db.execute(
+                        """
+                        INSERT INTO fact_versions 
+                        (fact_id, version_number, change_type, confidence_delta, created_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (existing_id, current_version + 1, "reinforcement", 0.0, now),
+                    )
+
                     await db.commit()
                     return existing_id
 
@@ -613,6 +691,17 @@ class UserProfileStore:
                 ),
             )
             fact_id = cursor.lastrowid
+
+            # Record initial version
+            await db.execute(
+                """
+                INSERT INTO fact_versions 
+                (fact_id, version_number, change_type, confidence_delta, created_at)
+                VALUES (?, 1, 'creation', ?, ?)
+                """,
+                (fact_id, confidence, now),
+            )
+
             await db.commit()
 
             telemetry.increment_counter("facts_extracted")

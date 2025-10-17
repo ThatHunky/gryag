@@ -23,6 +23,7 @@ from app.services.bot_profile import BotProfileStore
 from app.services.bot_learning import BotLearningEngine
 from app.services.system_prompt_manager import SystemPromptManager
 from app.services.rate_limiter import RateLimiter
+from app.services.persona import PersonaLoader
 
 
 class ChatMetaMiddleware(BaseMiddleware):
@@ -67,6 +68,14 @@ class ChatMetaMiddleware(BaseMiddleware):
         self._bot_id: int | None = None
         self._lock = asyncio.Lock()
         self._multi_level_context_manager: MultiLevelContextManager | None = None
+        
+        # Phase 3: Initialize PersonaLoader for response templates
+        self._persona_loader: PersonaLoader | None = None
+        if settings.enable_persona_templates:
+            self._persona_loader = PersonaLoader(
+                persona_config_path=settings.persona_config or None,
+                response_templates_path=settings.response_templates or None,
+            )
 
     async def _ensure_bot_identity(self) -> tuple[str, int | None]:
         if self._bot_username is not None and self._bot_id is not None:
@@ -123,4 +132,6 @@ class ChatMetaMiddleware(BaseMiddleware):
             data["redis_client"] = self._redis
         if self._rate_limiter is not None:
             data["rate_limiter"] = self._rate_limiter
+        if self._persona_loader is not None:
+            data["persona_loader"] = self._persona_loader
         return await handler(event, data)

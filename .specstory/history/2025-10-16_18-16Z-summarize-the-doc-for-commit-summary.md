@@ -16,3 +16,32 @@ _**Assistant (copilot/claude-sonnet-4)**_
 
 ---
 
+_**User (2025-10-16 18:22Z)**_
+
+Summarize the doc for a commit message
+
+---
+
+_**Assistant (copilot/gpt-5-mini)**_
+
+```git-commit
+chore(qol): implement Phase 1-2 quality-of-life improvements
+
+- Sync dependencies (google-genai, tzdata); add testing/dev deps to requirements
+- Add pytest stack and dev tools (pytest-asyncio, pytest-cov, ruff, black, mypy, isort)
+- Add .env.minimal (quick-start config)
+- Add startup configuration validation (app/config.py) and call in app/main.py
+- Create CONTRIBUTING.md and DEVELOPMENT_SETUP guide
+- Add CI workflow (.github/workflows/test.yml) with lint/test/security/config jobs
+- Create architecture docs (docs/architecture/SYSTEM_OVERVIEW.md) and update CHANGELOG
+- Extract Gemini tool definitions to app/handlers/chat_tools.py
+- Summary: 7 files added, 5 files modified, ~3k lines added; enables local/CI tests,
+  fail-fast config validation, improved onboarding and code organization
+
+Verification:
+- pip install -r requirements.txt && pytest tests/unit/ -v --cov=app
+- python -c "from app.config import Settings; print(Settings().validate_startup())"
+```
+
+---
+

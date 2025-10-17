@@ -951,3 +951,72 @@ class MultiLevelContextManager:
             "system_context": system_context,
             "token_count": context.total_tokens,
         }
+
+    def format_for_gemini_compact(self, context: LayeredContext) -> dict[str, Any]:
+        """
+        Format layered context using compact plain text format.
+
+        Converts verbose JSON format to efficient plain text:
+        - "Alice#987654: Hello world"
+        - "gryag: Привіт"
+        - "Bob#111222 → Alice#987654: Thanks!"
+
+        Expected token savings: 70-80% compared to JSON format.
+
+        Returns dict with:
+        - conversation_text: Plain text conversation
+        - system_context: Profile/episodes (same as JSON format)
+        - token_count: Estimated tokens
+        """
+        from app.services.conversation_formatter import (
+            format_history_compact,
+            estimate_tokens,
+        )
+
+        # Combine immediate + recent into single list
+        all_messages = []
+        if context.immediate:
+            all_messages.extend(context.immediate.messages)
+        if context.recent:
+            all_messages.extend(context.recent.messages)
+
+        # Convert to compact format
+        conversation_text = format_history_compact(all_messages, bot_name="gryag")
+
+        # Add [RESPOND] marker to indicate end of context
+        if conversation_text:
+            conversation_text += "\n[RESPOND]"
+
+        # Build system context (same as JSON format)
+        system_parts = []
+
+        if context.background and context.background.profile_summary:
+            system_parts.append(f"User Profile: {context.background.profile_summary}")
+
+        if context.relevant and context.relevant.snippets:
+            relevant_texts = [
+                f"[Relevance: {s['score']:.2f}] {s['text'][:200]}..."
+                for s in context.relevant.snippets[:5]
+            ]
+            system_parts.append("Relevant Past Context:\n" + "\n".join(relevant_texts))
+
+        if context.episodes and context.episodes.episodes:
+            episode_texts = [
+                f"[{ep['topic']}] {ep['summary'][:150]}..."
+                for ep in context.episodes.episodes
+            ]
+            system_parts.append("Memorable Events:\n" + "\n".join(episode_texts))
+
+        system_context = "\n\n".join(system_parts) if system_parts else None
+
+        # Estimate tokens for both conversation and system context
+        total_text = conversation_text
+        if system_context:
+            total_text += "\n\n" + system_context
+        token_count = estimate_tokens(total_text)
+
+        return {
+            "conversation_text": conversation_text,
+            "system_context": system_context,
+            "token_count": token_count,
+        }

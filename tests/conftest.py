@@ -2,6 +2,7 @@
 
 import asyncio
 import pytest
+import pytest_asyncio
 from pathlib import Path
 from typing import AsyncGenerator
 import aiosqlite
@@ -16,7 +17,7 @@ def event_loop():
     loop.close()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def test_db() -> AsyncGenerator[Path, None]:
     """Create temporary test database with schema.
 
@@ -143,7 +144,7 @@ def mock_gemini_client(monkeypatch):
     return client
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def context_store(test_db):
     """Context store with test database.
 
@@ -157,7 +158,7 @@ async def context_store(test_db):
     return store
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def profile_store(test_db):
     """Profile store with test database.
 

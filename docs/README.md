@@ -15,11 +15,17 @@ Structure recommended:
 
 ## Recent Changes
 
+**October 19, 2025**: **Phase A & B Complete: External ID Storage + 7-Day Retention** - Fixed user ID truncation issue by adding dedicated TEXT columns for external IDs (external_message_id, external_user_id, reply_to_external_message_id, reply_to_external_user_id) to prevent JSON numeric precision loss. Reduced retention from 30 to 7 days with safe auto-pruning that excludes episode-referenced messages and message_importance overrides. Implemented background pruner task running daily. Created 6 new tests (all passing). Files: 8 modified, 2 new test files. See `docs/phases/PHASE_A_B_IMPLEMENTATION_COMPLETE.md`. Verification: `.venv/bin/python -m pytest tests/unit/test_external_ids.py tests/unit/test_retention.py -v` → 6 passed
+
+## Recent Changes
+
 ## Recent Changes
 
 **October 17, 2025**: **🔑 Separate API Key for Image Generation** - Added support for using a separate Google Gemini API key specifically for image generation. Set `IMAGE_GENERATION_API_KEY` in `.env` to use a different account/billing for images vs text generation. Falls back to `GEMINI_API_KEY` if not set (fully backward compatible). Benefits: independent billing, isolated API quotas, better cost control. See `docs/features/SEPARATE_IMAGE_API_KEY.md`. Verification: `grep "image_generation_api_key" app/config.py` and check logs for `"separate_api_key": true`
 
 **October 17, 2025**: **🎨 Image Generation Feature Added** - Implemented native image generation using Gemini 2.5 Flash Image model. Bot can now generate images from text prompts with daily quota limits (1/day for users, unlimited for admins). Features: text-to-image, 9 aspect ratios, Ukrainian language support, automatic quota tracking per user/chat. Added `ImageGenerationService`, `image_quotas` table, tool definition, and middleware integration. Cost: ~$0.04/image. Enable with `ENABLE_IMAGE_GENERATION=true`. See `docs/features/IMAGE_GENERATION.md`. Verification: `sqlite3 gryag.db ".schema image_quotas"` and `grep "class ImageGenerationService" app/services/image_generation.py`
+
+**October 17, 2025**: **✏️ Image Edit Tool Added** - Exposed `edit_image` tool that lets users edit an existing photo by replying to it with instructions. Uses the replied image as context for Gemini 2.5 image model. Wired into chat handler, added to persona tools, and reuses the same daily quota logic (admins bypass). Verification: reply to a photo with “затемни фон і додай напис” and check logs for `Edit image tool called`.
 
 **October 17, 2025**: **🖼️ Media Context Bug Fixed - Bot Can Now See Images/Videos/Audio!** - Fixed critical bug where bot couldn't see media in conversation context. Root cause: `_estimate_tokens()` in `MultiLevelContextManager` only counted text parts, ignoring `inline_data` (images/video/audio) and `file_data` (URLs). Media consumed 0 tokens in estimates, causing incorrect context truncation. Solution: Updated token estimator to count media (~258 tokens per image, ~100 per URL). Added debug logging to track media through context assembly. Created comprehensive unit tests verifying all media types. **Bot now properly sees and can respond to photos, videos, audio, documents, and stickers in conversation.** See `docs/fixes/MEDIA_CONTEXT_FIX.md`. Verification: Send image to bot, check logs for `grep "media items" logs/gryag.log`
 

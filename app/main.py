@@ -339,6 +339,28 @@ async def main() -> None:
     if resource_monitor.is_available():
         monitor_task = asyncio.create_task(monitor_resources())
 
+    # Background pruning task for retention (Phase B)
+    prune_task: asyncio.Task[None] | None = None
+
+    async def retention_pruner() -> None:
+        while True:
+            try:
+                if settings.retention_enabled:
+                    logging.info("Retention pruning: starting run")
+                    try:
+                        await store.prune_old(settings.retention_days)
+                        logging.info("Retention pruning: completed")
+                    except Exception as e:
+                        logging.error(f"Retention pruning failed: {e}", exc_info=True)
+                else:
+                    logging.info("Retention pruning disabled")
+            except Exception as exc:
+                logging.error(f"Error in retention pruner: {exc}", exc_info=True)
+            await asyncio.sleep(settings.retention_prune_interval_seconds)
+
+    if settings.retention_enabled:
+        prune_task = asyncio.create_task(retention_pruner())
+
     redis_client: Optional[Any] = None
     if settings.use_redis and redis is not None:
         try:
@@ -350,27 +372,28 @@ async def main() -> None:
         except Exception as exc:  # pragma: no cover - connection errors
             logging.warning("Не вдалося під'єднати Redis: %s", exc)
 
-    dispatcher.message.middleware(
-        ChatMetaMiddleware(
-            bot,
-            settings,
-            store,
-            gemini_client,
-            profile_store,
-            fact_extractor,
-            chat_profile_store=chat_profile_store,
-            hybrid_search=hybrid_search,
-            episodic_memory=episodic_memory,
-            episode_monitor=episode_monitor,
-            continuous_monitor=continuous_monitor,
-            bot_profile=bot_profile,
-            bot_learning=bot_learning,
-            prompt_manager=prompt_manager,
-            redis_client=redis_client,
-            rate_limiter=rate_limiter,
-            image_gen_service=image_gen_service,
-        )
+    chat_meta_middleware = ChatMetaMiddleware(
+        bot,
+        settings,
+        store,
+        gemini_client,
+        profile_store,
+        fact_extractor,
+        chat_profile_store=chat_profile_store,
+        hybrid_search=hybrid_search,
+        episodic_memory=episodic_memory,
+        episode_monitor=episode_monitor,
+        continuous_monitor=continuous_monitor,
+        bot_profile=bot_profile,
+        bot_learning=bot_learning,
+        prompt_manager=prompt_manager,
+        redis_client=redis_client,
+        rate_limiter=rate_limiter,
+        image_gen_service=image_gen_service,
     )
+
+    dispatcher.message.middleware(chat_meta_middleware)
+    dispatcher.chat_member.middleware(chat_meta_middleware)
     # Chat filter must come BEFORE other processing to prevent wasting resources on blocked chats
     dispatcher.message.middleware(ChatFilterMiddleware(settings))
 

@@ -25,6 +25,7 @@ from app.services.search_tool import search_web_tool, SEARCH_WEB_TOOL_DEFINITION
 from app.services.image_generation import (
     ImageGenerationService,
     GENERATE_IMAGE_TOOL_DEFINITION,
+    EDIT_IMAGE_TOOL_DEFINITION,
     QuotaExceededError,
     ImageGenerationError,
 )
@@ -70,7 +71,7 @@ router = Router()
 
 # Default responses (will be overridden by PersonaLoader templates if enabled)
 ERROR_FALLBACK = "Ґеміні знову тупить. Спробуй пізніше."
-EMPTY_REPLY = "Скажи конкретніше, бо зараз з цього нічого не зробити."
+EMPTY_REPLY = "Я не вкурив, що ти хочеш. Розпиши конкретніше — і я вже кручусь."
 BANNED_REPLY = "Ти для гряга в бані. Йди погуляй."
 THROTTLED_REPLY = "Занадто багато повідомлень. Почекай {minutes} хв."
 
@@ -104,6 +105,49 @@ _META_PREFIX_RE = re.compile(
     r'^\s*\[meta\](?:\s+[\w.-]+=(?:"(?:\\.|[^"])*"|[^\s]+))*\s*'
 )
 
+_IMAGE_ACTION_KEYWORDS = (
+    "згенеруй",
+    "генеруй",
+    "створи",
+    "намалюй",
+    "намалю",
+    "намалювати",
+    "зроби",
+    "create",
+    "generate",
+    "draw",
+    "paint",
+    "make",
+    "render",
+)
+
+_IMAGE_NOUN_KEYWORDS = (
+    "карт",  # matches "картинку", "картинка"
+    "зображ",
+    "фото",
+    "малюн",
+    "арт",
+    "picture",
+    "image",
+    "photo",
+    "art",
+    "poster",
+)
+
+_IMAGE_EDIT_KEYWORDS = (
+    "відредаг",
+    "редаг",
+    "перероб",
+    "зміни",
+    "додай",
+    "прибери",
+    "дорисуй",
+    "edit",
+    "change",
+    "modify",
+    "adjust",
+)
+
 # Enhanced regex to catch metadata that might appear anywhere in the response
 _META_ANYWHERE_RE = re.compile(
     r'\[meta\](?:\s+[\w.-]+=(?:"(?:\\.|[^"])*"|[^\s]+))*', re.MULTILINE
@@ -127,6 +171,31 @@ def _normalize_username(username: str | None) -> str | None:
     if not username:
         return None
     return f"@{username.lstrip('@')}"
+
+
+def _looks_like_image_generation_request(text: str | None) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    if any(
+        phrase in lowered
+        for phrase in ("створи картинку", "згенеруй картинку", "намалюй мені")
+    ):
+        return True
+    action_hit = any(keyword in lowered for keyword in _IMAGE_ACTION_KEYWORDS)
+    noun_hit = any(keyword in lowered for keyword in _IMAGE_NOUN_KEYWORDS)
+    return action_hit and noun_hit
+
+
+def _looks_like_image_edit_request(text: str | None) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    if any(phrase in lowered for phrase in ("відредагуй фото", "перероби зображення")):
+        return True
+    action_hit = any(keyword in lowered for keyword in _IMAGE_EDIT_KEYWORDS)
+    noun_hit = any(keyword in lowered for keyword in _IMAGE_NOUN_KEYWORDS)
+    return action_hit and noun_hit
 
 
 def _extract_text(message: Message | None) -> str | None:
@@ -256,12 +325,16 @@ async def _remember_context_message(
         if text_content:
             user_embedding = await gemini_client.embed_text(text_content)
 
-        # Build metadata
+        # Build metadata (stringify external IDs in meta to avoid precision issues)
         user_meta = {
-            "chat_id": message.chat.id,
-            "thread_id": message.message_thread_id,
-            "message_id": message.message_id,
-            "user_id": message.from_user.id,
+            "chat_id": str(message.chat.id),
+            "thread_id": (
+                str(message.message_thread_id)
+                if message.message_thread_id is not None
+                else None
+            ),
+            "message_id": str(message.message_id),
+            "user_id": str(message.from_user.id),
             "name": message.from_user.full_name,
             "username": _normalize_username(message.from_user.username),
         }
@@ -301,11 +374,12 @@ def _build_user_metadata(
     fallback_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from_user = message.from_user
+    # Stringify external IDs for storage inside message media/meta JSON
     meta: dict[str, Any] = {
-        "chat_id": chat_id,
-        "thread_id": thread_id,
-        "message_id": message.message_id,
-        "user_id": from_user.id if from_user else None,
+        "chat_id": str(chat_id),
+        "thread_id": str(thread_id) if thread_id is not None else None,
+        "message_id": str(message.message_id),
+        "user_id": str(from_user.id) if from_user else None,
         "name": from_user.full_name if from_user else None,
         "username": _normalize_username(from_user.username if from_user else None),
     }
@@ -374,14 +448,15 @@ def _build_model_metadata(
     original_text: str,
 ) -> dict[str, Any]:
     origin_user = original.from_user
+    # Stringify external IDs in meta JSON
     meta: dict[str, Any] = {
-        "chat_id": chat_id,
-        "thread_id": thread_id,
-        "message_id": response.message_id,
+        "chat_id": str(chat_id),
+        "thread_id": str(thread_id) if thread_id is not None else None,
+        "message_id": str(response.message_id),
         "user_id": None,
         "name": "gryag",
         "username": _normalize_username(bot_username),
-        "reply_to_message_id": original.message_id,
+        "reply_to_message_id": str(original.message_id),
     }
     if origin_user:
         meta["reply_to_user_id"] = origin_user.id
@@ -1183,9 +1258,10 @@ async def handle_group_message(
     # Add polls tool
     tool_definitions.append(POLLS_TOOL_DEFINITION)
 
-    # Add image generation tool
+    # Add image generation tools
     if settings.enable_image_generation:
         tool_definitions.append(GENERATE_IMAGE_TOOL_DEFINITION)
+        tool_definitions.append(EDIT_IMAGE_TOOL_DEFINITION)
 
     # Add memory tools (Phase 5.1)
     if settings.enable_tool_based_memory:
@@ -1276,7 +1352,7 @@ async def handle_group_message(
                     user_id=current_user_id,
                     username=current_username,
                     text=raw_text or media_summary or "",
-                    media_description=media_summary if media_parts else "",
+                    media_description=(media_summary or "") if media_parts else "",
                 )
 
             # Combine conversation history with current message
@@ -1418,6 +1494,10 @@ async def handle_group_message(
             prompt = params.get("prompt", "")
             aspect_ratio = params.get("aspect_ratio", "1:1")
 
+            LOGGER.info(
+                f"Image generation tool called: user_id={user_id}, chat_id={chat_id}, prompt_len={len(prompt)}"
+            )
+
             if not prompt:
                 return json.dumps(
                     {"success": False, "error": "Потрібен опис зображення"}
@@ -1436,13 +1516,30 @@ async def handle_group_message(
                 from aiogram.types import BufferedInputFile
 
                 photo = BufferedInputFile(image_bytes, filename="generated.png")
-                await bot.send_photo(
-                    chat_id=chat_id,
-                    photo=photo,
-                    caption=f"🎨 {prompt[:100]}",
-                    message_thread_id=thread_id,
-                    reply_to_message_id=message.message_id,
-                )
+
+                # Try sending with thread_id first, fallback without if thread not found
+                try:
+                    await bot.send_photo(
+                        chat_id=chat_id,
+                        photo=photo,
+                        caption=None,  # No caption - let the bot's text response handle it
+                        message_thread_id=thread_id,
+                        reply_to_message_id=message.message_id,
+                    )
+                except TelegramBadRequest as e:
+                    if "thread not found" in str(e).lower():
+                        # Thread doesn't exist, send without thread_id
+                        LOGGER.info(
+                            f"Thread {thread_id} not found, sending without thread"
+                        )
+                        await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=photo,
+                            caption=None,
+                            reply_to_message_id=message.message_id,
+                        )
+                    else:
+                        raise
 
                 # Get usage stats
                 stats = await image_gen_service.get_usage_stats(user_id, chat_id)
@@ -1467,6 +1564,111 @@ async def handle_group_message(
 
         tracked_tool_callbacks["generate_image"] = make_tracked_tool_callback(
             "generate_image", generate_image_tool
+        )
+
+        async def edit_image_tool(params: dict[str, Any]) -> str:
+            """Tool callback for editing an existing image via replied photo."""
+            prompt = params.get("prompt", "")
+            aspect_ratio = params.get("aspect_ratio", "1:1")
+
+            LOGGER.info(
+                f"Edit image tool called: user_id={user_id}, chat_id={chat_id}, prompt_len={len(prompt)}"
+            )
+
+            if not prompt:
+                return json.dumps(
+                    {"success": False, "error": "Потрібна інструкція для редагування"}
+                )
+
+            # Must be a reply to a message with an image/media
+            reply = message.reply_to_message
+            if not reply:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": "Відповідай на повідомлення з фото, яке треба змінити",
+                    }
+                )
+
+            try:
+                # Extract media bytes from the replied message
+                reply_media_raw = await collect_media_parts(bot, reply)
+                image_bytes_list = [
+                    part["bytes"]
+                    for part in reply_media_raw
+                    if part.get("kind") == "image"
+                ]
+
+                if not image_bytes_list:
+                    return json.dumps(
+                        {
+                            "success": False,
+                            "error": "У відповіді нема зображення. Пришли фото і напиши що змінити",
+                        }
+                    )
+
+                # Use the first image as the base context
+                context_images = [image_bytes_list[0]]
+
+                # Generate edited image
+                edited_bytes = await image_gen_service.generate_image(
+                    prompt=prompt,
+                    context_images=context_images,
+                    aspect_ratio=aspect_ratio,
+                    user_id=user_id,
+                    chat_id=chat_id,
+                )
+
+                # Send image to chat
+                from aiogram.types import BufferedInputFile
+
+                photo = BufferedInputFile(edited_bytes, filename="edited.png")
+
+                try:
+                    await bot.send_photo(
+                        chat_id=chat_id,
+                        photo=photo,
+                        caption=None,
+                        message_thread_id=thread_id,
+                        reply_to_message_id=message.message_id,
+                    )
+                except TelegramBadRequest as e:
+                    if "thread not found" in str(e).lower():
+                        LOGGER.info(
+                            f"Thread {thread_id} not found, sending without thread"
+                        )
+                        await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=photo,
+                            caption=None,
+                            reply_to_message_id=message.message_id,
+                        )
+                    else:
+                        raise
+
+                # Get usage stats
+                stats = await image_gen_service.get_usage_stats(user_id, chat_id)
+                remaining = stats.get("remaining", 0)
+                limit = stats.get("daily_limit", 1)
+
+                result_msg = "Зображення відредаговано! "
+                if not stats.get("is_admin"):
+                    result_msg += f"Залишилось сьогодні: {remaining}/{limit}"
+
+                return json.dumps({"success": True, "message": result_msg})
+
+            except QuotaExceededError as e:
+                return json.dumps({"success": False, "error": str(e)})
+            except ImageGenerationError as e:
+                return json.dumps({"success": False, "error": str(e)})
+            except Exception as e:
+                LOGGER.error(f"Edit image failed: {e}", exc_info=True)
+                return json.dumps(
+                    {"success": False, "error": "Помилка при редагуванні зображення"}
+                )
+
+        tracked_tool_callbacks["edit_image"] = make_tracked_tool_callback(
+            "edit_image", edit_image_tool
         )
 
     # Add web search callback (if enabled)
@@ -1642,6 +1844,101 @@ async def handle_group_message(
                 len(reply_text),
             )
             LOGGER.debug("Original response contained: %s", original_reply[:200])
+
+        # Fallback: force image generation/edit if Gemini returned nothing but the user clearly asked for it
+        if (
+            settings.enable_image_generation
+            and image_gen_service is not None
+            and (not reply_text or reply_text.isspace())
+        ):
+            fallback_prompt = (raw_text or "").strip()
+            if fallback_prompt:
+                if bot_username:
+                    fallback_prompt = re.sub(
+                        rf"@{re.escape(bot_username)}\\b",
+                        "",
+                        fallback_prompt,
+                        flags=re.IGNORECASE,
+                    ).strip()
+                if fallback_prompt.startswith("/"):
+                    fallback_prompt = fallback_prompt[1:].strip()
+
+            fallback_payload: dict[str, Any] | None = None
+            fallback_success = False
+
+            # Try edit fallback first if user replied to an image
+            if (
+                fallback_prompt
+                and "edit_image" not in tools_used_in_request
+                and reply_context
+                and reply_context.get("media_parts")
+                and _looks_like_image_edit_request(fallback_prompt)
+            ):
+                LOGGER.info(
+                    "Gemini skipped edit_image tool; performing fallback edit",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message.message_id,
+                    },
+                )
+                try:
+                    fallback_raw = await edit_image_tool({"prompt": fallback_prompt})
+                    fallback_payload = json.loads(fallback_raw)
+                except json.JSONDecodeError:
+                    fallback_payload = {"success": False, "error": fallback_raw}
+                except Exception as exc:
+                    LOGGER.error("Fallback edit_image failed: %s", exc, exc_info=True)
+                    fallback_payload = {
+                        "success": False,
+                        "error": "Не вийшло відредагувати, сервіс знову тупив.",
+                    }
+                else:
+                    tools_used_in_request.append("edit_image")
+
+            # If edit fallback didn't trigger, try generation fallback
+            if (
+                not fallback_payload
+                and fallback_prompt
+                and "generate_image" not in tools_used_in_request
+                and _looks_like_image_generation_request(fallback_prompt)
+            ):
+                LOGGER.info(
+                    "Gemini skipped generate_image tool; performing fallback generation",
+                    extra={
+                        "chat_id": chat_id,
+                        "message_id": message.message_id,
+                    },
+                )
+                try:
+                    fallback_raw = await generate_image_tool(
+                        {"prompt": fallback_prompt}
+                    )
+                    fallback_payload = json.loads(fallback_raw)
+                except json.JSONDecodeError:
+                    fallback_payload = {"success": False, "error": fallback_raw}
+                except Exception as exc:
+                    LOGGER.error(
+                        "Fallback generate_image failed: %s",
+                        exc,
+                        exc_info=True,
+                    )
+                    fallback_payload = {
+                        "success": False,
+                        "error": "Не вийшло намалювати, щось перегрілося.",
+                    }
+                else:
+                    tools_used_in_request.append("generate_image")
+
+            if fallback_payload:
+                fallback_success = bool(fallback_payload.get("success"))
+                reply_text = fallback_payload.get(
+                    "message" if fallback_success else "error",
+                    reply_text,
+                )
+                if fallback_success and not reply_text:
+                    reply_text = "Готово. Лови картинку."
+                if not fallback_success and not reply_text:
+                    reply_text = "Нічого не вийшло — сервіс брикнувся."
 
         if not reply_text or reply_text.isspace():
             reply_text = _get_response("empty_reply", persona_loader, EMPTY_REPLY)

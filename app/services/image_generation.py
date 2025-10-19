@@ -102,7 +102,11 @@ class ImageGenerationService:
 
     def _is_admin(self, user_id: int) -> bool:
         """Check if user is an admin (bypasses quotas)."""
-        return user_id in self.admin_user_ids
+        is_admin = user_id in self.admin_user_ids
+        self.logger.info(
+            f"Admin check: user_id={user_id}, admin_ids={self.admin_user_ids}, is_admin={is_admin}"
+        )
+        return is_admin
 
     async def check_quota(self, user_id: int, chat_id: int) -> tuple[bool, int, int]:
         """
@@ -248,12 +252,21 @@ class ImageGenerationService:
                 config=config,
             )
 
-            # Extract image from response
+            # Extract image from response safely
             image_bytes = None
-            for part in response.candidates[0].content.parts:
-                if part.inline_data is not None:
-                    image_bytes = part.inline_data.data
-                    break
+            try:
+                candidates = getattr(response, "candidates", None) or []
+                if candidates:
+                    content = getattr(candidates[0], "content", None)
+                    parts = getattr(content, "parts", None) or []
+                    for part in parts:
+                        if getattr(part, "inline_data", None) is not None:
+                            image_bytes = part.inline_data.data
+                            break
+            except Exception as parse_exc:  # pragma: no cover - defensive
+                self.logger.warning(
+                    "Failed to parse image from response: %s", parse_exc
+                )
 
             if not image_bytes:
                 self.logger.error("No image returned in response")
@@ -329,9 +342,9 @@ GENERATE_IMAGE_TOOL_DEFINITION = {
             "name": "generate_image",
             "description": (
                 "Генерує зображення з текстового опису. "
-                "Використовуй коли користувач просить намалювати, створити, згенерувати картинку/фото. "
-                "Працює з українською та англійською мовами. "
-                "ВАЖЛИВО: Обмеження - 1 зображення на день для звичайних користувачів."
+                "Викликай ЦЕЙ інструмент КОЖНОГО РАЗУ, коли користувач просить намалювати/згенерувати картинку або фото. "
+                "Не відмовляй текстом і не посилайся на ліміти — сервер сам перевіряє ліміти і поверне відповідь. "
+                "Працює з українською та англійською мовами."
             ),
             "parameters": {
                 "type": "object",
@@ -342,6 +355,50 @@ GENERATE_IMAGE_TOOL_DEFINITION = {
                             "Детальний опис зображення для генерації. "
                             "Чим детальніше - тим краще результат. "
                             "Опиши стиль, освітлення, деталі, композицію."
+                        ),
+                    },
+                    "aspect_ratio": {
+                        "type": "string",
+                        "description": "Співвідношення сторін (за замовчуванням 1:1)",
+                        "enum": [
+                            "1:1",
+                            "2:3",
+                            "3:2",
+                            "3:4",
+                            "4:3",
+                            "4:5",
+                            "5:4",
+                            "9:16",
+                            "16:9",
+                            "21:9",
+                        ],
+                        "default": "1:1",
+                    },
+                },
+                "required": ["prompt"],
+            },
+        }
+    ]
+}
+
+# Tool definition for image editing (uses a replied image as context)
+EDIT_IMAGE_TOOL_DEFINITION = {
+    "function_declarations": [
+        {
+            "name": "edit_image",
+            "description": (
+                "Редагує існуюче зображення за інструкцією. "
+                "ЗАВЖДИ викликай цей інструмент, якщо користувач відповів на фото і описав зміну, — не відмовляй текстом. "
+                "Ліміти перевіряє сервер; якщо перевищено, інструмент поверне відповідь. "
+                "Працює українською та англійською."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": (
+                            "Інструкція до редагування (що додати/змінити/прибрати, стиль, деталі)."
                         ),
                     },
                     "aspect_ratio": {

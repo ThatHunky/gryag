@@ -2,6 +2,11 @@
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+exclude = ["tests*", "docs*", "scripts*"]
+
 [project]
 name = "gryag"
 version = "0.1.0"
@@ -45,21 +50,18 @@ gryag = "app.main:run"
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
+pythonpath = ["."]  # Add repo root to sys.path for imports
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-asyncio_mode = "auto"
 
-# Coverage settings
+# Coverage settings (temporarily disabled - re-enable after confirming pytest-cov works)
 addopts = """
     -ra
     --strict-markers
     --strict-config
-    --cov=app
-    --cov-report=term-missing:skip-covered
-    --cov-report=html
-    --cov-report=xml
 """
+# To re-enable coverage: add --cov=app --cov-report=term-missing:skip-covered --cov-report=html --cov-report=xml
 
 # Markers for test categorization
 markers = [
@@ -67,6 +69,7 @@ markers = [
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
     "e2e: marks tests as end-to-end tests",
+    "asyncio: marks tests as async (auto-used by pytest-asyncio)",
 ]
 
 [tool.coverage.run]

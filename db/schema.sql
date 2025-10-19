@@ -6,6 +6,11 @@ CREATE TABLE IF NOT EXISTS messages (
     chat_id INTEGER NOT NULL,
     thread_id INTEGER,
     user_id INTEGER,
+    -- External IDs stored as text to avoid precision loss in JSON or clients
+    external_message_id TEXT,
+    external_user_id TEXT,
+    reply_to_external_message_id TEXT,
+    reply_to_external_user_id TEXT,
     role TEXT NOT NULL CHECK(role IN ('user', 'model', 'system')),
     text TEXT,
     media TEXT,

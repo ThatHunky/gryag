@@ -280,14 +280,61 @@ async def currency_tool(params: dict[str, Any]) -> str:
     Currency tool function for GRYAG bot.
 
     Provides currency conversion and exchange rate information.
+    Throttled: 20 requests/hour + 15 second cooldown per user.
 
     Args:
         params: Tool parameters containing conversion details or rate request
+                '_user_id' (internal): User ID for throttling
+                '_feature_limiter' (internal): FeatureRateLimiter instance
 
     Returns:
         JSON string with currency data or error
     """
     action = params.get("action", "convert").lower()
+
+    # Extract throttling metadata
+    user_id = params.get("_user_id")
+    feature_limiter = params.get("_feature_limiter")
+
+    # Check throttling if enabled
+    if user_id and feature_limiter:
+        from app.config import Settings
+        settings = Settings()
+
+        if settings.enable_feature_throttling:
+            # Check rate limit
+            allowed, retry_after, should_show_error = await feature_limiter.check_rate_limit(
+                user_id=user_id,
+                feature="currency",
+                limit_per_hour=settings.currency_limit_per_hour,
+            )
+
+            if not allowed and should_show_error:
+                minutes = retry_after // 60
+                return json.dumps({
+                    "error": f"⏱ Ліміт конвертацій валют вичерпано. Спробуй за {minutes} хв.",
+                    "throttled": True,
+                    "retry_after_seconds": retry_after,
+                })
+            elif not allowed:
+                # Silently throttled
+                return json.dumps({"throttled": True, "silent": True})
+
+            # Check cooldown
+            allowed, retry_after, should_show_error = await feature_limiter.check_cooldown(
+                user_id=user_id,
+                feature="currency",
+            )
+
+            if not allowed and should_show_error:
+                return json.dumps({
+                    "error": f"⏱ Почекай {retry_after} секунд перед наступною конвертацією.",
+                    "throttled": True,
+                    "retry_after_seconds": retry_after,
+                })
+            elif not allowed:
+                # Silently throttled
+                return json.dumps({"throttled": True, "silent": True})
 
     try:
         if tool_logger:

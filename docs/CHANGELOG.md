@@ -4,6 +4,349 @@ All notable changes to gryag's memory, context, and learning systems.
 
 ## [Unreleased]
 
+### 2025-10-21 — Facts Pagination with Inline Buttons
+
+**Summary**: Improved `/gryagfacts` command with 5 facts per page (down from 20) and inline button navigation instead of text commands.
+
+**Problem**: Fact messages were insanely long (20 facts per page), and users had to type commands like `/gryagfacts 2` to navigate.
+
+**Changes**:
+1. **Reduced page size**: 20 → 5 facts per page for better readability
+2. **Inline buttons**: "◀️ Попередня" and "Наступна ▶️" buttons for navigation
+3. **In-place updates**: Message edits instead of new messages (no spam)
+4. **Callback handler**: `facts_pagination_callback` processes button clicks
+
+**User Experience**:
+- Before: 20 facts, type `/gryagfacts 2` to paginate
+- After: 5 facts, click buttons to navigate seamlessly
+
+**Technical Details**:
+- Callback data format: `facts:{user_id}:{chat_id}:{page}:{fact_type}[:v]`
+- Works with fact type filters (`/gryagfacts personal`)
+- Verbose mode supported with buttons
+- Type-safe with `InaccessibleMessage` guard
+
+**Files modified**:
+- `app/handlers/profile_admin.py` - Pagination buttons + callback handler
+- `docs/features/FACTS_PAGINATION_WITH_BUTTONS.md` - Complete documentation
+
+**Verification**: Test with `/gryagfacts` in production (requires >5 facts to see buttons)
+
+---
+
+### 2025-10-21 — Context Formatting Improvements
+
+**Summary**: Fixed user ID truncation in context messages and increased field length limits for better user identification.
+
+**Problem**: User IDs were being truncated to last 6 digits (e.g., `Name#831570` instead of `Name#831570515`), causing confusion and potential collisions.
+
+**Changes**:
+1. **Full user IDs in compact format**: Changed `parse_user_id_short()` to return full IDs instead of last 6 digits
+2. **Increased metadata limits**: Names/usernames 60→100 chars, other fields 80→120 chars
+3. **Simplified collision detection**: Removed complex suffix logic (no longer needed with full IDs)
+4. **New config option**: `COMPACT_FORMAT_USE_FULL_IDS=true` (default) for full ID display
+
+**Impact**:
+- Token cost: ~8-15 extra tokens per message (minimal)
+- Benefit: Eliminates confusion, prevents collisions, better debugging
+- Status: Fully backward compatible
+
+**Files modified**:
+- `app/services/conversation_formatter.py` - Full ID formatting
+- `app/services/context_store.py` - Increased truncation limits
+- `app/config.py` - New configuration option
+- `docs/fixes/context-formatting-improvements.md` - Complete documentation
+
+**Verification**: Run `pytest tests/unit/test_conversation_formatter.py` (tests need updating)
+
+---
+
+### 2025-10-21 — Documentation Cleanup from Root
+
+Summary:
+- **Moved 6 documentation files from repository root to proper `docs/` subdirectories**
+- Root directory now complies with file organization rules from `AGENTS.md`
+- Only allowed files remain at root: `README.md`, `AGENTS.md`, and configuration files
+
+Details:
+- Enforces strict file organization policy: no documentation at root except README/AGENTS
+- All phase reports → `docs/phases/`
+- All improvement summaries → `docs/other/`
+- All guides → `docs/guides/`
+
+Files Moved:
+- `IMPLEMENTATION_COMPLETE.md` → `docs/phases/IMPLEMENTATION_COMPLETE.md`
+- `IMPLEMENTATION_REPORT_PHASE_3.md` → `docs/phases/IMPLEMENTATION_REPORT_PHASE_3.md`
+- `UNIVERSAL_BOT_IMPLEMENTATION_SUMMARY.md` → `docs/phases/UNIVERSAL_BOT_IMPLEMENTATION_SUMMARY.md`
+- `IMPROVEMENTS.md` → `docs/other/IMPROVEMENTS.md` (not under version control, used `mv`)
+- `QOL_IMPROVEMENTS_SUMMARY.md` → `docs/other/QOL_IMPROVEMENTS_SUMMARY.md`
+- `CONTRIBUTING.md` → `docs/guides/CONTRIBUTING.md`
+
+Files Changed:
+- `docs/README.md` — added changelog entry for cleanup
+- `docs/CHANGELOG.md` — this entry
+
+Verification:
+```bash
+# Should return empty (only README.md and AGENTS.md allowed)
+ls *.md 2>/dev/null | grep -v -E "^(README|AGENTS).md$"
+
+# Verify files are in correct locations
+test -f docs/phases/IMPLEMENTATION_COMPLETE.md && \
+test -f docs/phases/IMPLEMENTATION_REPORT_PHASE_3.md && \
+test -f docs/phases/UNIVERSAL_BOT_IMPLEMENTATION_SUMMARY.md && \
+test -f docs/other/IMPROVEMENTS.md && \
+test -f docs/other/QOL_IMPROVEMENTS_SUMMARY.md && \
+test -f docs/guides/CONTRIBUTING.md && \
+echo "✅ All files moved correctly"
+```
+
+### 2025-10-19 — Image Quota Increased to 3/day
+
+Summary:
+- **Increased daily image generation limit from 1 to 3** for normal users (admins still unlimited)
+- Quota is **only consumed on successful generation** - failures don't count against the limit
+- Better user experience with more generous allowance while maintaining cost control
+
+Details:
+- Updated default `IMAGE_GENERATION_DAILY_LIMIT` from 1 to 3 in `app/config.py`
+- Updated service initialization default in `app/services/image_generation.py`
+- Quota increment happens **only after** successful image extraction from Gemini response
+- Failed generations (errors, safety blocks, API timeouts, parsing failures) do **not** decrement quota
+- This prevents users from losing quota due to temporary issues or content policy blocks
+
+Files Changed:
+- `app/config.py` — changed default from 1 to 3, updated comment
+- `app/services/image_generation.py` — updated `__init__` default parameter and docstring
+- `.env.example` — updated to 3, added comment about failure handling
+- `docs/features/IMAGE_GENERATION.md` — updated configuration section with quota behavior explanation
+- `docs/README.md` — added entry to recent changes
+- `docs/CHANGELOG.md` — this entry
+
+Cost Impact:
+- Previous: ~$0.04/user/day max (1 image × $0.04)
+- Current: ~$0.12/user/day max (3 images × $0.04)
+- For 100 active users: $12/day = $360/month (up from $120/month)
+- Still reasonable for a small-to-medium bot deployment
+
+User Experience:
+- Before: 1 image/day felt too restrictive, users couldn't experiment
+- After: 3 images/day allows for iteration (generate → refine → final version)
+- Failed attempts don't waste quota → less frustration
+
+Technical Details:
+The quota increment logic (already correct, verified not changed):
+1. Check quota before generation
+2. Generate image via Gemini API
+3. Extract image bytes from response
+4. **Only if bytes successfully extracted** → increment quota
+5. Any exception → quota NOT incremented (user can retry)
+
+Verification:
+- Check config: `grep "IMAGE_GENERATION_DAILY_LIMIT" app/config.py` → should show 3
+- Check env: `cat .env.example | grep IMAGE_GENERATION_DAILY_LIMIT` → should show 3
+- Test: Request image, let it fail due to safety → check quota (should not increment)
+
+### 2025-10-19 — Image Edit Tool Improvements (UX Enhancement)
+
+Summary:
+- **Enhanced image editing UX** with three major improvements: photorealistic generation by default, smart image finding without requiring reply, and automatic aspect ratio preservation.
+- Users can now naturally request edits ("гряг прибери напис з картинки") without replying to the image message.
+- Bot searches recent message history (last 5 messages) to find images automatically.
+- Original image aspect ratios are detected and preserved in edited versions.
+- **Bot now translates all image prompts to ENGLISH** for significantly better results with image generation models.
+
+Details:
+1. **Photorealistic by default**: Updated system prompt and tool descriptions to generate photorealistic images (photos) by default unless user specifies another style (cartoon, illustration, painting). Added keywords like "photorealistic", "photo", "realistic photography" to prompts.
+
+2. **Smart image finding**: Enhanced `edit_image_tool` to search `_RECENT_CONTEXT` cache when no direct reply is present. Search algorithm: (a) try reply message first, (b) search backwards through last 5 cached messages, (c) decode base64 `inline_data` from `media_parts`, (d) return helpful error if no image found.
+
+3. **Automatic aspect ratio preservation**: Added PIL-based dimension detection. Calculates ratio (width/height) and maps to closest supported aspect ratio (1:1, 16:9, 9:16, 4:3, 3:4, 2:3, 3:2, 4:5, 5:4, 21:9). Removed manual `aspect_ratio` parameter from tool definition.
+
+4. **English prompts**: Updated both `generate_image` and `edit_image` tool definitions to instruct bot to ALWAYS translate user requests to English when writing prompts. Image models work significantly better with English descriptions. Bot automatically translates "прибери напис з картинки" → "remove text from image", "намалюй кота" → "photorealistic photo of a cat", etc.
+
+Files Changed:
+- `app/persona.py` — updated tool descriptions to emphasize photorealistic generation and smart image finding
+- `app/services/image_generation.py` — updated `GENERATE_IMAGE_TOOL_DEFINITION` and `EDIT_IMAGE_TOOL_DEFINITION` with new descriptions, removed aspect_ratio parameter from edit tool
+- `app/handlers/chat_tools.py` — rewrote `edit_image_tool` function with image search logic and aspect ratio detection
+- `app/handlers/chat.py` — updated fallback edit logic to not require `reply_context`, added null checks for tool callbacks
+- `docs/fixes/IMAGE_EDIT_IMPROVEMENTS.md` — detailed implementation documentation
+
+User Experience:
+- Before: "Тю, ти ж не відповів на саме фото, яке треба редагувати..."
+- After: Bot finds image from recent history and edits it naturally
+- Aspect ratios preserved: 16:9 landscape stays 16:9, 9:16 portrait stays 9:16
+- Photorealistic style by default (unless user asks for cartoon, illustration, etc.)
+
+Configuration:
+- `_RECENT_CONTEXT` cache: last 5 messages per chat/thread with 1-hour TTL
+- Aspect ratio fallback: 1:1 if detection fails (with warning in logs)
+- Admin users still bypass quotas (unchanged)
+
+Verification:
+- Manual: Send image, ask "гряг прибери напис з картинки" without replying
+- Check logs: `grep "Found image in recent history" logs/gryag.log`
+- Check logs: `grep "Detected aspect ratio" logs/gryag.log`
+
+### 2025-10-19 — Video & Sticker Context in Compact Format (IMPLEMENTED)
+
+Summary:
+- **Implemented** fix for missing videos and stickers in conversation history when using compact format.
+- Bot can now "see" and reference videos, stickers, and other media from previous messages in the conversation.
+- Includes proper media type descriptions ([Video], [Sticker], [Image]) instead of generic [Media].
+- **Media limit optimization**: Historical media limited to 5 items by default (configurable via `GEMINI_MAX_MEDIA_ITEMS_HISTORICAL`), but **reply message media is ALWAYS included** when replying to older messages.
+- **Video limiting**: Maximum 1 video included to prevent Gemini API errors (configurable via `GEMINI_MAX_VIDEO_ITEMS`). Videos over limit replaced with text descriptions from bot's previous responses.
+
+Details:
+- **Phase 1 (Critical Fix)**: Modified `format_for_gemini_compact()` to collect and return `historical_media` array from immediate and recent context. Chat handler now includes historical media with 3-tier priority: (1) current message media, (2) reply message media (always included), (3) historical media up to limit (default 5).
+- **Phase 2 (Media Descriptions)**: Fixed `describe_media()` kind matching (changed `"photo"` to `"image"`), added sticker detection for WebP and WebM mimes. Updated `format_history_compact()` to use `describe_media()` instead of generic "[Media]" counter.
+- **Phase 4 (Debug Logging)**: Added media type tracking after `build_media_parts()` call, logs mime type distribution for current message.
+- **Phase 7 (Telemetry)**: Added counters `context.historical_media_included`, `context.historical_media_dropped`, `context.media_limit_exceeded`.
+- **Phase 8 (Video Limiting)**: Added `GEMINI_MAX_VIDEO_ITEMS` setting (default 1) to limit total videos. Videos over limit are replaced with text descriptions retrieved from bot's previous responses about those videos. Added `_get_video_description_from_history()` helper to fetch descriptions from recent conversation history.
+- **Testing**: 25 unit tests in `tests/unit/test_video_sticker_context.py`, all passing.
+
+Configuration:
+- `GEMINI_MAX_MEDIA_ITEMS=28` - Total media limit (Gemini API constraint)
+- `GEMINI_MAX_MEDIA_ITEMS_HISTORICAL=5` - Historical media limit (default 5, set to 0 to disable)
+- `GEMINI_MAX_VIDEO_ITEMS=1` - Video limit (NEW, default 1, recommended) - prevents Gemini API errors
+- Reply message media bypasses historical limit and is always included (unless video over limit → description used)
+
+Root Causes Fixed:
+1. Compact format dropped historical media (only rendered text-only history)
+2. Generic media descriptions showed "[Media]" instead of specific types
+3. Kind matching mismatch (`describe_media()` checked "photo" but code used "image")
+4. Multiple videos caused Gemini API errors (PROHIBITED_CONTENT, empty responses)
+
+Files Changed:
+- `app/config.py` — added `gemini_max_media_items_historical` (default 5) and `gemini_max_video_items` (default 1)
+- `app/services/context/multi_level_context.py` — `format_for_gemini_compact()` now collects and returns `historical_media` array, includes token counting for historical media
+- `app/handlers/chat.py` — includes historical media with 3-tier priority (current → reply → historical), limit enforcement with separate historical and video limits, video description fallback via `_get_video_description_from_history()`, added media type debug logging, added telemetry counters
+- `app/services/conversation_formatter.py` — fixed `describe_media()` kind matching and sticker detection, updated `format_history_compact()` to use `describe_media()` with kind inference from mime type
+- `app/services/gemini.py` — added `GeminiContentBlockedError` exception for PROHIBITED_CONTENT blocks, improved logging for empty responses
+- `tests/unit/test_video_sticker_context.py` — comprehensive unit tests (25 tests) for media descriptions, historical media collection, limit enforcement, priority ordering, telemetry
+- `.env`, `.env.example` — documented `GEMINI_MAX_MEDIA_ITEMS_HISTORICAL` and `GEMINI_MAX_VIDEO_ITEMS` settings
+- `docs/features/VIDEO_STICKER_CONTEXT.md` — feature documentation with video limiting explanation, examples, debugging, and verification steps
+- `docs/plans/VIDEO_STICKER_CONTEXT_FIX_PLAN.md` — original implementation plan (reference)
+
+Impact:
+- Token cost: ~1,290 tokens for historical media (5 items × 258, reduced from 7,224)
+- Video limit: 1 video max prevents Gemini API errors (empty responses, PROHIBITED_CONTENT blocks)
+- Reply media always included (ensures context when replying to older messages with videos/images)
+- Media limit: 28 items max total (Gemini Flash 2.0 has 32 limit, we use 28 for safety)
+- Priority: Current > Reply > Historical (up to 5), videos limited to 1 total
+- Description fallback: Videos over limit replaced with bot's previous descriptions
+
+Verification:
+- Run tests: `pytest tests/unit/test_video_sticker_context.py -v` (25 passed)
+- Check feature doc: `cat docs/features/VIDEO_STICKER_CONTEXT.md`
+- Integration test: Send video in chat, ask bot about it 5 messages later, OR reply to old message with video
+
+### 2025-10-19 — Plan: Fix Missing Videos and Stickers in Message Context
+
+Summary:
+- Identified root cause: Compact conversation format drops historical media (videos, stickers) from context
+- Bot can only see current message media, not videos/stickers from previous messages in conversation
+- Created comprehensive 4-phase plan to fix the issue
+
+Details:
+- **Root Cause #1**: Compact format renders history as text only, actual media parts from historical messages are NOT included
+- **Root Cause #2**: Generic media descriptions ("[Media]" instead of "[Video]" or "[Sticker]")
+- **Root Cause #3**: Kind matching mismatch in describe_media() (checks "photo" but code uses "image")
+- Plan file: `docs/plans/VIDEO_STICKER_CONTEXT_FIX_PLAN.md`
+- Priority: HIGH (critical for compact format users)
+- Estimated effort: 4-6 hours implementation + 2 hours testing
+
+Proposed Fix (Phase 1 - High Priority):
+- Update `format_for_gemini_compact()` to return `historical_media` array
+- Include historical media in `user_parts` when using compact format
+- Respect `GEMINI_MAX_MEDIA_ITEMS` limit (prioritize current > recent > older)
+- Expected token impact: +258 tokens per historical message with media (still within budget)
+
+Verification:
+- Read the plan: `cat docs/plans/VIDEO_STICKER_CONTEXT_FIX_PLAN.md`
+- Check for implementation: `git log --oneline --grep="video.*sticker.*context"`
+
+### 2025-10-19 — Reply Chain Context Inclusion (IMPLEMENTED)
+
+Summary:
+- **Implemented** automatic inclusion of replied-to message content in Gemini context for both JSON and Compact formats.
+- Ensures the model always sees the quoted/replied message text (and media when useful) without user-facing changes.
+- Adds inline reply snippets `[↩︎ Username: excerpt]` for compact readability and injects missing replies into history.
+
+Details:
+- **JSON Format**: Always sets `reply_context_for_history` when a reply exists; adds inline `[↩︎ Відповідь на: excerpt]` part after metadata in `user_parts`.
+- **Compact Format**: Extracts `reply_excerpt` and passes to `format_message_compact()`, which prepends `[↩︎ Username: excerpt]` to message text.
+- **History Injection**: If replied message is not in recent history, injects a synthetic user message with metadata + text + media (up to 2 media items).
+- **Configuration**: `INCLUDE_REPLY_EXCERPT=true` (default), `REPLY_EXCERPT_MAX_CHARS=200` (default, capped excerpt length).
+- **Telemetry**: Increments `context.reply_included_text` (when text excerpt added) and `context.reply_included_media` (when media injected).
+
+Files Changed:
+- `app/config.py` — added `include_reply_excerpt` (bool) and `reply_excerpt_max_chars` (int) settings
+- `app/services/conversation_formatter.py` — added `reply_excerpt` parameter to `format_message_compact()`, renders excerpts from metadata in `format_history_compact()`
+- `app/handlers/chat.py` — always sets `reply_context_for_history` when reply exists, adds inline reply snippet to `user_parts`, extracts reply info for compact format
+- `tests/unit/test_reply_context.py` — comprehensive unit tests for all paths (formatter, config, sanitization)
+
+Verification:
+- Run unit tests: `python -m pytest tests/unit/test_reply_context.py -v`
+- Manual test: Reply to an old message (outside recent context) and observe logs for "Added inline reply excerpt" and "Injected reply context into history"
+- Check Gemini payload preview in DEBUG logs contains the `[↩︎ ...]` snippet
+
+### 2025-10-19 — Plan: Reply Chain Context Inclusion
+
+Summary:
+- Documented a fix to always include replied-to message content as context for Gemini.
+- Covers both JSON and Compact formats with token-safe excerpts and optional media injection.
+
+Details:
+- Plan file: `docs/plans/REPLY_CHAIN_CONTEXT_FIX_PLAN.md`
+- Affects: `app/handlers/chat.py`, `app/services/conversation_formatter.py` (optional), `app/config.py` (optional), tests.
+
+Verification:
+- Read the plan and run grep: `rg "REPLY_CHAIN_CONTEXT_FIX_PLAN"`.
+
+### 2025-10-19 — Multimodal Context Efficiency & Tools
+
+Summary:
+- More efficient media handling: downscales large images to JPEG (quality 80, max 1600px) before inlining to reduce request size and errors.
+- Safer payloads: skips oversize inline media (>20MB) with clear logs; avoids API failures.
+- Current-message media cap: trims excessive attachments in the triggering message using `GEMINI_MAX_MEDIA_ITEMS_CURRENT` (default 8), and injects a short summary note when trimming occurs.
+- New tools: `describe_media` and `transcribe_audio` let the model proactively get a concise image description or Ukrainian audio transcript from the current/replied message.
+
+Files Changed:
+- app/services/media.py — added image downscaling/compression path
+- app/services/gemini.py — defensive oversize filtering in `build_media_parts`
+- app/handlers/chat.py — limit current message media and add summary note when trimmed
+- app/handlers/chat_tools.py — added `describe_media` and `transcribe_audio` tool definitions + callbacks
+- app/config.py — new setting `GEMINI_MAX_MEDIA_ITEMS_CURRENT` (default 8)
+
+Verification:
+- Send a high‑res image and check logs for "Collected photo" showing JPEG and reduced bytes.
+- Attach >10 images; logs should show trimming and the user parts include a note about omitted attachments.
+- Tool smoke tests in chat: ask the model to call `describe_media` on a replied photo, or `transcribe_audio` on a voice note.
+
+
+### 2025-10-19 — External ID Indexes, Retention Count, Backfill Script
+
+Summary:
+- Added SQLite indexes for fast lookups by external IDs to prevent full scans on `delete_message_by_external_id` and future features.
+- `ContextStore.prune_old()` now returns the number of deleted messages; background pruner logs this count for observability.
+- Added migration SQL to backfill new external ID columns from legacy JSON metadata.
+
+Details:
+- Schema: `db/schema.sql` now creates the following indexes (idempotent):
+  - `idx_messages_chat_external_msg (chat_id, external_message_id)`
+  - `idx_messages_chat_external_user (chat_id, external_user_id)`
+  - `idx_messages_chat_reply_external_msg (chat_id, reply_to_external_message_id)`
+  - `idx_messages_chat_reply_external_user (chat_id, reply_to_external_user_id)`
+- Store: `ContextStore.prune_old(retention_days) -> int` returns deleted count; unaffected APIs remain backward compatible.
+- Main: Background retention pruner logs `deleted_messages` and `retention_days` in structured fields.
+- Script: `scripts/migrations/backfill_external_ids.sql` performs safe idempotent backfill of `external_*` columns from `media.meta` JSON.
+
+Verification:
+- Run unit tests for Phase A/B: `.venv/bin/python -m pytest tests/unit/test_external_ids.py tests/unit/test_retention.py -q`
+- Check indexes exist: `sqlite3 gryag.db ".schema messages" | grep external_`
+- Backfill on existing DB: `sqlite3 gryag.db < scripts/migrations/backfill_external_ids.sql`
+
 ### 2025-10-17 - Compact Conversation Format Implementation (Phase 6)
 
 **Summary**: Implemented compact plain text conversation format achieving 70-80% token reduction while maintaining context quality.
@@ -74,6 +417,51 @@ COMPACT_FORMAT_MAX_HISTORY=50             # Higher due to efficiency
 - Track: token usage, response quality, error rate
 
 ---
+
+### 2025-10-19 — Phase C Start: Tool Registry Unification
+
+Summary:
+- Centralized Gemini tool definitions and callbacks in a single registry to remove duplication and enforce naming consistency across the codebase.
+
+Details:
+- Added image tool definitions to the shared builder: `app/handlers/chat_tools.py` now includes `GENERATE_IMAGE_TOOL_DEFINITION` and `EDIT_IMAGE_TOOL_DEFINITION` when `ENABLE_IMAGE_GENERATION=true`.
+- `app/handlers/chat.py` now uses registry builders:
+  - `build_tool_definitions(settings)` to assemble all tool definitions
+  - `build_tool_callbacks(...)` to assemble callbacks with built‑in usage tracking
+  - Replaced custom `search_messages` implementation with `create_search_messages_tool()`
+- Image tool callbacks remain in `chat.py` (need Bot + message context) but now integrate with registry tracking.
+
+Verification:
+- Grep usage: `rg "build_tool_definitions\(|build_tool_callbacks\(" app/handlers/chat.py`
+- Run a chat flow that triggers tools (e.g., `порахуй 2+2`, weather, polls) and confirm normal behavior in logs.
+
+### 2025-10-19 — Phase C: Registry Tests + Semantic Recall Facts
+
+Summary:
+- Added unit tests for the tool registry and search_messages callback.
+- Implemented semantic ranking in `recall_facts` when embeddings are available; falls back to substring matching otherwise.
+
+Details:
+- Tests: `tests/unit/test_chat_tools.py` validates tool definition toggles, usage tracking, and search_messages formatting; `tests/unit/test_memory_tools.py` validates semantic ranking preference.
+- Code: `app/services/tools/memory_tools.py` now accepts optional `gemini_client` and uses cosine similarity against stored fact embeddings when `search_query` is provided and embeddings exist.
+- Registry: `build_tool_callbacks()` now passes `gemini_client` into `recall_facts_tool`.
+
+Verification:
+- `.venv/bin/python -m pytest tests/unit/test_chat_tools.py tests/unit/test_memory_tools.py -q` → both files pass.
+- Quick suite for recent work: `.venv/bin/python -m pytest tests/unit/test_external_ids.py tests/unit/test_retention.py tests/unit/test_chat_tools.py tests/unit/test_memory_tools.py -q` → 9 passed
+
+### 2025-10-19 — Phase C: Image Tools moved to Registry
+
+Summary:
+- Moved `generate_image` and `edit_image` callbacks into the centralized registry. Handlers now provide runtime dependencies (`bot`, `message`, `user_id`, `image_gen_service`) to the registry, which wires callbacks and usage tracking.
+
+Details:
+- Code: `app/handlers/chat_tools.py` accepts optional `user_id`, `bot`, `message`, and `image_gen_service` and registers image callbacks when enabled. `app/handlers/chat.py` now delegates image tools to the registry and passes these parameters.
+
+Verification:
+- Grep: `rg "generate_image|edit_image" app/handlers/chat.py app/handlers/chat_tools.py`
+- Run a real chat flow for image generation/edit and confirm callbacks execute and usage is tracked.
+
 
 ### 2025-10-16 - Facts and Episodes System Improvements
 

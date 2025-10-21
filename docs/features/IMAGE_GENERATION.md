@@ -31,7 +31,7 @@ Add to `.env`:
 # Image Generation
 ENABLE_IMAGE_GENERATION=true  # Enable/disable the feature
 IMAGE_GENERATION_API_KEY=your_separate_key_here  # Optional: Use separate account for images
-IMAGE_GENERATION_DAILY_LIMIT=1  # Images per user per day (1-10)
+IMAGE_GENERATION_DAILY_LIMIT=3  # Images per user per day (1-10, default: 3)
 ```
 
 **Note**: If `IMAGE_GENERATION_API_KEY` is not set, the service will fall back to using `GEMINI_API_KEY`. This allows you to:
@@ -39,7 +39,10 @@ IMAGE_GENERATION_DAILY_LIMIT=1  # Images per user per day (1-10)
 - Isolate image generation API limits from text generation
 - Control costs more granularly
 
-Admins (set via `ADMIN_USER_IDS`) have unlimited image generation.
+**Quota behavior**:
+- Quota is **only consumed on successful image generation**
+- Failed generations (errors, safety blocks, API issues) do **not** count against the limit
+- Admins (set via `ADMIN_USER_IDS`) have unlimited image generation
 
 ### Database Schema
 

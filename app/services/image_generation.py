@@ -45,7 +45,7 @@ class ImageGenerationService:
         self,
         api_key: str,
         db_path: Path | str,
-        daily_limit: int = 1,
+        daily_limit: int = 3,
         admin_user_ids: list[int] | None = None,
     ):
         """
@@ -54,7 +54,7 @@ class ImageGenerationService:
         Args:
             api_key: Google Gemini API key
             db_path: Path to SQLite database
-            daily_limit: Maximum images per user per day (default: 1)
+            daily_limit: Maximum images per user per day (default: 3)
             admin_user_ids: List of admin user IDs who bypass limits
         """
         self.client = genai.Client(api_key=api_key)
@@ -264,9 +264,7 @@ class ImageGenerationService:
                             image_bytes = part.inline_data.data
                             break
             except Exception as parse_exc:  # pragma: no cover - defensive
-                self.logger.warning(
-                    "Failed to parse image from response: %s", parse_exc
-                )
+                self.logger.warning(f"Failed to parse image from response: {parse_exc}")
 
             if not image_bytes:
                 self.logger.error("No image returned in response")
@@ -341,10 +339,10 @@ GENERATE_IMAGE_TOOL_DEFINITION = {
         {
             "name": "generate_image",
             "description": (
-                "Генерує зображення з текстового опису. "
+                "Генерує ФОТОРЕАЛІСТИЧНЕ зображення (фото) з текстового опису, якщо користувач не вказав інший стиль (малюнок, ілюстрація, мультик). "
                 "Викликай ЦЕЙ інструмент КОЖНОГО РАЗУ, коли користувач просить намалювати/згенерувати картинку або фото. "
                 "Не відмовляй текстом і не посилайся на ліміти — сервер сам перевіряє ліміти і поверне відповідь. "
-                "Працює з українською та англійською мовами."
+                "ВАЖЛИВО: Завжди пиши prompt АНГЛІЙСЬКОЮ мовою для кращого результату."
             ),
             "parameters": {
                 "type": "object",
@@ -352,9 +350,12 @@ GENERATE_IMAGE_TOOL_DEFINITION = {
                     "prompt": {
                         "type": "string",
                         "description": (
-                            "Детальний опис зображення для генерації. "
-                            "Чим детальніше - тим краще результат. "
-                            "Опиши стиль, освітлення, деталі, композицію."
+                            "Detailed image description IN ENGLISH for generation. "
+                            "BY DEFAULT generate PHOTOREALISTIC images (like photos) unless user asks for different style. "
+                            "For photos use phrases like 'photorealistic', 'photo', 'realistic photography', 'cinematic lighting'. "
+                            "More detail = better result. "
+                            "Describe style, lighting, details, composition. "
+                            "ALWAYS write this prompt in ENGLISH, even if user's request was in Ukrainian - translate their request to English."
                         ),
                     },
                     "aspect_ratio": {
@@ -388,9 +389,11 @@ EDIT_IMAGE_TOOL_DEFINITION = {
             "name": "edit_image",
             "description": (
                 "Редагує існуюче зображення за інструкцією. "
-                "ЗАВЖДИ викликай цей інструмент, якщо користувач відповів на фото і описав зміну, — не відмовляй текстом. "
+                "ЗАВЖДИ викликай цей інструмент, якщо користувач описав зміну до фото (навіть якщо не відповів на фото безпосередньо). "
+                "Інструмент сам знайде останнє фото в історії розмови, якщо користувач не відповів на конкретне. "
+                "Автоматично зберігає оригінальні пропорції зображення. "
                 "Ліміти перевіряє сервер; якщо перевищено, інструмент поверне відповідь. "
-                "Працює українською та англійською."
+                "ВАЖЛИВО: Завжди пиши prompt АНГЛІЙСЬКОЮ мовою для кращого результату."
             ),
             "parameters": {
                 "type": "object",
@@ -398,25 +401,10 @@ EDIT_IMAGE_TOOL_DEFINITION = {
                     "prompt": {
                         "type": "string",
                         "description": (
-                            "Інструкція до редагування (що додати/змінити/прибрати, стиль, деталі)."
+                            "Edit instruction IN ENGLISH (what to add/change/remove, style, details). "
+                            "BY DEFAULT preserve PHOTOREALISTIC style of original unless user asks for different style. "
+                            "ALWAYS write this prompt in ENGLISH, even if user's request was in Ukrainian - translate their request to English."
                         ),
-                    },
-                    "aspect_ratio": {
-                        "type": "string",
-                        "description": "Співвідношення сторін (за замовчуванням 1:1)",
-                        "enum": [
-                            "1:1",
-                            "2:3",
-                            "3:2",
-                            "3:4",
-                            "4:3",
-                            "4:5",
-                            "5:4",
-                            "9:16",
-                            "16:9",
-                            "21:9",
-                        ],
-                        "default": "1:1",
                     },
                 },
                 "required": ["prompt"],

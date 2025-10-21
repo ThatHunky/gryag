@@ -59,8 +59,35 @@ def _get_response(
     **kwargs: Any,
 ) -> str:
     """Get response from PersonaLoader if available, otherwise use default."""
+    # If persona loader is available, inject bot-related variables (if present)
     if persona_loader is not None:
+        try:
+            persona = getattr(persona_loader, "persona", None)
+            bot_name = getattr(persona, "name", None) if persona is not None else None
+            bot_display = (
+                getattr(persona, "display_name", None) if persona is not None else None
+            )
+            # Do not override variables explicitly provided by the caller
+            if bot_name and "bot_name" not in kwargs:
+                kwargs["bot_name"] = bot_name
+            if bot_display and "bot_display_name" not in kwargs:
+                kwargs["bot_display_name"] = bot_display
+        except Exception:
+            LOGGER.exception(
+                "Failed to inject persona variables into response template"
+            )
+
         return persona_loader.get_response(key, **kwargs)
+
+    # No persona loader: try to format the default template with kwargs if provided
+    if kwargs:
+        try:
+            return default.format(**kwargs)
+        except KeyError:
+            LOGGER.warning(
+                "Missing variable while formatting default response for key=%s", key
+            )
+            # Fall through to return raw default
     return default
 
 
@@ -90,13 +117,14 @@ def _extract_target(message: Message) -> tuple[int, str] | None:
 
 @router.message(Command(commands=["gryagban", "ban"]))
 async def ban_user_command(
-    message: Message, settings: Settings, store: ContextStore, persona_loader: Any | None = None
+    message: Message,
+    settings: Settings,
+    store: ContextStore,
+    persona_loader: Any | None = None,
 ) -> None:
     # Support both legacy "gryagban" and dynamic "{prefix}ban"
     if not _is_admin(message, settings):
-        await message.reply(
-            _get_response("admin_only", persona_loader, ADMIN_ONLY)
-        )
+        await message.reply(_get_response("admin_only", persona_loader, ADMIN_ONLY))
         return
 
     target = _extract_target(message)
@@ -123,13 +151,14 @@ async def ban_user_command(
 
 @router.message(Command(commands=["gryagunban", "unban"]))
 async def unban_user_command(
-    message: Message, settings: Settings, store: ContextStore, persona_loader: Any | None = None
+    message: Message,
+    settings: Settings,
+    store: ContextStore,
+    persona_loader: Any | None = None,
 ) -> None:
     # Support both legacy "gryagunban" and dynamic "{prefix}unban"
     if not _is_admin(message, settings):
-        await message.reply(
-            _get_response("admin_only", persona_loader, ADMIN_ONLY)
-        )
+        await message.reply(_get_response("admin_only", persona_loader, ADMIN_ONLY))
         return
 
     target = _extract_target(message)
@@ -143,9 +172,7 @@ async def unban_user_command(
     chat_id = message.chat.id
 
     if not await store.is_banned(chat_id, target_id):
-        await message.reply(
-            _get_response("not_banned", persona_loader, NOT_BANNED)
-        )
+        await message.reply(_get_response("not_banned", persona_loader, NOT_BANNED))
         return
 
     await store.unban_user(chat_id, target_id)
@@ -165,9 +192,7 @@ async def reset_quotas_command(
 ) -> None:
     # Support both legacy "gryagreset" and dynamic "{prefix}reset"
     if not _is_admin(message, settings):
-        await message.reply(
-            _get_response("admin_only", persona_loader, ADMIN_ONLY)
-        )
+        await message.reply(_get_response("admin_only", persona_loader, ADMIN_ONLY))
         return
 
     chat_id = message.chat.id
@@ -192,15 +217,11 @@ async def reset_quotas_command(
                     break
         except Exception as e:
             LOGGER.warning(
-                "Failed to clear Redis quotas for chat %s: %s",
-                chat_id,
-                e,
+                f"Failed to clear Redis quotas for chat {chat_id}: {e}",
                 exc_info=True,
             )
 
-    await message.reply(
-        _get_response("reset_done", persona_loader, RESET_DONE)
-    )
+    await message.reply(_get_response("reset_done", persona_loader, RESET_DONE))
 
 
 @router.message(Command(commands=["gryagchatinfo", "chatinfo"]))
@@ -214,9 +235,7 @@ async def chatinfo_command(
     This helps admins discover chat IDs to configure whitelist/blacklist.
     """
     if not _is_admin(message, settings):
-        await message.reply(
-            _get_response("admin_only", persona_loader, ADMIN_ONLY)
-        )
+        await message.reply(_get_response("admin_only", persona_loader, ADMIN_ONLY))
         return
 
     chat = message.chat

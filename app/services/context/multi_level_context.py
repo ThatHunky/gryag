@@ -1045,6 +1045,7 @@ class MultiLevelContextManager:
         Returns dict with:
         - conversation_text: Plain text conversation
         - system_context: Profile/episodes (same as JSON format)
+        - historical_media: Media parts from conversation history
         - token_count: Estimated tokens
         """
         from app.services.conversation_formatter import (
@@ -1058,6 +1059,14 @@ class MultiLevelContextManager:
             all_messages.extend(context.immediate.messages)
         if context.recent:
             all_messages.extend(context.recent.messages)
+
+        # Collect media parts from all historical messages
+        historical_media = []
+        for msg in all_messages:
+            parts = msg.get("parts", [])
+            for part in parts:
+                if "inline_data" in part or "file_data" in part:
+                    historical_media.append(part)
 
         # Convert to compact format
         conversation_text = format_history_compact(all_messages, bot_name="gryag")
@@ -1094,8 +1103,16 @@ class MultiLevelContextManager:
             total_text += "\n\n" + system_context
         token_count = estimate_tokens(total_text)
 
+        # Add token count for historical media (258 per inline_data, 100 per file_uri)
+        for part in historical_media:
+            if "inline_data" in part:
+                token_count += 258
+            elif "file_data" in part:
+                token_count += 100
+
         return {
             "conversation_text": conversation_text,
             "system_context": system_context,
+            "historical_media": historical_media,
             "token_count": token_count,
         }

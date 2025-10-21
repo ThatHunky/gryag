@@ -19,44 +19,45 @@ from app.services.conversation_formatter import (
 
 
 class TestParseUserIdShort:
-    """Test user ID short format extraction."""
+    """Test user ID format extraction (now returns full IDs)."""
 
     def test_basic_user_id(self):
-        assert parse_user_id_short(123456789) == "456789"
+        assert parse_user_id_short(123456789) == "123456789"
 
     def test_short_user_id(self):
         assert parse_user_id_short(123) == "123"
 
     def test_negative_user_id(self):
-        # Chat IDs can be negative
-        assert parse_user_id_short(-987654321) == "654321"
+        # Chat IDs can be negative, returns absolute value
+        assert parse_user_id_short(-987654321) == "987654321"
 
     def test_none_user_id(self):
         assert parse_user_id_short(None) == ""
 
     def test_large_user_id(self):
-        assert parse_user_id_short(999999999999) == "999999"
+        assert parse_user_id_short(999999999999) == "999999999999"
 
 
 class TestBuildCollisionMap:
-    """Test collision handling for duplicate short IDs."""
+    """Test collision handling (simplified with full IDs)."""
 
     def test_no_collisions(self):
         user_ids = [123456, 789012, 345678]
         result = build_collision_map(user_ids)
+        # Now returns full IDs as strings
         assert result == {123456: "123456", 789012: "789012", 345678: "345678"}
 
-    def test_with_collision(self):
-        # Last 6 digits collision: 123456 and 999123456
+    def test_duplicate_user_id(self):
+        # Same user appearing multiple times - no collision
+        user_ids = [123456, 123456]
+        result = build_collision_map(user_ids)
+        assert result == {123456: "123456"}
+
+    def test_different_user_ids(self):
+        # With full IDs, no collisions possible between different users
         user_ids = [123456, 999123456]
         result = build_collision_map(user_ids)
-        # Both have same last 6 digits, should get suffixes
-        assert len(result) == 2
-        assert result[123456].startswith("123456")
-        assert result[999123456].startswith("123456")
-        # One should have 'a', other 'b'
-        values = set(result.values())
-        assert "123456a" in values or "123456b" in values
+        assert result == {123456: "123456", 999123456: "999123456"}
 
     def test_empty_list(self):
         result = build_collision_map([])
@@ -290,7 +291,8 @@ class TestFormatHistoryCompact:
         result = format_history_compact(messages)
         lines = result.split("\n")
         assert len(lines) == 2
-        assert "Alice#000123: Hello" in lines[0]
+        # Now expects full ID: "123" not "000123"
+        assert "Alice#123: Hello" in lines[0]
         assert "gryag: Hi" in lines[1]
 
     def test_conversation_with_replies(self):

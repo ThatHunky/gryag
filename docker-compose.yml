@@ -21,6 +21,7 @@ services:
       - .env
     volumes:
       - ./:/app
+      - /mnt/hdd0/gryag_backups:/mnt/hdd0/gryag_backups # Allow Docker to follow symlinks to HDD
       - ./models:/app/models # Persistent volume for local models stored in codebase
     restart: unless-stopped
     depends_on:

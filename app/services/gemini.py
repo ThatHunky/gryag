@@ -13,10 +13,22 @@ from google.genai import types
 
 from app.services import telemetry
 from app.services.embedding_cache import EmbeddingCache
+from app.services.media import MAX_INLINE_SIZE
 
 
 class GeminiError(Exception):
     """Raised when Gemini generation fails."""
+
+
+class GeminiContentBlockedError(GeminiError):
+    """Raised when Gemini blocks content due to policy violations."""
+
+    def __init__(
+        self, message: str, block_reason: str | None = None, safety_ratings: Any = None
+    ):
+        super().__init__(message)
+        self.block_reason = block_reason
+        self.safety_ratings = safety_ratings
 
 
 class GeminiClient:
@@ -97,12 +109,15 @@ class GeminiClient:
         Detect if the model supports video input.
 
         Gemma models have limited video support (YouTube URLs only via file_uri).
-        Gemini 1.5+ supports video.
+        Gemini 1.5+ and Gemini Flash models support video.
         """
         model_lower = model_name.lower()
         # Gemma supports YouTube URLs but not inline video
         if "gemma" in model_lower:
             return False  # No inline video support
+        # Gemini Flash models (2.0-based) support video
+        if "gemini" in model_lower and "flash" in model_lower:
+            return True
         # Gemini 1.5+ supports video
         if "gemini" in model_lower and ("1.5" in model_lower or "2." in model_lower):
             return True
@@ -136,9 +151,7 @@ class GeminiClient:
         if not self._tools_supported:
             if tools:
                 self._logger.info(
-                    "Function calling not supported by model %s - disabling %d tool(s)",
-                    self._model_name,
-                    len(tools),
+                    f"Function calling not supported by model {self._model_name} - disabling {len(tools)} tool(s)",
                 )
             return None
 
@@ -160,7 +173,7 @@ class GeminiClient:
             and self._search_grounding_supported
         ):
             self._search_grounding_supported = False
-            self._logger.warning("Disabling search grounding tools: %s", error_message)
+            self._logger.warning(f"Disabling search grounding tools: {error_message}")
             return True
         return False
 
@@ -176,8 +189,7 @@ class GeminiClient:
         ) and self._tools_supported:
             self._tools_supported = False
             self._logger.warning(
-                "Function calling not supported by model %s - disabling tools",
-                self._model_name,
+                f"Function calling not supported by model {self._model_name} - disabling tools",
             )
             return True
         return False
@@ -234,7 +246,7 @@ class GeminiClient:
 
             if converted_tools:
                 config_params["tools"] = converted_tools
-                self._logger.debug("Using %d function tools", len(converted_tools))
+                self._logger.debug(f"Using {len(converted_tools)} function tools")
 
         config = types.GenerateContentConfig(**config_params)
 
@@ -277,6 +289,7 @@ class GeminiClient:
         """
         parts: list[dict[str, Any]] = []
         filtered_count = 0
+        skipped_oversize = 0
 
         for item in media_items:
             # YouTube URLs or Files API references
@@ -285,7 +298,7 @@ class GeminiClient:
                 if file_uri:
                     parts.append({"file_data": {"file_uri": file_uri}})
                     if logger:
-                        logger.debug("Added file_uri media: %s", file_uri)
+                        logger.debug(f"Added file_uri media: {file_uri}")
                 continue
 
             # Regular inline data (base64 encoded)
@@ -297,15 +310,21 @@ class GeminiClient:
             if not blob or not mime:
                 continue
 
+            # Enforce inline size limit defensively
+            if size and size > MAX_INLINE_SIZE:
+                skipped_oversize += 1
+                if logger:
+                    logger.info(
+                        f"Skipping oversize media item: kind={kind} mime={mime} size={size}",
+                    )
+                continue
+
             # Filter unsupported media types
             if not self._is_media_supported(mime, kind):
                 filtered_count += 1
                 if logger:
                     logger.info(
-                        "Filtered unsupported media: mime=%s, kind=%s (model: %s)",
-                        mime,
-                        kind,
-                        self._model_name,
+                        f"Filtered unsupported media: mime={mime}, kind={kind} (model: {self._model_name})",
                     )
                 continue
 
@@ -313,19 +332,18 @@ class GeminiClient:
             parts.append({"inline_data": {"mime_type": mime, "data": data}})
             if logger:
                 logger.debug(
-                    "Added inline media: mime=%s, kind=%s, size=%d bytes, base64_len=%d",
-                    mime,
-                    kind,
-                    size,
-                    len(data),
+                    f"Added inline media: mime={mime}, kind={kind}, size={size} bytes, base64_len={len(data)}",
                 )
 
-        if filtered_count > 0 and logger:
-            logger.warning(
-                "Filtered %d unsupported media item(s) for model %s",
-                filtered_count,
-                self._model_name,
-            )
+        if logger and (filtered_count > 0 or skipped_oversize > 0):
+            if filtered_count > 0:
+                logger.warning(
+                    f"Filtered {filtered_count} unsupported media item(s) for model {self._model_name}",
+                )
+            if skipped_oversize > 0:
+                logger.warning(
+                    f"Skipped {skipped_oversize} oversize media item(s) (> {MAX_INLINE_SIZE} bytes)",
+                )
 
         return parts
 
@@ -400,7 +418,7 @@ class GeminiClient:
         except TypeError as exc:
             if system_instruction and "system_instruction" in str(exc):
                 self._system_instruction_supported = False
-                self._logger.warning("Disabling system_instruction: %s", exc)
+                self._logger.warning(f"Disabling system_instruction: {exc}")
                 use_system_instruction = False
                 system_instruction = None
                 contents = assemble(True)
@@ -425,10 +443,9 @@ class GeminiClient:
 
             if is_rate_limit:
                 self._logger.warning(
-                    "Gemini API rate limit exceeded. "
-                    "Consider: 1) Reducing context size, 2) Upgrading API plan, "
-                    "3) Adding delays between requests. Error: %s",
-                    err_text[:200],
+                    f"Gemini API rate limit exceeded. "
+                    f"Consider: 1) Reducing context size, 2) Upgrading API plan, "
+                    f"3) Adding delays between requests. Error: {err_text[:200]}",
                 )
                 # Don't retry on rate limits - let circuit breaker handle it
                 self._record_failure()
@@ -451,9 +468,8 @@ class GeminiClient:
 
             if is_media_error:
                 self._logger.error(
-                    "Gemini media processing failed: %s. "
-                    "This may be due to unsupported format or corrupted media.",
-                    err_text,
+                    f"Gemini media processing failed: {err_text}. "
+                    f"This may be due to unsupported format or corrupted media.",
                 )
 
             self._logger.exception(
@@ -582,16 +598,65 @@ class GeminiClient:
             self._logger.info(f"Tool handling attempt {attempt}")
             candidates = getattr(current_response, "candidates", None) or []
             self._logger.info(f"Found {len(candidates)} candidates in response")
+
+            # Log finish_reason and safety_ratings when 0 candidates
+            if len(candidates) == 0:
+                prompt_feedback = getattr(current_response, "prompt_feedback", None)
+                if prompt_feedback:
+                    block_reason = getattr(prompt_feedback, "block_reason", None)
+                    safety_ratings = getattr(prompt_feedback, "safety_ratings", None)
+                    self._logger.warning(
+                        f"0 candidates - prompt_feedback block_reason: {block_reason}, safety_ratings: {safety_ratings}"
+                    )
+
+                    # Raise specific exception for content blocking
+                    if block_reason:
+                        block_reason_str = str(block_reason)
+                        if "PROHIBITED_CONTENT" in block_reason_str:
+                            raise GeminiContentBlockedError(
+                                "Content blocked due to policy violation",
+                                block_reason=block_reason_str,
+                                safety_ratings=safety_ratings,
+                            )
+                else:
+                    self._logger.warning(
+                        "0 candidates and no prompt_feedback available"
+                    )
+
             function_called = False
             for candidate in candidates:
+                # Log finish_reason for each candidate
+                finish_reason = getattr(candidate, "finish_reason", None)
+                if finish_reason:
+                    self._logger.info(f"Candidate finish_reason: {finish_reason}")
+
                 content = getattr(candidate, "content", None)
-                if not content or not getattr(content, "parts", None):
-                    self._logger.info("Candidate has no content or no parts, skipping")
+                if not content:
+                    self._logger.warning("Candidate has no content attribute")
                     continue
+
                 parts = getattr(content, "parts", None)
-                self._logger.info(f"Candidate has {len(parts) if parts else 0} parts")
+                if not parts:
+                    self._logger.warning(
+                        f"Candidate content has no parts (parts={parts})"
+                    )
+                    continue
+
+                self._logger.info(f"Candidate has {len(parts)} parts")
                 parts_payload: list[dict[str, Any]] = []
                 tool_calls: list[tuple[str, dict[str, Any]]] = []
+
+                # Log what's in each part
+                for idx, part in enumerate(parts):
+                    has_text = hasattr(part, "text") and part.text is not None
+                    has_function_call = (
+                        hasattr(part, "function_call")
+                        and part.function_call is not None
+                    )
+                    self._logger.debug(
+                        f"Part {idx}: has_text={has_text}, has_function_call={has_function_call}"
+                    )
+
                 for part in content.parts:
                     function_call = getattr(part, "function_call", None)
                     if function_call:
@@ -749,6 +814,6 @@ class GeminiClient:
                         return result
                 return []
             except Exception as exc:
-                self._logger.warning("Embedding failed: %s", exc)
+                self._logger.warning(f"Embedding failed: {exc}")
                 telemetry.increment_counter("embedding_cache_misses")
                 return []

@@ -106,9 +106,7 @@ class ProfileSummarizer:
         # Check if we've hit the daily limit
         if self._daily_count >= self.settings.max_profiles_per_day:
             logger.info(
-                "Daily profile summarization limit reached (%d/%d)",
-                self._daily_count,
-                self.settings.max_profiles_per_day,
+                f"Daily profile summarization limit reached ({self._daily_count}/{self.settings.max_profiles_per_day})",
             )
             return
 
@@ -125,7 +123,7 @@ class ProfileSummarizer:
                 logger.info("No profiles need summarization")
                 return
 
-            logger.info("Found %d profiles needing summarization", len(profiles))
+            logger.info(f"Found {len(profiles)} profiles needing summarization")
 
             # Process each profile sequentially to limit memory usage
             success_count = 0
@@ -143,9 +141,7 @@ class ProfileSummarizer:
 
                 except Exception as exc:
                     logger.error(
-                        "Failed to summarize profile for user %d: %s",
-                        user_id,
-                        exc,
+                        f"Failed to summarize profile for user {user_id}: {exc}",
                         exc_info=True,
                     )
                     fail_count += 1
@@ -155,16 +151,12 @@ class ProfileSummarizer:
             telemetry.set_gauge("summarization_time_ms", elapsed_ms)
 
             logger.info(
-                "Profile summarization complete: %d success, %d failed, %dms elapsed",
-                success_count,
-                fail_count,
-                elapsed_ms,
+                f"Profile summarization complete: {success_count} success, {fail_count} failed, {elapsed_ms}ms elapsed",
             )
 
         except Exception as exc:
             logger.error(
-                "Profile summarization task failed: %s",
-                exc,
+                f"Profile summarization task failed: {exc}",
                 exc_info=True,
             )
             telemetry.increment_counter("summaries_failed")
@@ -187,7 +179,7 @@ class ProfileSummarizer:
         )
 
         if not profile:
-            logger.warning("No profile data found for user %d", user_id)
+            logger.warning(f"No profile data found for user {user_id}")
             return
 
         # Build summarization prompt
@@ -204,7 +196,7 @@ class ProfileSummarizer:
         # Skip if no facts to summarize
         total_facts = sum(len(facts) for facts in facts_by_type.values())
         if total_facts == 0:
-            logger.info("User %d has no facts to summarize", user_id)
+            logger.info(f"User {user_id} has no facts to summarize")
             return
 
         # Generate summary using Gemini
@@ -226,17 +218,12 @@ class ProfileSummarizer:
 
             elapsed_ms = int((asyncio.get_event_loop().time() - profile_start) * 1000)
             logger.info(
-                "Summarized profile for user %d: %d facts, %dms",
-                user_id,
-                total_facts,
-                elapsed_ms,
+                f"Summarized profile for user {user_id}: {total_facts} facts, {elapsed_ms}ms"
             )
 
         except Exception as exc:
             logger.error(
-                "Failed to generate summary for user %d: %s",
-                user_id,
-                exc,
+                f"Failed to generate summary for user {user_id}: {exc}",
                 exc_info=True,
             )
             raise
@@ -313,9 +300,7 @@ class ProfileSummarizer:
             return profile.get("summary") if profile else None
         except Exception as exc:
             logger.error(
-                "Manual summarization failed for user %d: %s",
-                user_id,
-                exc,
+                f"Manual summarization failed for user {user_id}: {exc}",
                 exc_info=True,
             )
             return None

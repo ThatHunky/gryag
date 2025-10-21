@@ -20,15 +20,44 @@ class RateLimiter:
         self._limit = per_user_per_hour
         self._lock = asyncio.Lock()
 
+        # Track when we last sent throttle error message to each user
+        # Format: {user_id: last_error_ts}
+        self._last_error_message: dict[int, int] = {}
+        self._error_message_cooldown = 600  # 10 minutes
+
     async def init(self) -> None:
         """Ensure database is reachable."""
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute("PRAGMA journal_mode=WAL")
             await db.commit()
 
+    def should_send_error_message(self, user_id: int) -> bool:
+        """
+        Check if we should send throttle error message to user.
+
+        Only sends error messages once per 10 minutes to avoid spam.
+
+        Args:
+            user_id: User ID
+
+        Returns:
+            True if we should send error message, False to suppress
+        """
+        current_ts = int(time.time())
+        last_error_ts = self._last_error_message.get(user_id, 0)
+
+        # Check if cooldown has passed
+        if current_ts - last_error_ts >= self._error_message_cooldown:
+            # Update last error time
+            self._last_error_message[user_id] = current_ts
+            return True
+
+        # Still in cooldown, suppress error message
+        return False
+
     async def check_and_increment(
         self, user_id: int, now: int | None = None
-    ) -> Tuple[bool, int, int]:
+    ) -> Tuple[bool, int, int, bool]:
         """
         Check if the user is within the allowed rate and increment on success.
 
@@ -37,11 +66,11 @@ class RateLimiter:
             now: Optional override for current timestamp (seconds).
 
         Returns:
-            Tuple of (allowed, remaining_quota, retry_after_seconds)
+            Tuple of (allowed, remaining_quota, retry_after_seconds, should_show_error)
         """
         if self._limit <= 0:
             # Unlimited
-            return True, -1, 0
+            return True, -1, 0, False
 
         current_ts = int(now or time.time())
         window_start = current_ts - (current_ts % self.WINDOW_SECONDS)
@@ -66,11 +95,12 @@ class RateLimiter:
                 row = await cursor.fetchone()
 
                 if row and row[0] >= self._limit:
+                    should_show_error = self.should_send_error_message(user_id)
                     telemetry.increment_counter(
                         "rate_limiter.blocked",
                         user_id=user_id,
                     )
-                    return False, 0, retry_after
+                    return False, 0, retry_after, should_show_error
 
                 if row:
                     await db.execute(
@@ -100,7 +130,7 @@ class RateLimiter:
             user_id=user_id,
             remaining=remaining,
         )
-        return True, remaining, retry_after
+        return True, remaining, retry_after, False
 
     async def reset_chat(self, chat_id: int) -> int:
         """

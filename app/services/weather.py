@@ -285,15 +285,62 @@ async def weather_tool(params: dict[str, Any]) -> str:
     Weather tool function for GRYAG bot.
 
     Fetches current weather or forecast for a specified location.
+    Throttled: 10 requests/hour + 30 second cooldown per user.
 
     Args:
         params: Tool parameters containing 'location' and optional 'forecast_days'
+                         '_user_id' (internal): User ID for throttling
+                         '_feature_limiter' (internal): FeatureRateLimiter instance
 
     Returns:
         JSON string with weather data or error
     """
     location = params.get("location", "").strip()
     forecast_days = params.get("forecast_days")
+
+    # Extract throttling metadata (injected by chat handler)
+    user_id = params.get("_user_id")
+    feature_limiter = params.get("_feature_limiter")
+
+    # Check throttling if enabled
+    if user_id and feature_limiter:
+        from app.config import Settings
+        settings = Settings()
+
+        if settings.enable_feature_throttling:
+            # Check rate limit (requests per hour)
+            allowed, retry_after, should_show_error = await feature_limiter.check_rate_limit(
+                user_id=user_id,
+                feature="weather",
+                limit_per_hour=settings.weather_limit_per_hour,
+            )
+
+            if not allowed and should_show_error:
+                minutes = retry_after // 60
+                return json.dumps({
+                    "error": f"⏱ Ліміт запитів погоди вичерпано. Спробуй за {minutes} хв.",
+                    "throttled": True,
+                    "retry_after_seconds": retry_after,
+                })
+            elif not allowed:
+                # Silently throttled (error already shown recently)
+                return json.dumps({"throttled": True, "silent": True})
+
+            # Check cooldown (minimum time between requests)
+            allowed, retry_after, should_show_error = await feature_limiter.check_cooldown(
+                user_id=user_id,
+                feature="weather",
+            )
+
+            if not allowed and should_show_error:
+                return json.dumps({
+                    "error": f"⏱ Почекай {retry_after} секунд перед наступним запитом погоди.",
+                    "throttled": True,
+                    "retry_after_seconds": retry_after,
+                })
+            elif not allowed:
+                # Silently throttled
+                return json.dumps({"throttled": True, "silent": True})
 
     if not location:
         return json.dumps(

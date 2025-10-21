@@ -17,50 +17,41 @@ from typing import Any
 
 def parse_user_id_short(user_id: int | None) -> str:
     """
-    Get last 6 digits of user_id for compact format.
+    Convert user_id to string for compact format.
+
+    Previously truncated to last 6 digits, but this caused confusion.
+    Now returns full ID for clarity and accurate user identification.
 
     Args:
         user_id: Telegram user ID (or None for bot)
 
     Returns:
-        Last 6 digits as string, or empty string if None
+        Full user ID as string, or empty string if None
     """
     if user_id is None:
         return ""
-    return str(abs(user_id))[-6:]
+    return str(abs(user_id))
 
 
 def build_collision_map(user_ids: list[int]) -> dict[int, str]:
     """
-    Build mapping of user_id to short_id, handling collisions.
+    Build mapping of user_id to display string.
 
-    If two users have the same last 6 digits, adds a suffix (a, b, c...).
+    With full IDs, collisions are extremely rare (only if same user appears).
+    This function primarily serves as a passthrough now, but maintains
+    collision handling for compatibility.
 
     Args:
         user_ids: List of all user IDs in conversation
 
     Returns:
-        Dict mapping full user_id to display short_id
+        Dict mapping full user_id to display string
     """
-    short_to_full: dict[str, list[int]] = {}
-
-    # Group by short ID
-    for uid in user_ids:
-        short = parse_user_id_short(uid)
-        if short:
-            short_to_full.setdefault(short, []).append(uid)
-
-    # Build mapping with collision handling
     result: dict[int, str] = {}
-    for short, full_ids in short_to_full.items():
-        if len(full_ids) == 1:
-            # No collision
-            result[full_ids[0]] = short
-        else:
-            # Collision: add suffix
-            for idx, uid in enumerate(sorted(full_ids)):
-                suffix = chr(ord("a") + idx)  # a, b, c...
-                result[uid] = f"{short}{suffix}"
+
+    # Simply convert each ID to string
+    for uid in user_ids:
+        result[uid] = str(abs(uid))
 
     return result
 
@@ -115,8 +106,14 @@ def describe_media(media_items: list[dict[str, Any]]) -> str:
         kind = item.get("kind", "media")
         mime = item.get("mime", "")
 
-        if kind == "photo" or "image" in mime.lower():
-            descriptions.append("[Image]")
+        if kind == "image" or "image" in mime.lower():
+            # Check for stickers (WebP or WebM with image or video mime)
+            if "webp" in mime.lower() or (
+                "webm" in mime.lower() and "video" in mime.lower()
+            ):
+                descriptions.append("[Sticker]")
+            else:
+                descriptions.append("[Image]")
         elif kind == "video" or "video" in mime.lower():
             # Could add duration if available
             descriptions.append("[Video]")
@@ -204,6 +201,7 @@ def format_message_compact(
     media_description: str = "",
     reply_to_user_id: int | None = None,
     reply_to_username: str | None = None,
+    reply_excerpt: str | None = None,
     user_id_map: dict[int, str] | None = None,
     is_bot: bool = False,
 ) -> str:
@@ -217,6 +215,7 @@ def format_message_compact(
         media_description: Optional media description like "[Image]"
         reply_to_user_id: User ID being replied to
         reply_to_username: Username being replied to
+        reply_excerpt: Optional excerpt from the replied message
         user_id_map: Optional collision map for short IDs
         is_bot: Whether this is a bot message
 
@@ -252,6 +251,21 @@ def format_message_compact(
 
     # Combine media description and text
     content_parts = []
+
+    # Add reply excerpt if present (inline context)
+    if reply_excerpt:
+        # Truncate and sanitize reply excerpt
+        clean_excerpt = reply_excerpt.replace("\n", " ").strip()
+        if len(clean_excerpt) > 120:
+            clean_excerpt = clean_excerpt[:117] + "..."
+        if reply_to_username:
+            excerpt_label = (
+                f"[↩︎ {sanitize_username(reply_to_username)}: {clean_excerpt}]"
+            )
+        else:
+            excerpt_label = f"[↩︎ {clean_excerpt}]"
+        content_parts.append(excerpt_label)
+
     if media_description:
         content_parts.append(media_description)
     if text:
@@ -303,15 +317,30 @@ def format_history_compact(
         # Extract text (skip metadata blocks)
         text = extract_text_from_parts(parts, skip_meta=True)
 
-        # Count media parts
-        media_parts = [p for p in parts if "inline_data" in p or "file_uri" in p]
+        # Count media parts and describe them
+        media_parts_list = [p for p in parts if "inline_data" in p or "file_data" in p]
         media_description = ""
-        if media_parts:
-            # Simple count-based description
-            if len(media_parts) == 1:
-                media_description = "[Media]"
-            else:
-                media_description = f"[{len(media_parts)} media items]"
+        if media_parts_list:
+            # Build media_items list with kind inferred from mime for describe_media()
+            media_items = []
+            for part in media_parts_list:
+                if "inline_data" in part:
+                    mime = part["inline_data"].get("mime_type", "")
+                    # Infer kind from mime type
+                    if "image" in mime:
+                        kind = "image"
+                    elif "video" in mime:
+                        kind = "video"
+                    elif "audio" in mime:
+                        kind = "audio"
+                    else:
+                        kind = "media"
+                    media_items.append({"kind": kind, "mime": mime})
+                elif "file_data" in part:
+                    # File URIs are typically videos
+                    media_items.append({"kind": "video", "mime": "video/mp4"})
+
+            media_description = describe_media(media_items)
 
         # Build formatted line
         is_bot = role == "model"
@@ -321,6 +350,8 @@ def format_history_compact(
         reply_to_username = metadata.get("reply_to_name") or metadata.get(
             "reply_to_username"
         )
+        # Get reply excerpt from metadata
+        reply_excerpt = metadata.get("reply_excerpt")
 
         formatted = format_message_compact(
             user_id=user_id,
@@ -329,6 +360,7 @@ def format_history_compact(
             media_description=media_description,
             reply_to_user_id=reply_to_user_id,
             reply_to_username=reply_to_username,
+            reply_excerpt=reply_excerpt,
             user_id_map=user_id_map,
             is_bot=is_bot,
         )

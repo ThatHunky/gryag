@@ -41,12 +41,62 @@ async def _download(bot: Bot, file_id: str) -> bytes:
                 resp.raise_for_status()
                 return await resp.read()
     except asyncio.TimeoutError:
-        LOGGER.warning("Timed out downloading Telegram file %s", file_id)
+        LOGGER.warning(f"Timed out downloading Telegram file {file_id}")
     except aiohttp.ClientError as exc:
-        LOGGER.warning("Failed to download Telegram file %s: %s", file_id, exc)
+        LOGGER.warning(f"Failed to download Telegram file {file_id}: {exc}")
     except Exception:  # pragma: no cover - unexpected runtime error
-        LOGGER.exception("Unexpected error while downloading Telegram file %s", file_id)
+        LOGGER.exception(f"Unexpected error while downloading Telegram file {file_id}")
     return b""
+
+
+def _maybe_downscale_image(data: bytes, mime: str) -> tuple[bytes, str, int]:
+    """Downscale and recompress large images to reduce inline payload.
+
+    - Converts to JPEG (quality 80)
+    - Max dimension: 1600px (preserve aspect ratio)
+    - Only applies when original size > 1MB or any dimension > 1600
+
+    Returns: (bytes, mime, size)
+    """
+    try:
+        from PIL import Image
+        import io
+
+        # Quick size check to avoid work on small files
+        if len(data) <= 1 * 1024 * 1024 and mime.lower() != "image/webp":
+            return data, mime, len(data)
+
+        with Image.open(io.BytesIO(data)) as im:
+            # If it's not an image PIL can decode, bail out
+            im.load()
+            width, height = im.size
+            max_dim = 1600
+            needs_resize = max(width, height) > max_dim
+
+            # Convert to RGB for JPEG
+            if im.mode not in ("RGB", "L"):
+                im = im.convert("RGB")
+
+            if needs_resize:
+                im.thumbnail((max_dim, max_dim))
+
+            out = io.BytesIO()
+            # Prefer JPEG for broad compatibility and good compression
+            im.save(out, format="JPEG", quality=80, optimize=True)
+            compressed = out.getvalue()
+
+            # Only use compressed version if it meaningfully reduces size
+            if (
+                len(compressed) < len(data) * 0.95
+                or needs_resize
+                or mime.lower() == "image/webp"
+            ):
+                return compressed, "image/jpeg", len(compressed)
+            return data, mime, len(data)
+    except Exception:
+        # On any failure, just return original bytes
+        LOGGER.debug("Image downscale skipped due to processing error", exc_info=True)
+        return data, mime, len(data)
 
 
 def extract_youtube_urls(text: str | None) -> list[str]:
@@ -86,17 +136,12 @@ async def collect_media_parts(bot: Bot, message: Message) -> list[dict[str, Any]
             photo = message.photo[-1]
             data = await _download(bot, photo.file_id)
             if data:
+                # Downscale/compress to reduce payload
+                data, mime, size = _maybe_downscale_image(data, DEFAULT_PHOTO_MIME)
                 parts.append(
-                    {
-                        "bytes": data,
-                        "mime": DEFAULT_PHOTO_MIME,
-                        "kind": "image",
-                        "size": len(data),
-                    }
+                    {"bytes": data, "mime": mime, "kind": "image", "size": size}
                 )
-                LOGGER.debug(
-                    "Collected photo: %d bytes, %s", len(data), DEFAULT_PHOTO_MIME
-                )
+                LOGGER.debug("Collected photo: %d bytes, %s", size, mime)
 
         # Stickers (WebP, TGS animated, or WebM video)
         if message.sticker:
@@ -110,17 +155,13 @@ async def collect_media_parts(bot: Bot, message: Message) -> list[dict[str, Any]
                     data = await _download(bot, sticker.thumbnail.file_id)
                     if data:
                         mime = "image/jpeg"  # Thumbnails are JPEG
+                        data, mime, size = _maybe_downscale_image(data, mime)
                         parts.append(
-                            {
-                                "bytes": data,
-                                "mime": mime,
-                                "kind": "image",
-                                "size": len(data),
-                            }
+                            {"bytes": data, "mime": mime, "kind": "image", "size": size}
                         )
                         LOGGER.debug(
                             "Collected animated sticker thumbnail: %d bytes, %s",
-                            len(data),
+                            size,
                             mime,
                         )
                 else:
@@ -148,17 +189,12 @@ async def collect_media_parts(bot: Bot, message: Message) -> list[dict[str, Any]
                 data = await _download(bot, sticker.file_id)
                 if data:
                     mime = "image/webp"
+                    # For WebP, try converting to JPEG if it helps reduce size
+                    data, mime, size = _maybe_downscale_image(data, mime)
                     parts.append(
-                        {
-                            "bytes": data,
-                            "mime": mime,
-                            "kind": "image",
-                            "size": len(data),
-                        }
+                        {"bytes": data, "mime": mime, "kind": "image", "size": size}
                     )
-                    LOGGER.debug(
-                        "Collected static sticker: %d bytes, %s", len(data), mime
-                    )
+                    LOGGER.debug("Collected static sticker: %d bytes, %s", size, mime)
 
         # Voice messages (OGG/Opus)
         if message.voice:
@@ -259,24 +295,48 @@ async def collect_media_parts(bot: Bot, message: Message) -> list[dict[str, Any]
                     # Determine kind from MIME type
                     if mime.startswith("image/"):
                         kind = "image"
+                        data, mime, size = _maybe_downscale_image(data, mime)
+                        parts.append(
+                            {"bytes": data, "mime": mime, "kind": kind, "size": size}
+                        )
                     elif mime.startswith("audio/"):
                         kind = "audio"
+                        parts.append(
+                            {
+                                "bytes": data,
+                                "mime": mime,
+                                "kind": kind,
+                                "size": len(data),
+                            }
+                        )
                     elif mime.startswith("video/"):
                         kind = "video"
+                        parts.append(
+                            {
+                                "bytes": data,
+                                "mime": mime,
+                                "kind": kind,
+                                "size": len(data),
+                            }
+                        )
                     else:
                         kind = "document"
-
-                    parts.append(
-                        {"bytes": data, "mime": mime, "kind": kind, "size": len(data)}
-                    )
+                        parts.append(
+                            {
+                                "bytes": data,
+                                "mime": mime,
+                                "kind": kind,
+                                "size": len(data),
+                            }
+                        )
                     LOGGER.debug(
                         "Collected document: %d bytes, %s, kind=%s",
-                        len(data),
+                        (size if kind == "image" else len(data)),
                         mime,
                         kind,
                     )
             else:
-                LOGGER.debug("Skipping unsupported document MIME type: %s", mime)
+                LOGGER.debug(f"Skipping unsupported document MIME type: {mime}")
 
         # Check total size
         total_size = sum(part.get("size", 0) for part in parts)

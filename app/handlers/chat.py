@@ -44,8 +44,13 @@ from app.services.tools import (
     FORGET_ALL_FACTS_DEFINITION,
     SET_PRONOUNS_DEFINITION,
 )
+from app.handlers.chat_tools import (
+    build_tool_definitions as build_tool_definitions_registry,
+    build_tool_callbacks as build_tool_callbacks_registry,
+    create_search_messages_tool,
+)
 from app.services.context_store import ContextStore, format_metadata
-from app.services.gemini import GeminiClient, GeminiError
+from app.services.gemini import GeminiClient, GeminiError, GeminiContentBlockedError
 from app.services.media import collect_media_parts
 from app.services.redis_types import RedisLike
 from app.services.triggers import addressed_to_bot
@@ -96,8 +101,35 @@ def _get_response(
     Returns:
         Response string with variables substituted
     """
+    # If persona loader is available, inject bot-related variables (if present)
     if persona_loader is not None:
+        try:
+            persona = getattr(persona_loader, "persona", None)
+            bot_name = getattr(persona, "name", None) if persona is not None else None
+            bot_display = (
+                getattr(persona, "display_name", None) if persona is not None else None
+            )
+            # Do not override variables explicitly provided by the caller
+            if bot_name and "bot_name" not in kwargs:
+                kwargs["bot_name"] = bot_name
+            if bot_display and "bot_display_name" not in kwargs:
+                kwargs["bot_display_name"] = bot_display
+        except Exception:
+            LOGGER.exception(
+                "Failed to inject persona variables into response template"
+            )
+
         return persona_loader.get_response(key, **kwargs)
+
+    # No persona loader: try to format the default template with kwargs if provided
+    if kwargs:
+        try:
+            return default.format(**kwargs)
+        except KeyError:
+            LOGGER.warning(
+                "Missing variable while formatting default response for key=%s", key
+            )
+            # Fall through to return raw default
     return default
 
 
@@ -289,7 +321,7 @@ async def _remember_context_message(
                     {"file_uri": url, "kind": "video", "mime": "video/mp4"}
                 )
     except Exception:  # pragma: no cover - defensive logging
-        LOGGER.exception("Failed to collect media for message %s", message.message_id)
+        LOGGER.exception(f"Failed to collect media for message {message.message_id}")
         media_raw = []
 
     if media_raw:
@@ -505,6 +537,66 @@ def _clean_response_text(text: str) -> str:
     cleaned = " ".join(cleaned.split())
 
     return cleaned
+
+
+async def _get_video_description_from_history(
+    store: ContextStore,
+    chat_id: int,
+    thread_id: int | None,
+    message_id: int,
+) -> str | None:
+    """
+    Retrieve bot's description of a video from conversation history.
+
+    Looks for the bot's response to a message containing video,
+    and extracts relevant description text.
+
+    Args:
+        store: Context store to query
+        chat_id: Chat ID
+        thread_id: Thread ID (for supergroups)
+        message_id: Message ID that contains the video
+
+    Returns:
+        Text description of the video, or None if not found
+    """
+    try:
+        # Get recent conversation history
+        turns = await store.recent(
+            chat_id=chat_id,
+            thread_id=thread_id,
+            max_turns=20,  # Check last 20 messages
+        )
+
+        # Find the video message and the bot's response after it
+        found_video_msg = False
+        for turn in turns:
+            metadata = turn.get("metadata", "")
+            text = turn.get("text", "")
+            role = turn.get("role", "")
+
+            # Check if this is the video message we're looking for
+            if not found_video_msg and f"message_id={message_id}" in metadata:
+                found_video_msg = True
+                continue
+
+            # If we found the video message, next model response is the description
+            if found_video_msg and role == "model":
+                # Clean and return the description
+                clean_text = text.strip()
+                if clean_text.startswith("[meta]"):
+                    lines = clean_text.split("\n")
+                    clean_text = "\n".join(
+                        line for line in lines if not line.strip().startswith("[meta")
+                    ).strip()
+
+                return clean_text if clean_text else None
+
+        return None
+
+    except Exception as e:
+        LOGGER.debug(f"Could not retrieve video description: {e}")
+        return None
 
 
 async def _enrich_with_user_profile(
@@ -797,6 +889,7 @@ async def handle_group_message(
     multi_level_context_manager: MultiLevelContextManager | None = None,
     persona_loader: Any | None = None,
     image_gen_service: ImageGenerationService | None = None,
+    feature_limiter: Any | None = None,
 ):
     if message.from_user is None or message.from_user.is_bot:
         LOGGER.debug("Ignoring message: no from_user or is_bot")
@@ -887,25 +980,42 @@ async def handle_group_message(
 
     # Rate limiting (skip for admins)
     if not is_admin and rate_limiter is not None:
-        allowed, remaining, retry_after = await rate_limiter.check_and_increment(
-            user_id=message.from_user.id
+        allowed, remaining, retry_after, should_show_error = (
+            await rate_limiter.check_and_increment(user_id=message.from_user.id)
         )
         if not allowed:
-            wait_minutes = max((retry_after + 59) // 60, 1)
-            throttle_text = _get_response(
-                "throttle_notice", persona_loader, THROTTLED_REPLY, minutes=wait_minutes
-            )
+            # Only send error message if we haven't sent one recently (10 min cooldown)
+            if should_show_error:
+                wait_minutes = max((retry_after + 59) // 60, 1)
+                throttle_text = _get_response(
+                    "throttle_notice",
+                    persona_loader,
+                    THROTTLED_REPLY,
+                    minutes=wait_minutes,
+                    bot_username=bot_username,
+                )
+                await message.reply(throttle_text)
+            # Silently block otherwise (error already shown recently)
             telemetry.increment_counter(
                 "chat.rate_limited",
                 user_id=message.from_user.id,
                 remaining=remaining,
             )
-            await message.reply(throttle_text)
             return
 
     if not is_admin and await store.is_banned(chat_id, user_id):
         telemetry.increment_counter("chat.banned_user")
-        await message.reply(_get_response("banned_reply", persona_loader, BANNED_REPLY))
+        # Only send ban notice if cooldown has passed (30 min default)
+        if await store.should_send_ban_notice(chat_id, user_id):
+            await message.reply(
+                _get_response(
+                    "banned_reply",
+                    persona_loader,
+                    BANNED_REPLY,
+                    bot_username=bot_username,
+                )
+            )
+        # Always return early for banned users (no processing)
         return
 
     # Build multi-level context if services are available
@@ -1029,6 +1139,43 @@ async def handle_group_message(
     # Build Gemini-compatible media parts
     media_parts = gemini_client.build_media_parts(media_raw, logger=LOGGER)
 
+    # Log media types for debugging
+    if media_parts:
+        media_type_counts = {}
+        for part in media_parts:
+            if "inline_data" in part:
+                mime = part["inline_data"].get("mime_type", "unknown")
+                media_type_counts[mime] = media_type_counts.get(mime, 0) + 1
+            elif "file_data" in part:
+                media_type_counts["file_uri"] = media_type_counts.get("file_uri", 0) + 1
+        LOGGER.debug(
+            "Current message media types: %s (total: %d)",
+            media_type_counts,
+            len(media_parts),
+        )
+
+    # Limit number of media parts for the current message to prevent overload
+    trimmed_media_count = 0
+    try:
+        max_current_media = getattr(
+            settings,
+            "gemini_max_media_items_current",
+            getattr(settings, "gemini_max_media_items", 28),
+        )
+        if isinstance(max_current_media, int) and max_current_media > 0:
+            if len(media_parts) > max_current_media:
+                trimmed_media_count = len(media_parts) - max_current_media
+                media_parts = media_parts[:max_current_media]
+                LOGGER.info(
+                    "Trimmed %d media part(s) from current message (limit: %d)",
+                    trimmed_media_count,
+                    max_current_media,
+                )
+    except Exception:
+        LOGGER.debug(
+            "Media trim step skipped due to configuration error", exc_info=True
+        )
+
     # Check for poll voting (numbers like "1", "2", "1,3", etc.)
     poll_vote_result = await _handle_poll_vote_attempt(
         raw_text, chat_id, thread_id, user_id
@@ -1089,9 +1236,6 @@ async def handle_group_message(
                             # Update existing context with media
                             reply_context["media_parts"] = reply_media_parts
 
-                        # Store for potential history injection
-                        reply_context_for_history = reply_context
-
                         LOGGER.debug(
                             "Collected %d media part(s) from reply message %s",
                             len(reply_media_parts),
@@ -1102,12 +1246,26 @@ async def handle_group_message(
                     "Failed to collect media from reply message %s", reply.message_id
                 )
 
-    # If we have reply context with media, store it for history injection
-    if (
-        reply_context
-        and reply_context.get("media_parts")
-        and not reply_context_for_history
-    ):
+        # If still no reply_context but we have a reply message, create minimal context from reply
+        if not reply_context:
+            reply_text = _extract_text(reply)
+            if reply_text or reply.from_user:
+                reply_context = {
+                    "ts": (
+                        int(reply.date.timestamp()) if reply.date else int(time.time())
+                    ),
+                    "message_id": reply.message_id,
+                    "user_id": (reply.from_user.id if reply.from_user else None),
+                    "name": (reply.from_user.full_name if reply.from_user else None),
+                    "username": _normalize_username(
+                        reply.from_user.username if reply.from_user else None
+                    ),
+                    "text": reply_text,
+                    "excerpt": (reply_text or "")[:200] if reply_text else None,
+                }
+
+    # Always store reply context for history injection if enabled and present
+    if reply_context and settings.include_reply_excerpt:
         reply_context_for_history = reply_context
 
     fallback_context = reply_context or _get_recent_context(chat_id, thread_id)
@@ -1129,6 +1287,40 @@ async def handle_group_message(
         media_parts=media_parts,
         fallback_context=fallback_context,
     )
+
+    # If we had to trim media attachments, add a short note for the model
+    if trimmed_media_count > 0 and media_summary:
+        user_parts.append(
+            {
+                "text": f"{media_summary} (деякі прикріплення опущено для ефективності)",
+            }
+        )
+
+    # Add inline reply excerpt if enabled and available (after metadata)
+    if settings.include_reply_excerpt and reply_context:
+        reply_text = reply_context.get("text") or reply_context.get("excerpt")
+        if reply_text:
+            # Truncate to configured max
+            max_chars = settings.reply_excerpt_max_chars
+            excerpt = reply_text[:max_chars]
+            if len(reply_text) > max_chars:
+                excerpt = excerpt + "..."
+
+            # Build inline snippet with username if available
+            reply_username = reply_context.get("name") or reply_context.get("username")
+            if reply_username:
+                inline_reply = f"[↩︎ Відповідь на {reply_username}: {excerpt}]"
+            else:
+                inline_reply = f"[↩︎ Відповідь на: {excerpt}]"
+
+            # Insert after metadata (which is at index 0)
+            user_parts.insert(1, {"text": inline_reply})
+
+            telemetry.increment_counter("context.reply_included_text")
+            LOGGER.debug(
+                "Added inline reply excerpt to user parts (first %d chars)",
+                len(excerpt),
+            )
 
     # Always prepend metadata as first part for Gemini context
     user_parts.insert(0, {"text": format_metadata(user_meta)})
@@ -1174,103 +1366,13 @@ async def handle_group_message(
                 extra={"chat_id": chat_id, "message_id": message.message_id},
             )
 
-    async def search_messages_tool(params: dict[str, Any]) -> str:
-        query = (params or {}).get("query", "")
-        if not isinstance(query, str) or not query.strip():
-            return json.dumps({"results": []})
-        limit = params.get("limit", 5)
-        try:
-            limit_int = int(limit)
-        except (TypeError, ValueError):
-            limit_int = 5
-        limit_int = max(1, min(limit_int, 10))
-        thread_only = params.get("thread_only", True)
-        target_thread = thread_id if thread_only else None
-        embedding = await gemini_client.embed_text(query)
-        matches = await store.semantic_search(
-            chat_id=chat_id,
-            thread_id=target_thread,
-            query_embedding=embedding,
-            limit=limit_int,
-        )
-        payload = []
-        for item in matches:
-            meta_dict = item.get("metadata", {})
-            payload.append(
-                {
-                    "score": round(float(item.get("score", 0.0)), 4),
-                    "metadata": meta_dict,
-                    "metadata_text": format_metadata(meta_dict),
-                    "text": (item.get("text") or "")[:400],
-                    "role": item.get("role"),
-                    "message_id": item.get("message_id"),
-                }
-            )
-        return json.dumps({"results": payload})
-
-    tool_definitions: list[dict[str, Any]] = []
-
-    # Add search_messages tool for searching chat history
-    tool_definitions.append(
-        {
-            "function_declarations": [
-                {
-                    "name": "search_messages",
-                    "description": (
-                        "Шукати релевантні повідомлення в історії чату за семантичною подібністю."
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "Запит або фраза для пошуку",
-                            },
-                            "limit": {
-                                "type": "integer",
-                                "description": "Скільки результатів повернути (1-10)",
-                            },
-                            "thread_only": {
-                                "type": "boolean",
-                                "description": "Чи обмежуватися поточним тредом",
-                            },
-                        },
-                        "required": ["query"],
-                    },
-                }
-            ]
-        }
+    # Centralized search tool implementation
+    search_messages_tool = create_search_messages_tool(
+        store=store, gemini_client=gemini_client, chat_id=chat_id, thread_id=thread_id
     )
 
-    # Add web search tool (replaces direct google_search grounding)
-    if settings.enable_search_grounding:
-        tool_definitions.append(SEARCH_WEB_TOOL_DEFINITION)
-
-    # Add calculator tool
-    tool_definitions.append(CALCULATOR_TOOL_DEFINITION)
-
-    # Add weather tool
-    tool_definitions.append(WEATHER_TOOL_DEFINITION)
-
-    # Add currency tool
-    tool_definitions.append(CURRENCY_TOOL_DEFINITION)
-
-    # Add polls tool
-    tool_definitions.append(POLLS_TOOL_DEFINITION)
-
-    # Add image generation tools
-    if settings.enable_image_generation:
-        tool_definitions.append(GENERATE_IMAGE_TOOL_DEFINITION)
-        tool_definitions.append(EDIT_IMAGE_TOOL_DEFINITION)
-
-    # Add memory tools (Phase 5.1)
-    if settings.enable_tool_based_memory:
-        tool_definitions.append(REMEMBER_FACT_DEFINITION)
-        tool_definitions.append(RECALL_FACTS_DEFINITION)
-        tool_definitions.append(UPDATE_FACT_DEFINITION)
-        tool_definitions.append(FORGET_FACT_DEFINITION)
-        tool_definitions.append(FORGET_ALL_FACTS_DEFINITION)
-        tool_definitions.append(SET_PRONOUNS_DEFINITION)
+    # Centralized tool definitions (registry)
+    tool_definitions: list[dict[str, Any]] = build_tool_definitions_registry(settings)
 
     # Enrich with user profile context
     # Note: If using multi-level context, profile is already included
@@ -1348,11 +1450,39 @@ async def handle_group_message(
                     message.from_user.full_name if message.from_user else "User"
                 )
                 current_user_id = message.from_user.id if message.from_user else None
+
+                # Extract reply information for compact format
+                reply_to_user_id = None
+                reply_to_username = None
+                reply_excerpt = None
+
+                if settings.include_reply_excerpt and message.reply_to_message:
+                    reply_to_msg = message.reply_to_message
+                    if reply_to_msg.from_user:
+                        reply_to_user_id = reply_to_msg.from_user.id
+                        reply_to_username = reply_to_msg.from_user.full_name
+
+                    # Get excerpt from reply context or extract directly
+                    if reply_context and reply_context.get("excerpt"):
+                        reply_excerpt = reply_context["excerpt"]
+                    else:
+                        reply_text = _extract_text(reply_to_msg)
+                        if reply_text:
+                            max_chars = min(
+                                settings.reply_excerpt_max_chars, 160
+                            )  # Compact format uses shorter excerpts
+                            reply_excerpt = reply_text[:max_chars]
+                            if len(reply_text) > max_chars:
+                                reply_excerpt = reply_excerpt + "..."
+
                 current_message_line = format_message_compact(
                     user_id=current_user_id,
                     username=current_username,
                     text=raw_text or media_summary or "",
                     media_description=(media_summary or "") if media_parts else "",
+                    reply_to_user_id=reply_to_user_id,
+                    reply_to_username=reply_to_username,
+                    reply_excerpt=reply_excerpt,
                 )
 
             # Combine conversation history with current message
@@ -1366,9 +1496,176 @@ async def handle_group_message(
                 full_conversation = conversation_text or "[RESPOND]"
 
             user_parts = [{"text": full_conversation}]
-            # Add media parts if present (for analysis)
+
+            # Add media with priority: current message first, then reply media, then historical
+            max_media_total = (
+                settings.gemini_max_media_items
+            )  # Default 28 (Gemini API limit)
+            max_historical = settings.gemini_max_media_items_historical  # Default 5
+            max_videos = settings.gemini_max_video_items  # Default 1
+
+            all_media = []
+            video_count = 0
+            video_descriptions = []  # Collect descriptions for videos we skip
+
+            # Priority 1: Current message media (highest priority)
             if media_parts:
-                user_parts.extend(media_parts)
+                for media_item in media_parts:
+                    mime = media_item.get("mime", "")
+                    is_video = mime.startswith("video/")
+
+                    if is_video and video_count >= max_videos:
+                        # Skip this video but try to get description from history
+                        LOGGER.debug(
+                            f"Skipping video (limit {max_videos} reached): {mime}"
+                        )
+                        continue
+
+                    all_media.append(media_item)
+                    if is_video:
+                        video_count += 1
+
+            # Priority 2: Reply message media (if replying to older message not in context)
+            reply_media_parts = []
+            if reply_context_for_history and reply_context_for_history.get(
+                "media_parts"
+            ):
+                # Check if reply message is already in historical_media
+                reply_msg_id = reply_context_for_history.get("message_id")
+                historical_media = formatted_context.get("historical_media", [])
+
+                # Check if reply media is already in historical_media by comparing message_id in metadata
+                reply_media_in_history = False
+                # For now, we'll always include reply media to ensure it's visible
+                # (historical_media doesn't track message_id, so we can't reliably detect duplicates)
+
+                if not reply_media_in_history:
+                    reply_media_parts = reply_context_for_history["media_parts"]
+                    for media_item in reply_media_parts:
+                        mime = media_item.get("mime", "")
+                        is_video = mime.startswith("video/")
+
+                        if is_video and video_count >= max_videos:
+                            # Skip this video but try to get description
+                            if reply_msg_id:
+                                description = await _get_video_description_from_history(
+                                    store=store,
+                                    chat_id=chat_id,
+                                    thread_id=thread_id,
+                                    message_id=reply_msg_id,
+                                )
+                                if description:
+                                    video_descriptions.append(
+                                        f"[Раніше про відео в повідомленні {reply_msg_id}]: {description[:200]}"
+                                    )
+                                LOGGER.debug(
+                                    f"Skipping reply video (limit {max_videos} reached), description: {bool(description)}"
+                                )
+                            continue
+
+                        all_media.append(media_item)
+                        if is_video:
+                            video_count += 1
+
+                    LOGGER.debug(
+                        "Added %d media items from replied message (message_id=%s), videos: %d",
+                        len([m for m in reply_media_parts if m in all_media]),
+                        reply_msg_id,
+                        video_count,
+                    )
+
+            # Priority 3: Historical media from context (limited to max_historical)
+            historical_media = formatted_context.get("historical_media", [])
+            if historical_media and max_historical > 0:
+                remaining_slots = min(
+                    max_media_total - len(all_media),  # Don't exceed total limit
+                    max_historical,  # Don't exceed historical limit
+                )
+                if remaining_slots > 0:
+                    # Add historical media up to remaining slots, respecting video limit
+                    historical_kept = 0
+                    for media_item in historical_media[:remaining_slots]:
+                        mime = media_item.get("mime", "")
+                        is_video = mime.startswith("video/")
+
+                        if is_video and video_count >= max_videos:
+                            # Skip this video - no description available for historical media
+                            # (we don't track message_id in historical_media)
+                            LOGGER.debug(
+                                f"Skipping historical video (limit {max_videos} reached)"
+                            )
+                            continue
+
+                        all_media.append(media_item)
+                        historical_kept += 1
+                        if is_video:
+                            video_count += 1
+
+                    # Telemetry: Track historical media usage
+                    if historical_kept > 0:
+                        telemetry.increment_counter(
+                            "context.historical_media_included", historical_kept
+                        )
+
+                    historical_dropped = len(historical_media) - historical_kept
+                    if historical_dropped > 0:
+                        telemetry.increment_counter(
+                            "context.historical_media_dropped", historical_dropped
+                        )
+                        LOGGER.debug(
+                            "Historical media: %d kept, %d dropped (video_limit: %d, historical_limit: %d, total_limit: %d)",
+                            historical_kept,
+                            historical_dropped,
+                            max_videos,
+                            max_historical,
+                            max_media_total,
+                        )
+                else:
+                    # No room for historical media
+                    telemetry.increment_counter(
+                        "context.historical_media_dropped", len(historical_media)
+                    )
+            elif historical_media and max_historical == 0:
+                # Historical media disabled via config
+                telemetry.increment_counter(
+                    "context.historical_media_dropped", len(historical_media)
+                )
+                LOGGER.debug(
+                    "Historical media disabled (GEMINI_MAX_MEDIA_ITEMS_HISTORICAL=0), dropped %d items",
+                    len(historical_media),
+                )
+
+            # Add video descriptions to conversation text if we skipped any
+            if video_descriptions:
+                conversation_with_descriptions = (
+                    full_conversation + "\n\n" + "\n".join(video_descriptions)
+                )
+                user_parts[0] = {"text": conversation_with_descriptions}
+                LOGGER.debug(
+                    f"Added {len(video_descriptions)} video descriptions to conversation"
+                )
+
+            # Add all media to user_parts (respecting total limit)
+            if all_media:
+                user_parts.extend(all_media[:max_media_total])
+
+                if len(all_media) > max_media_total:
+                    telemetry.increment_counter("context.media_limit_exceeded")
+                    LOGGER.warning(
+                        "Media limit exceeded: %d items, kept first %d (current: %d, reply: %d, historical: %d, videos: %d)",
+                        len(all_media),
+                        max_media_total,
+                        len(media_parts) if media_parts else 0,
+                        len(reply_media_parts),
+                        len(
+                            [
+                                m
+                                for m in all_media
+                                if m.get("mime", "").startswith("video/")
+                            ]
+                        ),
+                        video_count,
+                    )
 
             LOGGER.debug(
                 "Using compact conversation format for Gemini",
@@ -1457,283 +1754,41 @@ async def handle_group_message(
             # Insert at beginning of history (chronologically first)
             if reply_parts:
                 history.insert(0, {"role": "user", "parts": reply_parts})
+
+                # Track telemetry
+                if reply_context_for_history.get("media_parts"):
+                    telemetry.increment_counter("context.reply_included_media")
+
                 LOGGER.debug(
                     "Injected reply context with %d media part(s) into history for message %s",
                     len(reply_context_for_history.get("media_parts", [])),
                     reply_msg_id,
                 )
 
-    # Bot Self-Learning: Track which tools are used in this request
+    # Track which tools were used in this request
     tools_used_in_request: list[str] = []
 
-    def make_tracked_tool_callback(tool_name: str, original_callback):
-        """Wrapper to track tool usage."""
+    # Centralized callbacks (registry) with tracking
+    tracked_tool_callbacks = build_tool_callbacks_registry(
+        settings=settings,
+        store=store,
+        gemini_client=gemini_client,
+        profile_store=profile_store,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        message_id=message.message_id,
+        tools_used_tracker=tools_used_in_request,
+        user_id=user_id,
+        bot=bot,
+        message=message,
+        image_gen_service=image_gen_service,
+        feature_limiter=feature_limiter,
+    )
+    # Web search, image tools, and memory tool callbacks are provided by registry
 
-        async def wrapper(params: dict[str, Any]) -> str:
-            tools_used_in_request.append(tool_name)
-            return await original_callback(params)
-
-        return wrapper
-
-    # Wrap tool callbacks with tracking
-    tracked_tool_callbacks = {
-        "search_messages": make_tracked_tool_callback(
-            "search_messages", search_messages_tool
-        ),
-        "calculator": make_tracked_tool_callback("calculator", calculator_tool),
-        "weather": make_tracked_tool_callback("weather", weather_tool),
-        "currency": make_tracked_tool_callback("currency", currency_tool),
-        "polls": make_tracked_tool_callback("polls", polls_tool),
-    }
-
-    # Add image generation callback (if enabled)
-    if settings.enable_image_generation and image_gen_service is not None:
-
-        async def generate_image_tool(params: dict[str, Any]) -> str:
-            """Tool callback for image generation."""
-            prompt = params.get("prompt", "")
-            aspect_ratio = params.get("aspect_ratio", "1:1")
-
-            LOGGER.info(
-                f"Image generation tool called: user_id={user_id}, chat_id={chat_id}, prompt_len={len(prompt)}"
-            )
-
-            if not prompt:
-                return json.dumps(
-                    {"success": False, "error": "Потрібен опис зображення"}
-                )
-
-            try:
-                # Generate image
-                image_bytes = await image_gen_service.generate_image(
-                    prompt=prompt,
-                    aspect_ratio=aspect_ratio,
-                    user_id=user_id,
-                    chat_id=chat_id,
-                )
-
-                # Send image to chat
-                from aiogram.types import BufferedInputFile
-
-                photo = BufferedInputFile(image_bytes, filename="generated.png")
-
-                # Try sending with thread_id first, fallback without if thread not found
-                try:
-                    await bot.send_photo(
-                        chat_id=chat_id,
-                        photo=photo,
-                        caption=None,  # No caption - let the bot's text response handle it
-                        message_thread_id=thread_id,
-                        reply_to_message_id=message.message_id,
-                    )
-                except TelegramBadRequest as e:
-                    if "thread not found" in str(e).lower():
-                        # Thread doesn't exist, send without thread_id
-                        LOGGER.info(
-                            f"Thread {thread_id} not found, sending without thread"
-                        )
-                        await bot.send_photo(
-                            chat_id=chat_id,
-                            photo=photo,
-                            caption=None,
-                            reply_to_message_id=message.message_id,
-                        )
-                    else:
-                        raise
-
-                # Get usage stats
-                stats = await image_gen_service.get_usage_stats(user_id, chat_id)
-                remaining = stats.get("remaining", 0)
-                limit = stats.get("daily_limit", 1)
-
-                result_msg = "Зображення згенеровано! "
-                if not stats.get("is_admin"):
-                    result_msg += f"Залишилось сьогодні: {remaining}/{limit}"
-
-                return json.dumps({"success": True, "message": result_msg})
-
-            except QuotaExceededError as e:
-                return json.dumps({"success": False, "error": str(e)})
-            except ImageGenerationError as e:
-                return json.dumps({"success": False, "error": str(e)})
-            except Exception as e:
-                LOGGER.error(f"Image generation failed: {e}", exc_info=True)
-                return json.dumps(
-                    {"success": False, "error": "Помилка при генерації зображення"}
-                )
-
-        tracked_tool_callbacks["generate_image"] = make_tracked_tool_callback(
-            "generate_image", generate_image_tool
-        )
-
-        async def edit_image_tool(params: dict[str, Any]) -> str:
-            """Tool callback for editing an existing image via replied photo."""
-            prompt = params.get("prompt", "")
-            aspect_ratio = params.get("aspect_ratio", "1:1")
-
-            LOGGER.info(
-                f"Edit image tool called: user_id={user_id}, chat_id={chat_id}, prompt_len={len(prompt)}"
-            )
-
-            if not prompt:
-                return json.dumps(
-                    {"success": False, "error": "Потрібна інструкція для редагування"}
-                )
-
-            # Must be a reply to a message with an image/media
-            reply = message.reply_to_message
-            if not reply:
-                return json.dumps(
-                    {
-                        "success": False,
-                        "error": "Відповідай на повідомлення з фото, яке треба змінити",
-                    }
-                )
-
-            try:
-                # Extract media bytes from the replied message
-                reply_media_raw = await collect_media_parts(bot, reply)
-                image_bytes_list = [
-                    part["bytes"]
-                    for part in reply_media_raw
-                    if part.get("kind") == "image"
-                ]
-
-                if not image_bytes_list:
-                    return json.dumps(
-                        {
-                            "success": False,
-                            "error": "У відповіді нема зображення. Пришли фото і напиши що змінити",
-                        }
-                    )
-
-                # Use the first image as the base context
-                context_images = [image_bytes_list[0]]
-
-                # Generate edited image
-                edited_bytes = await image_gen_service.generate_image(
-                    prompt=prompt,
-                    context_images=context_images,
-                    aspect_ratio=aspect_ratio,
-                    user_id=user_id,
-                    chat_id=chat_id,
-                )
-
-                # Send image to chat
-                from aiogram.types import BufferedInputFile
-
-                photo = BufferedInputFile(edited_bytes, filename="edited.png")
-
-                try:
-                    await bot.send_photo(
-                        chat_id=chat_id,
-                        photo=photo,
-                        caption=None,
-                        message_thread_id=thread_id,
-                        reply_to_message_id=message.message_id,
-                    )
-                except TelegramBadRequest as e:
-                    if "thread not found" in str(e).lower():
-                        LOGGER.info(
-                            f"Thread {thread_id} not found, sending without thread"
-                        )
-                        await bot.send_photo(
-                            chat_id=chat_id,
-                            photo=photo,
-                            caption=None,
-                            reply_to_message_id=message.message_id,
-                        )
-                    else:
-                        raise
-
-                # Get usage stats
-                stats = await image_gen_service.get_usage_stats(user_id, chat_id)
-                remaining = stats.get("remaining", 0)
-                limit = stats.get("daily_limit", 1)
-
-                result_msg = "Зображення відредаговано! "
-                if not stats.get("is_admin"):
-                    result_msg += f"Залишилось сьогодні: {remaining}/{limit}"
-
-                return json.dumps({"success": True, "message": result_msg})
-
-            except QuotaExceededError as e:
-                return json.dumps({"success": False, "error": str(e)})
-            except ImageGenerationError as e:
-                return json.dumps({"success": False, "error": str(e)})
-            except Exception as e:
-                LOGGER.error(f"Edit image failed: {e}", exc_info=True)
-                return json.dumps(
-                    {"success": False, "error": "Помилка при редагуванні зображення"}
-                )
-
-        tracked_tool_callbacks["edit_image"] = make_tracked_tool_callback(
-            "edit_image", edit_image_tool
-        )
-
-    # Add web search callback (if enabled)
-    if settings.enable_search_grounding:
-        tracked_tool_callbacks["search_web"] = make_tracked_tool_callback(
-            "search_web",
-            lambda params: search_web_tool(params, gemini_client),
-        )
-
-    # Add memory tool callbacks (Phase 5.1)
-    if settings.enable_tool_based_memory:
-        tracked_tool_callbacks["remember_fact"] = make_tracked_tool_callback(
-            "remember_fact",
-            lambda params: remember_fact_tool(
-                **params,
-                chat_id=chat_id,
-                message_id=message.message_id,
-                profile_store=profile_store,
-            ),
-        )
-        tracked_tool_callbacks["recall_facts"] = make_tracked_tool_callback(
-            "recall_facts",
-            lambda params: recall_facts_tool(
-                **params,
-                chat_id=chat_id,
-                profile_store=profile_store,
-            ),
-        )
-        tracked_tool_callbacks["update_fact"] = make_tracked_tool_callback(
-            "update_fact",
-            lambda params: update_fact_tool(
-                **params,
-                chat_id=chat_id,
-                message_id=message.message_id,
-                profile_store=profile_store,
-            ),
-        )
-        tracked_tool_callbacks["forget_fact"] = make_tracked_tool_callback(
-            "forget_fact",
-            lambda params: forget_fact_tool(
-                **params,
-                chat_id=chat_id,
-                message_id=message.message_id,
-                profile_store=profile_store,
-                context_store=store,
-            ),
-        )
-        tracked_tool_callbacks["forget_all_facts"] = make_tracked_tool_callback(
-            "forget_all_facts",
-            lambda params: forget_all_facts_tool(
-                **params,
-                chat_id=chat_id,
-                message_id=message.message_id,
-                profile_store=profile_store,
-                context_store=store,
-            ),
-        )
-        tracked_tool_callbacks["set_pronouns"] = make_tracked_tool_callback(
-            "set_pronouns",
-            lambda params: set_pronouns_tool(
-                **params,
-                chat_id=chat_id,
-                profile_store=profile_store,
-            ),
-        )
+    # Extract specific tool callbacks for fallback usage
+    edit_image_tool = tracked_tool_callbacks.get("edit_image")
+    generate_image_tool = tracked_tool_callbacks.get("generate_image")
 
     # Bot Self-Learning: Track generation timing
     response_time_ms = 0  # Initialize in case of error
@@ -1754,6 +1809,15 @@ async def handle_group_message(
             first_part = user_parts[0]
             if isinstance(first_part, dict) and "text" in first_part:
                 LOGGER.info(f"First user part text: {first_part['text'][:200]}")
+
+            # Log media breakdown
+            media_count = sum(
+                1
+                for p in user_parts
+                if isinstance(p, dict) and ("inline_data" in p or "file_data" in p)
+            )
+            if media_count > 0:
+                LOGGER.info(f"Sending {media_count} media items to Gemini")
 
         try:
             reply_text = await gemini_client.generate(
@@ -1827,9 +1891,27 @@ async def handle_group_message(
                     history=history,
                 )
             )
+        except GeminiContentBlockedError as exc:
+            telemetry.increment_counter("chat.content_blocked")
+            LOGGER.warning(
+                "Content blocked by Gemini: block_reason=%s, chat=%s, user=%s",
+                exc.block_reason,
+                chat_id,
+                user_id,
+            )
+            # Provide a user-friendly message
+            reply_text = (
+                "Я не можу обробити це медіа — модерація API заблокувала контент. "
+                "Спробуй інше зображення чи відео."
+            )
         except GeminiError:
             telemetry.increment_counter("chat.reply_failure")
-            reply_text = _get_response("error_fallback", persona_loader, ERROR_FALLBACK)
+            reply_text = _get_response(
+                "error_fallback",
+                persona_loader,
+                ERROR_FALLBACK,
+                bot_username=bot_username,
+            )
 
         # Comprehensive response cleaning
         original_reply = reply_text
@@ -1843,7 +1925,7 @@ async def handle_group_message(
                 len(original_reply),
                 len(reply_text),
             )
-            LOGGER.debug("Original response contained: %s", original_reply[:200])
+            LOGGER.debug(f"Original response contained: {original_reply[:200]}")
 
         # Fallback: force image generation/edit if Gemini returned nothing but the user clearly asked for it
         if (
@@ -1866,13 +1948,12 @@ async def handle_group_message(
             fallback_payload: dict[str, Any] | None = None
             fallback_success = False
 
-            # Try edit fallback first if user replied to an image
+            # Try edit fallback first if it looks like an image edit request
             if (
                 fallback_prompt
                 and "edit_image" not in tools_used_in_request
-                and reply_context
-                and reply_context.get("media_parts")
                 and _looks_like_image_edit_request(fallback_prompt)
+                and edit_image_tool is not None
             ):
                 LOGGER.info(
                     "Gemini skipped edit_image tool; performing fallback edit",
@@ -1884,10 +1965,14 @@ async def handle_group_message(
                 try:
                     fallback_raw = await edit_image_tool({"prompt": fallback_prompt})
                     fallback_payload = json.loads(fallback_raw)
-                except json.JSONDecodeError:
-                    fallback_payload = {"success": False, "error": fallback_raw}
+                except json.JSONDecodeError as exc:
+                    LOGGER.error(f"Failed to parse edit_image response: {exc}")
+                    fallback_payload = {
+                        "success": False,
+                        "error": "Помилка парсингу відповіді",
+                    }
                 except Exception as exc:
-                    LOGGER.error("Fallback edit_image failed: %s", exc, exc_info=True)
+                    LOGGER.error(f"Fallback edit_image failed: {exc}", exc_info=True)
                     fallback_payload = {
                         "success": False,
                         "error": "Не вийшло відредагувати, сервіс знову тупив.",
@@ -1901,6 +1986,7 @@ async def handle_group_message(
                 and fallback_prompt
                 and "generate_image" not in tools_used_in_request
                 and _looks_like_image_generation_request(fallback_prompt)
+                and generate_image_tool is not None
             ):
                 LOGGER.info(
                     "Gemini skipped generate_image tool; performing fallback generation",
@@ -1914,12 +2000,15 @@ async def handle_group_message(
                         {"prompt": fallback_prompt}
                     )
                     fallback_payload = json.loads(fallback_raw)
-                except json.JSONDecodeError:
-                    fallback_payload = {"success": False, "error": fallback_raw}
+                except json.JSONDecodeError as exc:
+                    LOGGER.error(f"Failed to parse generate_image response: {exc}")
+                    fallback_payload = {
+                        "success": False,
+                        "error": "Помилка парсингу відповіді",
+                    }
                 except Exception as exc:
                     LOGGER.error(
-                        "Fallback generate_image failed: %s",
-                        exc,
+                        f"Fallback generate_image failed: {exc}",
                         exc_info=True,
                     )
                     fallback_payload = {
@@ -1941,7 +2030,9 @@ async def handle_group_message(
                     reply_text = "Нічого не вийшло — сервіс брикнувся."
 
         if not reply_text or reply_text.isspace():
-            reply_text = _get_response("empty_reply", persona_loader, EMPTY_REPLY)
+            reply_text = _get_response(
+                "empty_reply", persona_loader, EMPTY_REPLY, bot_username=bot_username
+            )
 
         reply_trimmed = reply_text[:4096]
         reply_markdown_safe = _escape_markdown(reply_trimmed)

@@ -32,6 +32,25 @@ class Settings(BaseSettings):
     )  # Reduced from 50 to prevent token overflow
     per_user_per_hour: int = Field(5, alias="PER_USER_PER_HOUR", ge=1)
     context_summary_threshold: int = Field(30, alias="CONTEXT_SUMMARY_THRESHOLD", ge=5)
+
+    # Feature-specific rate limiting and throttling
+    enable_feature_throttling: bool = Field(True, alias="ENABLE_FEATURE_THROTTLING")
+    enable_adaptive_throttling: bool = Field(True, alias="ENABLE_ADAPTIVE_THROTTLING")
+    enable_command_throttling: bool = Field(True, alias="ENABLE_COMMAND_THROTTLING")
+    command_cooldown_seconds: int = Field(
+        300, alias="COMMAND_COOLDOWN_SECONDS", ge=60, le=3600
+    )
+    weather_limit_per_hour: int = Field(
+        10, alias="WEATHER_LIMIT_PER_HOUR", ge=1, le=100
+    )
+    currency_limit_per_hour: int = Field(
+        20, alias="CURRENCY_LIMIT_PER_HOUR", ge=1, le=100
+    )
+    web_search_limit_per_hour: int = Field(
+        5, alias="WEB_SEARCH_LIMIT_PER_HOUR", ge=1, le=50
+    )
+    memory_limit_per_hour: int = Field(30, alias="MEMORY_LIMIT_PER_HOUR", ge=1, le=100)
+    poll_limit_per_day: int = Field(5, alias="POLL_LIMIT_PER_DAY", ge=1, le=20)
     use_redis: bool = Field(False, alias="USE_REDIS")
     redis_url: str | None = Field("redis://localhost:6379/0", alias="REDIS_URL")
     admin_user_ids: str = Field("", alias="ADMIN_USER_IDS")
@@ -47,6 +66,15 @@ class Settings(BaseSettings):
     gemini_max_media_items: int = Field(
         28, alias="GEMINI_MAX_MEDIA_ITEMS", ge=1, le=100
     )  # Conservative limit for Gemma (max 32), other models may support more
+    gemini_max_media_items_current: int = Field(
+        8, alias="GEMINI_MAX_MEDIA_ITEMS_CURRENT", ge=1, le=50
+    )  # Limit media attachments from the current message
+    gemini_max_media_items_historical: int = Field(
+        5, alias="GEMINI_MAX_MEDIA_ITEMS_HISTORICAL", ge=0, le=50
+    )  # Limit historical media from conversation context (0 = disable historical media)
+    gemini_max_video_items: int = Field(
+        1, alias="GEMINI_MAX_VIDEO_ITEMS", ge=0, le=10
+    )  # Maximum videos/animations to include (others replaced with text descriptions)
 
     # Weather API configuration
     openweather_api_key: str | None = Field(None, alias="OPENWEATHER_API_KEY")
@@ -66,7 +94,7 @@ class Settings(BaseSettings):
         None, alias="IMAGE_GENERATION_API_KEY"
     )  # Optional separate API key for image generation (defaults to gemini_api_key)
     image_generation_daily_limit: int = Field(
-        1, alias="IMAGE_GENERATION_DAILY_LIMIT", ge=1, le=10
+        3, alias="IMAGE_GENERATION_DAILY_LIMIT", ge=1, le=10
     )  # Images per user per day (admins unlimited)
 
     # User profiling configuration
@@ -290,6 +318,17 @@ class Settings(BaseSettings):
     compact_format_max_history: int = Field(
         50, alias="COMPACT_FORMAT_MAX_HISTORY", ge=10, le=100
     )  # More messages due to efficiency
+    compact_format_use_full_ids: bool = Field(
+        True, alias="COMPACT_FORMAT_USE_FULL_IDS"
+    )  # Use full user IDs (better clarity) vs last 6 digits (fewer tokens)
+
+    # Reply Chain Context (October 2025)
+    include_reply_excerpt: bool = Field(
+        True, alias="INCLUDE_REPLY_EXCERPT"
+    )  # Always include replied message content in context
+    reply_excerpt_max_chars: int = Field(
+        200, alias="REPLY_EXCERPT_MAX_CHARS", ge=50, le=500
+    )  # Maximum characters for reply excerpts
 
     # Performance & Caching
     enable_result_caching: bool = Field(True, alias="ENABLE_RESULT_CACHING")

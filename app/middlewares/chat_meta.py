@@ -4,7 +4,7 @@ import asyncio
 from typing import Any
 
 from aiogram import BaseMiddleware, Bot
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery
 
 from app.config import Settings
 from app.services.context_store import ContextStore
@@ -48,6 +48,7 @@ class ChatMetaMiddleware(BaseMiddleware):
         redis_client: RedisLike | None = None,
         rate_limiter: RateLimiter | None = None,
         image_gen_service: Any | None = None,
+        feature_limiter: Any | None = None,
     ) -> None:
         self._bot = bot
         self._settings = settings
@@ -66,6 +67,7 @@ class ChatMetaMiddleware(BaseMiddleware):
         self._redis = redis_client
         self._rate_limiter = rate_limiter
         self._image_gen_service = image_gen_service
+        self._feature_limiter = feature_limiter
         self._bot_username: str | None = None
         self._bot_id: int | None = None
         self._lock = asyncio.Lock()
@@ -94,8 +96,13 @@ class ChatMetaMiddleware(BaseMiddleware):
                     self._continuous_monitor.set_bot_instance(self._bot)
         return self._bot_username or "", self._bot_id
 
-    async def __call__(self, handler, event: Message, data):  # type: ignore[override]
+    async def __call__(self, handler, event: Message | CallbackQuery, data):  # type: ignore[override]
         if isinstance(event, Message):
+            bot_username, bot_id = await self._ensure_bot_identity()
+            data["bot_username"] = bot_username
+            data["bot_id"] = bot_id
+        elif isinstance(event, CallbackQuery):
+            # Also inject bot identity for callback queries
             bot_username, bot_id = await self._ensure_bot_identity()
             data["bot_username"] = bot_username
             data["bot_id"] = bot_id
@@ -112,6 +119,7 @@ class ChatMetaMiddleware(BaseMiddleware):
         data["bot_profile"] = self._bot_profile
         data["bot_learning"] = self._bot_learning
         data["prompt_manager"] = self._prompt_manager
+        data["feature_limiter"] = self._feature_limiter
         if (
             self._multi_level_context_manager is None
             and self._settings.enable_multi_level_context

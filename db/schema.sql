@@ -18,10 +18,21 @@ CREATE TABLE IF NOT EXISTS messages (
     ts INTEGER NOT NULL
 );
 
+-- Indexes for external ID lookups (Phase A)
+CREATE INDEX IF NOT EXISTS idx_messages_chat_external_msg
+    ON messages(chat_id, external_message_id);
+CREATE INDEX IF NOT EXISTS idx_messages_chat_external_user
+    ON messages(chat_id, external_user_id);
+CREATE INDEX IF NOT EXISTS idx_messages_chat_reply_external_msg
+    ON messages(chat_id, reply_to_external_message_id);
+CREATE INDEX IF NOT EXISTS idx_messages_chat_reply_external_user
+    ON messages(chat_id, reply_to_external_user_id);
+
 CREATE TABLE IF NOT EXISTS bans (
     chat_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
     ts INTEGER NOT NULL,
+    last_notice_time INTEGER,
     PRIMARY KEY (chat_id, user_id)
 );
 
@@ -839,9 +850,93 @@ CREATE TABLE IF NOT EXISTS image_quotas (
     PRIMARY KEY (user_id, chat_id, generation_date)
 );
 
-CREATE INDEX IF NOT EXISTS idx_image_quotas_user_date 
+CREATE INDEX IF NOT EXISTS idx_image_quotas_user_date
     ON image_quotas(user_id, generation_date);
-CREATE INDEX IF NOT EXISTS idx_image_quotas_chat_date 
+CREATE INDEX IF NOT EXISTS idx_image_quotas_chat_date
     ON image_quotas(chat_id, generation_date);
-CREATE INDEX IF NOT EXISTS idx_image_quotas_last_gen 
+CREATE INDEX IF NOT EXISTS idx_image_quotas_last_gen
     ON image_quotas(last_generation_ts);
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- Feature-Level Throttling and Adaptive Rate Limiting
+-- Added: October 21, 2025
+-- Comprehensive throttling system with per-feature limits and adaptive reputation
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+-- Feature-specific rate limiting (weather, currency, images, polls, memory, etc.)
+CREATE TABLE IF NOT EXISTS feature_rate_limits (
+    user_id INTEGER NOT NULL,
+    feature_name TEXT NOT NULL,
+    window_start INTEGER NOT NULL,
+    request_count INTEGER NOT NULL DEFAULT 0,
+    last_request INTEGER NOT NULL,
+    PRIMARY KEY (user_id, feature_name, window_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_feature_rate_limits_window
+    ON feature_rate_limits(window_start);
+
+CREATE INDEX IF NOT EXISTS idx_feature_rate_limits_user_feature
+    ON feature_rate_limits(user_id, feature_name);
+
+CREATE INDEX IF NOT EXISTS idx_feature_rate_limits_last_request
+    ON feature_rate_limits(last_request);
+
+-- Cooldown tracking for per-request cooldowns (e.g., image generation)
+CREATE TABLE IF NOT EXISTS feature_cooldowns (
+    user_id INTEGER NOT NULL,
+    feature_name TEXT NOT NULL,
+    last_used INTEGER NOT NULL,
+    cooldown_seconds INTEGER NOT NULL,
+    PRIMARY KEY (user_id, feature_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_feature_cooldowns_last_used
+    ON feature_cooldowns(last_used);
+
+-- User reputation and throttle adjustment
+CREATE TABLE IF NOT EXISTS user_throttle_metrics (
+    user_id INTEGER PRIMARY KEY,
+    throttle_multiplier REAL DEFAULT 1.0,  -- 0.5-2.0 range (higher = more lenient)
+    spam_score REAL DEFAULT 0.0,           -- 0.0-1.0 (higher = more spammy)
+    total_requests INTEGER DEFAULT 0,
+    throttled_requests INTEGER DEFAULT 0,
+    burst_requests INTEGER DEFAULT 0,      -- Requests in short time spans
+    avg_request_spacing_seconds REAL DEFAULT 0.0,
+    last_reputation_update INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_throttle_metrics_multiplier
+    ON user_throttle_metrics(throttle_multiplier);
+
+CREATE INDEX IF NOT EXISTS idx_user_throttle_metrics_spam_score
+    ON user_throttle_metrics(spam_score DESC);
+
+-- Request history for pattern analysis
+CREATE TABLE IF NOT EXISTS user_request_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    feature_name TEXT NOT NULL,
+    requested_at INTEGER NOT NULL,
+    was_throttled INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_request_history_user_time
+    ON user_request_history(user_id, requested_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_user_request_history_feature
+    ON user_request_history(feature_name);
+
+CREATE INDEX IF NOT EXISTS idx_user_request_history_throttled
+    ON user_request_history(was_throttled) WHERE was_throttled = 1;
+
+-- Cleanup trigger: auto-delete request history older than 7 days
+CREATE TRIGGER IF NOT EXISTS cleanup_old_request_history
+AFTER INSERT ON user_request_history
+BEGIN
+    DELETE FROM user_request_history
+    WHERE requested_at < (strftime('%s', 'now') - 604800); -- 7 days in seconds
+END;

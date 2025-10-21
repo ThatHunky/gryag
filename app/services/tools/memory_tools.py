@@ -210,6 +210,7 @@ async def recall_facts_tool(
     chat_id: int | None = None,
     profile_store: "UserProfileStore | UserProfileStoreAdapter | None" = None,
     fact_repo: UnifiedFactRepository | None = None,
+    gemini_client: Any | None = None,
 ) -> str:
     """
     Tool handler for recalling existing facts.
@@ -238,47 +239,106 @@ async def recall_facts_tool(
 
         fact_repo = _resolve_fact_repo(profile_store, fact_repo)
 
-        # Get facts from profile store
-        facts = await profile_store.get_facts(
-            user_id=user_id,
-            chat_id=chat_id,
-            limit=limit * 2,  # Get more for filtering
-        )
+        # Candidate collection strategy:
+        # - Prefer unified fact repository if available (can include embeddings)
+        # - Fallback to legacy profile_store.get_facts
+        candidates: list[dict[str, Any]] = []
+        if fact_repo:
+            # Pull a reasonably large set for filtering/ranking
+            repo_facts = await fact_repo.get_facts(
+                entity_id=user_id,
+                chat_context=chat_id,
+                categories=fact_types if fact_types else None,
+                limit=max(100, limit * 5),
+            )
+            candidates.extend(repo_facts)
+        if not candidates:
+            # Legacy path
+            facts = await profile_store.get_facts(  # type: ignore[union-attr]
+                user_id=user_id,
+                chat_id=chat_id,
+                limit=max(100, limit * 5),
+            )
+            # Map to a unified shape (fact_type -> fact_category)
+            for f in facts:
+                f.setdefault("fact_category", f.get("fact_type"))
+            if fact_types:
+                facts = [f for f in facts if f.get("fact_category") in fact_types]
+            candidates.extend(facts)
 
-        # Filter by type if requested
-        if fact_types:
-            facts = [f for f in facts if f.get("fact_type") in fact_types]
+        # Ranking: semantic if possible else substring filter
+        ranked: list[tuple[float, dict[str, Any]]] = []
+        if search_query and gemini_client and candidates:
+            try:
+                query_emb = await gemini_client.embed_text(search_query)
+            except Exception:
+                query_emb = []
 
-        # TODO: Implement semantic search if query provided
-        # For now, just simple text matching
-        if search_query:
-            query_lower = search_query.lower()
-            facts = [
-                f
-                for f in facts
-                if query_lower in f.get("fact_value", "").lower()
-                or query_lower in f.get("fact_key", "").lower()
-            ]
+            def _cos(vec1: list[float], vec2: list[float]) -> float:
+                try:
+                    import math
 
-        # Limit results
-        facts = facts[:limit]
+                    if not vec1 or not vec2 or len(vec1) != len(vec2):
+                        return 0.0
+                    dp = sum(a * b for a, b in zip(vec1, vec2))
+                    m1 = math.sqrt(sum(a * a for a in vec1))
+                    m2 = math.sqrt(sum(b * b for b in vec2))
+                    if m1 == 0 or m2 == 0:
+                        return 0.0
+                    return dp / (m1 * m2)
+                except Exception:
+                    return 0.0
+
+            # Score by embedding if available, fallback to substring boost
+            ql = search_query.lower()
+            for f in candidates:
+                emb = f.get("embedding")
+                score = 0.0
+                if isinstance(emb, list) and query_emb:
+                    score = _cos(query_emb, emb)
+                # Apply a small textual boost so that exact matches surface even without embeddings
+                val = str(f.get("fact_value", "")).lower()
+                key = str(f.get("fact_key", "")).lower()
+                if ql in val or ql in key:
+                    score += 0.05
+                ranked.append((float(score), f))
+
+            ranked.sort(key=lambda x: x[0], reverse=True)
+            selected = [f for _, f in ranked[:limit]]
+        else:
+            # Simple substring filter
+            selected = candidates
+            if search_query:
+                ql = search_query.lower()
+                selected = [
+                    f
+                    for f in selected
+                    if ql in str(f.get("fact_value", "")).lower()
+                    or ql in str(f.get("fact_key", "")).lower()
+                ]
+            # Limit results
+            selected = selected[:limit]
+
+        facts = selected
 
         # Format for Gemini
         result = {
             "status": "success",
             "count": len(facts),
-            "facts": [
+            "facts": [],
+        }
+
+        for f in facts:
+            result["facts"].append(
                 {
                     "fact_id": f.get("id"),
-                    "type": f.get("fact_type"),
+                    "type": f.get("fact_type") or f.get("fact_category"),
                     "key": f.get("fact_key"),
                     "value": f.get("fact_value"),
                     "confidence": f.get("confidence"),
                     "created_at": f.get("created_at"),
                 }
-                for f in facts
-            ],
-        }
+            )
 
         # Telemetry
         latency_ms = int((time.time() - start_time) * 1000)
@@ -413,7 +473,9 @@ async def update_fact_tool(
 
                 db_path = _resolve_db_path(profile_store)
                 if not db_path:
-                    raise RuntimeError("Database path unavailable for legacy profile store")
+                    raise RuntimeError(
+                        "Database path unavailable for legacy profile store"
+                    )
 
                 now = int(time.time())
                 async with aiosqlite.connect(db_path) as db:
@@ -562,7 +624,9 @@ async def forget_all_facts_tool(
 
                 db_path = _resolve_db_path(profile_store)
                 if not db_path:
-                    raise RuntimeError("Database path unavailable for legacy profile store")
+                    raise RuntimeError(
+                        "Database path unavailable for legacy profile store"
+                    )
 
                 async with aiosqlite.connect(db_path) as db:
                     cursor = await db.execute(
@@ -817,7 +881,9 @@ async def forget_fact_tool(
 
                 db_path = _resolve_db_path(profile_store)
                 if not db_path:
-                    raise RuntimeError("Database path unavailable for legacy profile store")
+                    raise RuntimeError(
+                        "Database path unavailable for legacy profile store"
+                    )
 
                 async with aiosqlite.connect(db_path) as db:
                     cursor = await db.execute(
@@ -862,10 +928,7 @@ async def forget_fact_tool(
                 )
             except Exception as e:
                 LOGGER.warning(
-                    "Failed to delete source message %s for fact %s: %s",
-                    source_message_id,
-                    fact_id,
-                    e,
+                    f"Failed to delete source message {source_message_id} for fact {fact_id}: {e}"
                 )
 
         # Telemetry

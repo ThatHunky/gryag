@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any, Iterable
@@ -51,7 +52,7 @@ META_KEY_ORDER = [
 ]
 
 
-def format_metadata(meta: dict[str, Any]) -> str:
+def format_metadata(meta: dict[str, Any], include_reply_chain: bool = True) -> str:
     """
     Format metadata dict into a compact text snippet for Gemini.
 
@@ -60,6 +61,11 @@ def format_metadata(meta: dict[str, Any]) -> str:
     - Drops optional fields when null/empty
     - Truncates long values aggressively
     - Uses shortest possible format
+
+    Args:
+        meta: Metadata dictionary to format
+        include_reply_chain: If False, excludes reply_to_* fields to simplify context.
+                           Use False for historical context, True for immediate/trigger messages.
     """
     if not meta:
         return ""  # Drop empty metadata block entirely
@@ -68,6 +74,11 @@ def format_metadata(meta: dict[str, Any]) -> str:
     for key in META_KEY_ORDER:
         if key not in meta:
             continue
+
+        # Skip reply chain fields if requested (for cleaner historical context)
+        if not include_reply_chain and key.startswith("reply_to_"):
+            continue
+
         value = meta[key]
 
         # Skip None, empty strings, and zero values for optional fields
@@ -89,11 +100,12 @@ def format_metadata(meta: dict[str, Any]) -> str:
                 .strip()
             )
             # Truncate usernames and names to preserve distinguishing info
-            # Increased from 30 to 60 to avoid cutting off name suffixes that help identify users
+            # Increased from 30 to 60 (Oct 2025), now to 100 to preserve full distinguishing information
+            # while still preventing excessive token usage
             max_len = (
-                60
+                100
                 if key in ("name", "username", "reply_to_name", "reply_to_username")
-                else 80
+                else 120
             )
             if len(sanitized) > max_len:
                 sanitized = sanitized[: max_len - 2] + ".."
@@ -136,6 +148,45 @@ class ContextStore:
                     f"SQLite schema file not found at {SCHEMA_PATH}. Ensure 'db/schema.sql' exists in project root and is mounted into the container."
                 )
             async with aiosqlite.connect(self._db_path) as db:
+                # Preflight migration for legacy DBs: ensure external_* columns exist
+                try:
+                    async with db.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='messages'"
+                    ) as cursor:
+                        row = await cursor.fetchone()
+                    if row:  # messages table exists, check columns
+                        cols: set[str] = set()
+                        async with db.execute("PRAGMA table_info(messages)") as cur2:
+                            for r in await cur2.fetchall():
+                                # PRAGMA table_info returns: cid, name, type, notnull, dflt_value, pk
+                                cols.add(r[1])
+                        # Add missing columns (idempotent)
+                        if "embedding" not in cols:
+                            await db.execute(
+                                "ALTER TABLE messages ADD COLUMN embedding TEXT"
+                            )
+                        if "external_message_id" not in cols:
+                            await db.execute(
+                                "ALTER TABLE messages ADD COLUMN external_message_id TEXT"
+                            )
+                        if "external_user_id" not in cols:
+                            await db.execute(
+                                "ALTER TABLE messages ADD COLUMN external_user_id TEXT"
+                            )
+                        if "reply_to_external_message_id" not in cols:
+                            await db.execute(
+                                "ALTER TABLE messages ADD COLUMN reply_to_external_message_id TEXT"
+                            )
+                        if "reply_to_external_user_id" not in cols:
+                            await db.execute(
+                                "ALTER TABLE messages ADD COLUMN reply_to_external_user_id TEXT"
+                            )
+                        await db.commit()
+                except Exception:
+                    # Best-effort; proceed to full schema application
+                    pass
+
+                # Apply (or re-apply) full schema — safe due to IF NOT EXISTS
                 with SCHEMA_PATH.open("r", encoding="utf-8") as fh:
                     await db.executescript(fh.read())
                 try:
@@ -167,6 +218,15 @@ class ContextStore:
                     )
                 except aiosqlite.OperationalError:
                     pass
+
+                # Add last_notice_time column to bans table for throttled ban notices
+                try:
+                    await db.execute(
+                        "ALTER TABLE bans ADD COLUMN last_notice_time INTEGER"
+                    )
+                except aiosqlite.OperationalError:
+                    pass
+
                 await db.commit()
             self._initialized = True
 
@@ -250,7 +310,7 @@ class ContextStore:
         ts = int(time.time())
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute(
-                "INSERT OR REPLACE INTO bans (chat_id, user_id, ts) VALUES (?, ?, ?)",
+                "INSERT OR REPLACE INTO bans (chat_id, user_id, ts, last_notice_time) VALUES (?, ?, ?, NULL)",
                 (chat_id, user_id, ts),
             )
             await db.commit()
@@ -344,6 +404,51 @@ class ContextStore:
                 row = await cursor.fetchone()
                 return row is not None
 
+    async def should_send_ban_notice(
+        self, chat_id: int, user_id: int, cooldown_seconds: int = 1800
+    ) -> bool:
+        """
+        Check if we should send a ban notice to this user.
+        Returns True if enough time has passed since last notice (or first time).
+        Default cooldown: 30 minutes (1800 seconds)
+        """
+        await self.init()
+        current_time = int(time.time())
+
+        async with aiosqlite.connect(self._db_path) as db:
+            # Check last ban notice time
+            async with db.execute(
+                "SELECT last_notice_time FROM bans WHERE chat_id = ? AND user_id = ?",
+                (chat_id, user_id),
+            ) as cursor:
+                row = await cursor.fetchone()
+
+                if row is None:
+                    # Not banned
+                    return False
+
+                last_notice = row[0]
+                if last_notice is None:
+                    # First time - send notice and update timestamp
+                    await db.execute(
+                        "UPDATE bans SET last_notice_time = ? WHERE chat_id = ? AND user_id = ?",
+                        (current_time, chat_id, user_id),
+                    )
+                    await db.commit()
+                    return True
+
+                # Check if cooldown has passed
+                if current_time - last_notice >= cooldown_seconds:
+                    # Update timestamp
+                    await db.execute(
+                        "UPDATE bans SET last_notice_time = ? WHERE chat_id = ? AND user_id = ?",
+                        (current_time, chat_id, user_id),
+                    )
+                    await db.commit()
+                    return True
+
+                return False
+
     async def recent(
         self,
         chat_id: int,
@@ -402,7 +507,9 @@ class ContextStore:
                     pass
 
             if stored_meta:
-                meta_text = format_metadata(stored_meta)
+                # For historical context, exclude reply chains to simplify and avoid confusion
+                # This keeps user_id, name, username but removes reply_to_* fields
+                meta_text = format_metadata(stored_meta, include_reply_chain=False)
                 if meta_text:  # Only add if format_metadata returned non-empty
                     parts.append({"text": meta_text})
             if text:
@@ -499,7 +606,7 @@ class ContextStore:
             )
         return results
 
-    async def prune_old(self, retention_days: int) -> None:
+    async def prune_old(self, retention_days: int) -> int:
         """Prune old messages and related data safely.
 
         Behavior:
@@ -511,6 +618,7 @@ class ContextStore:
         await self.init()
         cutoff = int(time.time()) - int(retention_days) * 86400
 
+        deleted_total = 0
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
 
@@ -536,7 +644,7 @@ class ContextStore:
 
             if not candidate_ids:
                 self._last_prune_ts = int(time.time())
-                return
+                return 0
 
             # Delete in chunks of 500
             for chunk in _chunked(candidate_ids, 500):
@@ -557,5 +665,44 @@ class ContextStore:
                     chunk,
                 )
                 await db.commit()
+                deleted_total += len(chunk)
 
         self._last_prune_ts = int(time.time())
+        return deleted_total
+
+
+async def run_retention_pruning_task(
+    store: ContextStore,
+    retention_days: int,
+    prune_interval_seconds: int,
+) -> None:
+    """Background task for pruning old messages based on retention policy.
+
+    This task runs periodically to remove messages older than the configured
+    retention period.
+
+    Args:
+        store: The ContextStore instance to use for pruning
+        retention_days: Number of days to retain messages
+        prune_interval_seconds: Interval between pruning runs in seconds
+    """
+    logger = logging.getLogger(__name__)
+
+    while True:
+        try:
+            logger.info("Retention pruning: starting run")
+            try:
+                deleted = await store.prune_old(retention_days)
+                logger.info(
+                    "Retention pruning: completed",
+                    extra={
+                        "deleted_messages": deleted,
+                        "retention_days": retention_days,
+                    },
+                )
+            except Exception as e:
+                logger.error(f"Retention pruning failed: {e}", exc_info=True)
+        except Exception as exc:
+            logger.error(f"Error in retention pruner: {exc}", exc_info=True)
+
+        await asyncio.sleep(prune_interval_seconds)

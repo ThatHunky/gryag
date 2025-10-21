@@ -6,6 +6,7 @@ Provides common CRUD operations for all repositories.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, Dict, Generic, List, Optional, TypeVar
 
 import aiosqlite
@@ -29,13 +30,13 @@ class Repository(ABC, Generic[T]):
         ...         # implementation
     """
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str | Path):
         """Initialize repository.
 
         Args:
-            db_path: Path to SQLite database file
+            db_path: Path to SQLite database file (str or Path object)
         """
-        self.db_path = db_path
+        self.db_path = str(db_path) if isinstance(db_path, Path) else db_path
 
     def _get_connection(self) -> aiosqlite.Connection:
         """Get database connection manager.

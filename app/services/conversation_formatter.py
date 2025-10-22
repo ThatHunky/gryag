@@ -121,13 +121,15 @@ def describe_media(media_items: list[dict[str, Any]]) -> str:
             descriptions.append("[Audio]")
         elif kind == "document":
             filename = item.get("filename", "file")
-            # Truncate long filenames
-            if len(filename) > 20:
-                filename = filename[:17] + "..."
+            # Truncate long filenames so overall token stays short
+            # "[Document: " prefix = 11 chars, "]" suffix = 1 => allow filename <= 17
+            if len(filename) > 17:
+                filename = filename[:14] + "..."
             descriptions.append(f"[Document: {filename}]")
         else:
             descriptions.append(f"[{kind.title()}]")
 
+    # Return only specific media descriptors; callers may prefix a general marker
     return " ".join(descriptions)
 
 
@@ -158,7 +160,7 @@ def extract_metadata_from_parts(parts: list[dict[str, Any]]) -> dict[str, Any]:
                 value = match.group(2) or match.group(3)
 
                 # Convert numeric values
-                if value and value.isdigit():
+                if value and re.fullmatch(r"-?\d+", value):
                     metadata[key] = int(value)
                 else:
                     metadata[key] = value
@@ -236,17 +238,23 @@ def format_message_compact(
         speaker = f"{clean_username}#{short_id}"
 
     # Add reply chain if present
-    if reply_to_user_id is not None and reply_to_username:
+    if (reply_to_user_id is not None and reply_to_username) or (
+        reply_to_user_id is None and reply_to_username
+    ):
         reply_username = sanitize_username(reply_to_username)
         if user_id_map and reply_to_user_id in user_id_map:
             reply_short_id = user_id_map[reply_to_user_id]
         else:
-            reply_short_id = parse_user_id_short(reply_to_user_id)
+            reply_short_id = (
+                parse_user_id_short(reply_to_user_id)
+                if reply_to_user_id is not None
+                else ""
+            )
 
         if reply_short_id:
             speaker = f"{speaker} → {reply_username}#{reply_short_id}"
         else:
-            # Replying to bot
+            # Replying to bot or unknown target
             speaker = f"{speaker} → gryag"
 
     # Combine media description and text
@@ -267,7 +275,11 @@ def format_message_compact(
         content_parts.append(excerpt_label)
 
     if media_description:
-        content_parts.append(media_description)
+        # Prefix with a general media marker for readability in compact history
+        if not media_description.startswith("[Media]"):
+            content_parts.append(f"[Media] {media_description}")
+        else:
+            content_parts.append(media_description)
     if text:
         content_parts.append(text)
 

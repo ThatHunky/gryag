@@ -7,6 +7,9 @@ when processing messages.
 """
 
 import asyncio
+import pytest
+
+pytestmark = pytest.mark.asyncio
 import sys
 from pathlib import Path
 

@@ -6,6 +6,9 @@ Simulates the chat admin command flow without requiring a live Telegram bot.
 """
 
 import asyncio
+import pytest
+
+pytestmark = pytest.mark.asyncio
 import sys
 from pathlib import Path
 

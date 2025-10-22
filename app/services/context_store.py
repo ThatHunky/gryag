@@ -670,6 +670,115 @@ class ContextStore:
         self._last_prune_ts = int(time.time())
         return deleted_total
 
+    # =========================
+    # Quota tracking utilities
+    # =========================
+    async def log_request(
+        self, chat_id: int, user_id: int, now: int | None = None
+    ) -> None:
+        """
+        Log a user request for hourly quota tracking.
+
+        Note: Current implementation tracks per-user globally (no per-chat partition)
+        to keep schema compatibility with existing 'rate_limits' table. The chat_id
+        parameter is accepted for API compatibility and future partitioning but not used.
+
+        Args:
+            chat_id: Chat identifier (unused)
+            user_id: User identifier
+            now: Optional override for current timestamp (seconds)
+        """
+        await self.init()
+        current_ts = int(now or time.time())
+        window_seconds = 3600
+        window_start = current_ts - (current_ts % window_seconds)
+
+        async with aiosqlite.connect(self._db_path) as db:
+            # Drop very old windows (older than previous hour) to keep table small
+            await db.execute(
+                "DELETE FROM rate_limits WHERE window_start < ?",
+                (window_start - window_seconds,),
+            )
+
+            # Upsert current window counter
+            async with db.execute(
+                """
+                SELECT request_count FROM rate_limits
+                WHERE user_id = ? AND window_start = ?
+                """,
+                (user_id, window_start),
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            if row:
+                await db.execute(
+                    """
+                    UPDATE rate_limits
+                    SET request_count = request_count + 1, last_seen = ?
+                    WHERE user_id = ? AND window_start = ?
+                    """,
+                    (current_ts, user_id, window_start),
+                )
+            else:
+                await db.execute(
+                    """
+                    INSERT INTO rate_limits (user_id, window_start, request_count, last_seen)
+                    VALUES (?, ?, 1, ?)
+                    """,
+                    (user_id, window_start, current_ts),
+                )
+
+            await db.commit()
+
+    async def count_requests_last_hour(
+        self, chat_id: int, user_id: int, now: int | None = None
+    ) -> int:
+        """
+        Count how many requests this user made in the last 60 minutes.
+
+        Args:
+            chat_id: Chat identifier (unused)
+            user_id: User identifier
+            now: Optional override for current timestamp (seconds)
+
+        Returns:
+            Total requests observed in the trailing 60 minutes window
+        """
+        await self.init()
+        current_ts = int(now or time.time())
+        window_seconds = 3600
+        cutoff = current_ts - window_seconds
+
+        async with aiosqlite.connect(self._db_path) as db:
+            async with db.execute(
+                """
+                SELECT COALESCE(SUM(request_count), 0)
+                FROM rate_limits
+                WHERE user_id = ? AND window_start >= ?
+                """,
+                (user_id, cutoff - (cutoff % window_seconds)),
+            ) as cursor:
+                row = await cursor.fetchone()
+                return int(row[0] or 0)
+
+    async def reset_quotas(self, chat_id: int) -> int:
+        """
+        Reset recorded request quotas.
+
+        Current implementation resets all user windows (no per-chat partition).
+
+        Args:
+            chat_id: Chat identifier (unused)
+
+        Returns:
+            Number of rows deleted
+        """
+        await self.init()
+        async with aiosqlite.connect(self._db_path) as db:
+            cursor = await db.execute("DELETE FROM rate_limits")
+            await db.commit()
+            return cursor.rowcount or 0
+
 
 async def run_retention_pruning_task(
     store: ContextStore,

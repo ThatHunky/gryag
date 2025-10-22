@@ -10,6 +10,9 @@ This script checks:
 Run after bot has processed a few messages.
 """
 
+import pytest
+
+pytestmark = pytest.mark.asyncio
 import asyncio
 import sys
 from pathlib import Path

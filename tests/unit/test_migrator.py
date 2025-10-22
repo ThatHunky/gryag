@@ -7,7 +7,7 @@ from app.infrastructure.database.migrator import DatabaseMigrator, Migration
 
 
 @pytest.fixture
-async def empty_db(tmp_path):
+def empty_db(tmp_path):
     """Create empty test database."""
     db_path = tmp_path / "test_migrations.db"
     return db_path

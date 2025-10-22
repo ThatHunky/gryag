@@ -107,6 +107,11 @@ class Settings(BaseSettings):
         0.7, alias="FACT_CONFIDENCE_THRESHOLD", ge=0.0, le=1.0
     )
     fact_extraction_enabled: bool = Field(True, alias="FACT_EXTRACTION_ENABLED")
+    # Personal-only memory policy (store only user-centric facts)
+    enable_personal_only_memory: bool = Field(True, alias="ENABLE_PERSONAL_ONLY_MEMORY")
+    personal_memory_allowed_types: str = Field(
+        "personal,preference,skill,trait", alias="PERSONAL_MEMORY_ALLOWED_TYPES"
+    )  # comma-separated; excludes 'opinion' by default
     profile_summarization_interval_hours: int = Field(
         24, alias="PROFILE_SUMMARIZATION_INTERVAL_HOURS", ge=1
     )
@@ -540,6 +545,26 @@ class Settings(BaseSettings):
             for part in self.bot_trigger_patterns.split(",")
             if part.strip()
         ]
+
+    @property
+    def personal_memory_allowed_types_list(self) -> list[str]:
+        """Allowed fact types for personal-only memory policy as a list.
+
+        Valid types: personal, preference, trait, skill, opinion
+        """
+        raw = (self.personal_memory_allowed_types or "").strip()
+        if not raw:
+            return ["personal"]
+        items = [part.strip().lower() for part in raw.split(",") if part.strip()]
+        valid = {"personal", "preference", "trait", "skill", "opinion"}
+        # Keep order while filtering invalid values
+        result: list[str] = []
+        seen: set[str] = set()
+        for it in items:
+            if it in valid and it not in seen:
+                result.append(it)
+                seen.add(it)
+        return result or ["personal"]
 
     @field_validator("admin_user_ids", mode="before")
     @classmethod

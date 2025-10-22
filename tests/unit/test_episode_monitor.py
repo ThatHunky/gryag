@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 
 from app.config import Settings
 from app.services.context.episode_boundary_detector import (
@@ -57,7 +58,7 @@ def mock_boundary_detector():
     return detector
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def monitor(
     tmp_path, mock_settings, mock_gemini, mock_episodic_memory, mock_boundary_detector
 ):

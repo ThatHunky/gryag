@@ -4,6 +4,43 @@ All notable changes to gryag's memory, context, and learning systems.
 
 ## [Unreleased]
 
+### 2025-10-22 — Command Throttle Fix for Multi-Bot Groups
+
+**Summary**: Fixed bug where bot throttled ALL commands, including those meant for other bots. Now only throttles gryag's own registered commands.
+
+**Problem**: In Telegram groups with multiple bots, gryag was sending throttle messages to users who used commands for OTHER bots (e.g., `/dban`, `/start`, `/help@other_bot`). This was annoying and incorrect behavior.
+
+**Root Cause**: `CommandThrottleMiddleware` checked if message started with `/` but didn't verify:
+1. If the command was registered to gryag
+2. If the command was addressed to THIS bot specifically
+
+**Solution**:
+
+1. **Whitelist approach**: Added `KNOWN_COMMANDS` set with all gryag commands
+2. **Unknown command pass-through**: Commands not in whitelist are ignored (e.g., `/dban`, `/start`)
+3. **Bot mention detection**: Check if command has `@bot_username` suffix
+4. **Skip other bot commands**: If command is `/gryag@other_bot`, pass through without throttling
+5. **Case-insensitive matching**: Handle `/gryag@GRYAG_BOT` same as `/gryag@gryag_bot`
+
+**Behavior**:
+
+- `/gryag` → throttle (gryag's command)
+- `/gryagban` → throttle (gryag's command)
+- `/gryag@gryag_bot` → throttle (explicitly for this bot)
+- `/gryag@other_bot` → pass through (for different bot)
+- `/dban` → pass through (unknown command, likely another bot)
+- `/start` → pass through (not gryag's command)
+
+**Files modified**:
+
+- `app/middlewares/command_throttle.py` - Added whitelist + bot mention detection
+- `tests/unit/test_command_throttle_middleware.py` - Comprehensive test coverage
+- `scripts/verification/verify_command_throttle_fix.py` - Updated verification script
+
+**Verification**: Run `python3 scripts/verification/verify_command_throttle_fix.py` (20/20 tests pass ✓)
+
+---
+
 ### 2025-10-21 — Facts Pagination with Inline Buttons
 
 **Summary**: Improved `/gryagfacts` command with 5 facts per page (down from 20) and inline button navigation instead of text commands.

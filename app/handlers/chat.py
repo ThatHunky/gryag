@@ -647,6 +647,28 @@ async def _update_user_profile_background(
         if not settings.enable_user_profiling:
             return
 
+        # If memory is managed via Gemini tool calls, skip auto-extraction/storage.
+        # Gemini will decide what to remember using remember/update/forget tools.
+        if settings.enable_tool_based_memory:
+            LOGGER.debug(
+                "Tool-based memory enabled; skipping automatic fact extraction/storage"
+            )
+            # Still proceed with profile presence + counters to keep activity stats fresh
+            # but return before any extraction/storage below.
+            # Ensure profile exists and counters updated quickly, then exit.
+            profile = await profile_store.get_or_create_profile(
+                user_id=user_id,
+                chat_id=chat_id,
+                display_name=display_name,
+                username=username,
+            )
+            await profile_store.update_interaction_count(
+                user_id=user_id,
+                chat_id=chat_id,
+                thread_id=thread_id,
+            )
+            return
+
         # Get or create profile
         profile = await profile_store.get_or_create_profile(
             user_id=user_id,
@@ -704,8 +726,17 @@ async def _update_user_profile_background(
             min_confidence=settings.fact_confidence_threshold,
         )
 
-        # Store facts
-        for fact in facts:
+        # Enforce personal-only memory policy (configurable)
+        if settings.enable_personal_only_memory:
+            allowed_fact_types = set(settings.personal_memory_allowed_types_list)
+            filtered_facts = [
+                f for f in facts if f.get("fact_type") in allowed_fact_types
+            ]
+        else:
+            filtered_facts = facts
+
+        # Store only allowed facts
+        for fact in filtered_facts:
             await profile_store.add_fact(
                 user_id=user_id,
                 chat_id=chat_id,
@@ -716,10 +747,16 @@ async def _update_user_profile_background(
                 evidence_text=fact.get("evidence_text"),
             )
 
-        if facts:
+        if filtered_facts:
             LOGGER.info(
-                f"Extracted and stored {len(facts)} facts for user {user_id}",
-                extra={"user_id": user_id, "fact_count": len(facts)},
+                f"Extracted and stored {len(filtered_facts)} personal fact(s) for user {user_id}",
+                extra={"user_id": user_id, "fact_count": len(filtered_facts)},
+            )
+        elif facts and settings.enable_personal_only_memory:
+            pruned = len(facts)
+            LOGGER.info(
+                f"Filtered out {pruned} fact(s) due to personal-only policy for user {user_id}",
+                extra={"user_id": user_id, "filtered_count": pruned},
             )
 
     except Exception as e:
@@ -980,11 +1017,14 @@ async def handle_group_message(
 
     # Rate limiting (skip for admins)
     if not is_admin and rate_limiter is not None:
-        allowed, remaining, retry_after, should_show_error = (
-            await rate_limiter.check_and_increment(user_id=message.from_user.id)
+        allowed, remaining, retry_after = await rate_limiter.check_and_increment(
+            user_id=message.from_user.id
         )
         if not allowed:
             # Only send error message if we haven't sent one recently (10 min cooldown)
+            should_show_error = rate_limiter.should_send_error_message(
+                message.from_user.id
+            )
             if should_show_error:
                 wait_minutes = max((retry_after + 59) // 60, 1)
                 throttle_text = _get_response(
@@ -1501,7 +1541,9 @@ async def handle_group_message(
             max_media_total = (
                 settings.gemini_max_media_items
             )  # Default 28 (Gemini API limit)
-            max_historical = settings.gemini_max_media_items_historical  # Default 5
+            # Strict behavior: do not include historical media in compact mode;
+            # rely on text markers for awareness and only process media for current/replied messages
+            max_historical = 0
             max_videos = settings.gemini_max_video_items  # Default 1
 
             all_media = []
@@ -1707,6 +1749,42 @@ async def handle_group_message(
             base_system_prompt + timestamp_context + profile_context
         )
 
+    # JSON format path: strip media from history and add reply media to user_parts instead
+    if (not settings.enable_compact_conversation_format) and history:
+        try:
+            new_history: list[dict[str, Any]] = []
+            removed_media_count = 0
+            for msg in history:
+                parts = msg.get("parts", [])
+                new_parts: list[dict[str, Any]] = []
+                for part in parts:
+                    if isinstance(part, dict) and (
+                        ("inline_data" in part) or ("file_data" in part)
+                    ):
+                        # Drop historical media to save tokens; awareness preserved via text content
+                        removed_media_count += 1
+                        continue
+                    new_parts.append(part)
+                if new_parts:
+                    new_history.append({**msg, "parts": new_parts})
+                else:
+                    # Keep a tiny placeholder to avoid empty message
+                    new_history.append({**msg, "parts": [{"text": "[media omitted]"}]})
+
+            if removed_media_count > 0:
+                telemetry.increment_counter(
+                    "context.historical_media_dropped", removed_media_count
+                )
+                LOGGER.debug(
+                    "Stripped %d media item(s) from JSON history to enforce reply-only media",
+                    removed_media_count,
+                )
+            history = new_history
+        except Exception:
+            LOGGER.exception(
+                "Failed to strip media from history; proceeding with original history"
+            )
+
     # Inject reply context with media into history if needed
     # This ensures media from replied-to messages is visible even if outside context window
     if reply_context_for_history:
@@ -1747,9 +1825,7 @@ async def handle_group_message(
             if reply_context_for_history.get("text"):
                 reply_parts.append({"text": reply_context_for_history["text"]})
 
-            # Add media parts
-            if reply_context_for_history.get("media_parts"):
-                reply_parts.extend(reply_context_for_history["media_parts"])
+            # Do NOT add media parts to history in JSON mode; reply media will be attached to user_parts below
 
             # Insert at beginning of history (chronologically first)
             if reply_parts:
@@ -1760,10 +1836,43 @@ async def handle_group_message(
                     telemetry.increment_counter("context.reply_included_media")
 
                 LOGGER.debug(
-                    "Injected reply context with %d media part(s) into history for message %s",
-                    len(reply_context_for_history.get("media_parts", [])),
+                    "Injected reply context text/meta into history for message %s",
                     reply_msg_id,
                 )
+
+    # In JSON mode, attach reply media directly to user_parts (respecting total media cap)
+    if (not settings.enable_compact_conversation_format) and reply_context_for_history:
+        try:
+            reply_media = reply_context_for_history.get("media_parts") or []
+            if reply_media:
+                # Count media already in user_parts
+                current_media_count = sum(
+                    1
+                    for p in user_parts
+                    if isinstance(p, dict) and ("inline_data" in p or "file_data" in p)
+                )
+                max_total = settings.gemini_max_media_items
+                remaining = max(0, max_total - current_media_count)
+                if remaining > 0:
+                    to_add = reply_media[:remaining]
+                    user_parts.extend(to_add)
+                    dropped = len(reply_media) - len(to_add)
+                    if dropped > 0:
+                        user_parts.append(
+                            {
+                                "text": "[Деякі прикріплення з відповіді опущено для ефективності]",
+                            }
+                        )
+                    telemetry.increment_counter(
+                        "context.reply_included_media", len(to_add)
+                    )
+                    LOGGER.debug(
+                        "Attached %d reply media item(s) to user_parts (dropped: %d)",
+                        len(to_add),
+                        max(dropped, 0),
+                    )
+        except Exception:
+            LOGGER.exception("Failed to attach reply media to user_parts in JSON mode")
 
     # Track which tools were used in this request
     tools_used_in_request: list[str] = []

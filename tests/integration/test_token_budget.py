@@ -11,13 +11,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import pytest_asyncio
 
 from app.config import Settings
 from app.services.context.multi_level_context import MultiLevelContextManager
 from app.services.context_store import ContextStore
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def test_db(tmp_path: Path) -> Path:
     """Create a temporary test database."""
     db_path = tmp_path / "test_token_budget.db"

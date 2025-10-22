@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 
 from app.config import Settings
 from app.services.context.episode_boundary_detector import (
@@ -38,7 +39,7 @@ def mock_gemini():
     return client
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def detector(tmp_path, mock_settings, mock_gemini):
     """Create boundary detector instance."""
     db_path = tmp_path / "test.db"

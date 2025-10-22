@@ -1,6 +1,7 @@
 """Integration tests for user profile repository."""
 
 import pytest
+import pytest_asyncio
 from datetime import datetime
 from app.repositories.user_profile import (
     UserProfileRepository,
@@ -9,7 +10,7 @@ from app.repositories.user_profile import (
 )
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def profile_repo(test_db):
     """User profile repository with test database."""
     return UserProfileRepository(str(test_db))

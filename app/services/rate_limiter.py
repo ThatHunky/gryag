@@ -57,7 +57,7 @@ class RateLimiter:
 
     async def check_and_increment(
         self, user_id: int, now: int | None = None
-    ) -> Tuple[bool, int, int, bool]:
+    ) -> Tuple[bool, int, int]:
         """
         Check if the user is within the allowed rate and increment on success.
 
@@ -66,11 +66,11 @@ class RateLimiter:
             now: Optional override for current timestamp (seconds).
 
         Returns:
-            Tuple of (allowed, remaining_quota, retry_after_seconds, should_show_error)
+            Tuple of (allowed, remaining_quota, retry_after_seconds)
         """
         if self._limit <= 0:
             # Unlimited
-            return True, -1, 0, False
+            return True, -1, 0
 
         current_ts = int(now or time.time())
         window_start = current_ts - (current_ts % self.WINDOW_SECONDS)
@@ -95,12 +95,11 @@ class RateLimiter:
                 row = await cursor.fetchone()
 
                 if row and row[0] >= self._limit:
-                    should_show_error = self.should_send_error_message(user_id)
                     telemetry.increment_counter(
                         "rate_limiter.blocked",
                         user_id=user_id,
                     )
-                    return False, 0, retry_after, should_show_error
+                    return False, 0, retry_after
 
                 if row:
                     await db.execute(
@@ -130,7 +129,7 @@ class RateLimiter:
             user_id=user_id,
             remaining=remaining,
         )
-        return True, remaining, retry_after, False
+        return True, remaining, retry_after
 
     async def reset_chat(self, chat_id: int) -> int:
         """

@@ -26,10 +26,37 @@ class CommandThrottleMiddleware(BaseMiddleware):
     """
     Throttle bot commands to prevent spam.
 
+    Only throttles commands that are registered to this bot.
+    Ignores commands meant for other bots or unknown commands.
+
     Limits: Configurable cooldown per command (default: 5 minutes)
     Admins: Bypass all limits
     Disabled: If ENABLE_COMMAND_THROTTLING=false
     """
+
+    # All commands registered to gryag (without prefix)
+    KNOWN_COMMANDS = {
+        "gryag",  # USER_COMMANDS
+        "gryagban",
+        "gryagunban",
+        "gryagreset",
+        "gryagchatinfo",  # ADMIN_COMMANDS
+        "gryagprofile",
+        "gryagfacts",
+        "gryagremovefact",
+        "gryagforget",
+        "gryagexport",
+        "gryagusers",
+        "gryagself",
+        "gryaginsights",  # PROFILE_COMMANDS
+        "gryagchatfacts",
+        "gryagchatreset",  # CHAT_COMMANDS
+        "gryagprompt",
+        "gryagsetprompt",
+        "gryagresetprompt",
+        "gryagprompthistory",
+        "gryagactivateprompt",  # PROMPT_COMMANDS
+    }
 
     def __init__(self, settings: Settings, rate_limiter: FeatureRateLimiter) -> None:
         """
@@ -74,6 +101,36 @@ class CommandThrottleMiddleware(BaseMiddleware):
         if not event.from_user:
             return await handler(event, data)
 
+        # Extract command name (without @ mention if present)
+        command_with_args = event.text.split()[0] if event.text.split() else event.text
+        command_base = command_with_args.split("@")[0].lstrip("/").lower()
+
+        # Throttle all slash commands regardless of registration status.
+        # This prevents spam from unknown or deprecated commands as well.
+        # If a command explicitly targets another bot via @mention (handled below),
+        # we'll skip throttling accordingly.
+
+        # Check if command is addressed to a specific bot
+        # Format: /command@bot_username
+        bot_username = data.get("bot_username")
+        if bot_username and "@" in command_with_args:
+            # Extract the bot mention from the command
+            command_parts = command_with_args.split("@", 1)
+            if len(command_parts) == 2:
+                mentioned_bot = command_parts[1]
+                # If command is for a different bot, don't throttle
+                if mentioned_bot.lower() != bot_username.lower():
+                    logger.debug(
+                        f"Command for different bot (@{mentioned_bot}), skipping throttle",
+                        extra={
+                            "user_id": event.from_user.id,
+                            "command": command_with_args,
+                            "mentioned_bot": mentioned_bot,
+                            "our_bot": bot_username,
+                        },
+                    )
+                    return await handler(event, data)
+
         user_id = event.from_user.id
 
         # Admins bypass throttling
@@ -81,10 +138,12 @@ class CommandThrottleMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         # Check cooldown
-        allowed, retry_after, should_show_error = await self.rate_limiter.check_cooldown(
-            user_id=user_id,
-            feature="bot_commands",
-            cooldown_seconds=self.cooldown_seconds,
+        allowed, retry_after, should_show_error = (
+            await self.rate_limiter.check_cooldown(
+                user_id=user_id,
+                feature="bot_commands",
+                cooldown_seconds=self.cooldown_seconds,
+            )
         )
 
         if not allowed:

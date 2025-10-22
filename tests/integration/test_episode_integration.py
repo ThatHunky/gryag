@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 
 from app.config import get_settings
 from app.services.gemini import GeminiClient
@@ -25,7 +26,7 @@ from app.services.context.episodic_memory import EpisodicMemoryStore
 LOGGER = logging.getLogger(__name__)
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def test_db(tmp_path):
     """Create a temporary test database."""
     db_path = tmp_path / "test_episode_integration.db"
@@ -35,7 +36,7 @@ async def test_db(tmp_path):
         db_path.unlink()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def settings(test_db):
     """Get settings with test database."""
     settings = get_settings()
@@ -49,7 +50,7 @@ async def settings(test_db):
     return settings
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def gemini_client():
     """Create a mock Gemini client."""
     client = MagicMock(spec=GeminiClient)
@@ -62,7 +63,7 @@ async def gemini_client():
     return client
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def episodic_memory(test_db, gemini_client, settings):
     """Create episodic memory store."""
     memory = EpisodicMemoryStore(
@@ -74,7 +75,7 @@ async def episodic_memory(test_db, gemini_client, settings):
     return memory
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def boundary_detector(test_db, settings, gemini_client):
     """Create boundary detector."""
     detector = EpisodeBoundaryDetector(
@@ -85,7 +86,7 @@ async def boundary_detector(test_db, settings, gemini_client):
     return detector
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def episode_monitor(
     test_db, settings, gemini_client, episodic_memory, boundary_detector
 ):

@@ -1,6 +1,9 @@
 """Test script for Phase 5.1 memory tools implementation."""
 
 import asyncio
+import pytest
+
+pytestmark = pytest.mark.asyncio
 import json
 import sys
 from pathlib import Path

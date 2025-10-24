@@ -97,6 +97,11 @@ class Settings(BaseSettings):
         3, alias="IMAGE_GENERATION_DAILY_LIMIT", ge=1, le=10
     )  # Images per user per day (admins unlimited)
 
+    # Donation scheduler configuration
+    donation_ignored_chat_ids: str = Field(
+        "", alias="DONATION_IGNORED_CHAT_IDS"
+    )  # Comma-separated chat IDs to never send donation messages to
+
     # User profiling configuration
     enable_user_profiling: bool = Field(True, alias="ENABLE_USER_PROFILING")
     user_profile_retention_days: int = Field(
@@ -533,6 +538,14 @@ class Settings(BaseSettings):
         if not self.admin_chat_ids:
             return []
         parts = [part.strip() for part in self.admin_chat_ids.split(",")]
+        return [int(part) for part in parts if part]
+
+    @property
+    def donation_ignored_chat_ids_list(self) -> list[int]:
+        """Parse donation ignored chat IDs from string to list."""
+        if not self.donation_ignored_chat_ids:
+            return []
+        parts = [part.strip() for part in self.donation_ignored_chat_ids.split(",")]
         return [int(part) for part in parts if part]
 
     @property

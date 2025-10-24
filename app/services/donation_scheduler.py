@@ -54,6 +54,7 @@ class DonationScheduler:
         db_path: str | Path,
         context_store: ContextStore,
         target_chat_ids: list[int] | None = None,
+        ignored_chat_ids: list[int] | None = None,
     ) -> None:
         """Initialize donation scheduler.
 
@@ -62,11 +63,13 @@ class DonationScheduler:
             db_path: Path to SQLite database for tracking send timestamps
             context_store: Context store for checking bot activity
             target_chat_ids: List of chat IDs to send to (if None, sends to all active chats)
+            ignored_chat_ids: List of chat IDs to never send donation messages to
         """
         self.bot = bot
         self.db_path = Path(db_path)
         self.context_store = context_store
         self.target_chat_ids = target_chat_ids or []
+        self.ignored_chat_ids = set(ignored_chat_ids or [])
         self.scheduler = AsyncIOScheduler(timezone="Europe/Kiev")
         self._running = False
         self._lock = asyncio.Lock()
@@ -133,6 +136,13 @@ class DonationScheduler:
         async with self._lock:
             for chat_id in self.target_chat_ids:
                 try:
+                    # Skip ignored chats
+                    if chat_id in self.ignored_chat_ids:
+                        logger.debug(
+                            f"Skipping chat {chat_id} (in ignored chat IDs list)"
+                        )
+                        continue
+
                     # Only send to groups (negative chat IDs)
                     if chat_id >= 0:
                         logger.debug(
@@ -260,6 +270,7 @@ class DonationScheduler:
 
         This is used by the /gryagdonate command for on-demand sends.
         Bypasses group and activity filters (admin-triggered, so can send anywhere).
+        Respects ignored chat IDs list.
 
         Args:
             chat_id: Chat ID to send to
@@ -267,6 +278,13 @@ class DonationScheduler:
         Returns:
             True if sent successfully, False otherwise
         """
+        # Check if chat is in ignored list
+        if chat_id in self.ignored_chat_ids:
+            logger.info(
+                f"Cannot send on-demand donation message to chat {chat_id}: chat is in ignored list"
+            )
+            return False
+
         current_ts = int(time.time())
 
         async with self._lock:

@@ -201,3 +201,96 @@ def test_format_for_telegram_all_formats_combined():
         "Це <b>важливо</b> &amp; <tg-spoiler>секретно</tg-spoiler> і <i>красиво</i>!"
     )
     assert result == expected
+
+
+def test_format_for_telegram_protected_bug():
+    """
+    Test the specific bug from screenshot: **PROTECTED1** and **PROTECTED2** showing literally.
+
+    This was caused by placeholder text (\x00PROTECTED0\x00) being HTML-escaped,
+    which broke the placeholder replacement logic.
+    """
+    from app.handlers.chat import _format_for_telegram
+
+    # Simulate the problematic text from Gemini
+    text = "щоб дула була велика. Тримай свою е-гюрлу в панчохах. А ви тям, **PROTECTED2**, перестаньте один одному порно-гiфки та' нєцiкаві' &Бокі слати, лясьно-шоу. Порошенко, бляха. Хлопці."
+    result = _format_for_telegram(text)
+
+    # Should properly convert **PROTECTED2** to <b>PROTECTED2</b>
+    assert "<b>PROTECTED2</b>" in result
+
+    # Should NOT contain literal **PROTECTED (bug symptom)
+    assert "**PROTECTED" not in result
+
+    # Should properly escape HTML entities
+    assert "&amp;" in result
+
+    # Full expected result (single quotes are also escaped by html.escape)
+    expected = "щоб дула була велика. Тримай свою е-гюрлу в панчохах. А ви тям, <b>PROTECTED2</b>, перестаньте один одному порно-гiфки та&#x27; нєцiкаві&#x27; &amp;Бокі слати, лясьно-шоу. Порошенко, бляха. Хлопці."
+    assert result == expected
+
+
+def test_format_for_telegram_username_underscores():
+    """
+    Test that underscores in Telegram usernames are preserved.
+
+    Bug: @vsevolod_dobrovolskyi was being formatted as @vsevolod<i>dobrovolskyi</i>
+    because the underscore was treated as italic markdown.
+    """
+    from app.handlers.chat import _format_for_telegram
+
+    # Test various username patterns
+    tests = [
+        ("@vsevolod_dobrovolskyi", "@vsevolod_dobrovolskyi"),
+        ("@test_user_name", "@test_user_name"),
+        ("@Qyyya_nya", "@Qyyya_nya"),
+        (
+            "Привіт @vsevolod_dobrovolskyi, як справи?",
+            "Привіт @vsevolod_dobrovolskyi, як справи?",
+        ),
+        (
+            "@user_name та **bold** і *italic*",
+            "@user_name та <b>bold</b> і <i>italic</i>",
+        ),
+        ("@user_name це _курсив_", "@user_name це <i>курсив</i>"),
+    ]
+
+    for input_text, expected in tests:
+        result = _format_for_telegram(input_text)
+        assert (
+            result == expected
+        ), f"Failed for: {input_text}\nExpected: {expected}\nGot: {result}"
+
+
+def test_format_for_telegram_markdownv2_escapes():
+    """
+    Test that MarkdownV2 escape sequences are removed.
+    
+    Bug: Gemini sometimes generates text with MarkdownV2 escapes (backslashes before special chars)
+    which are needed for MarkdownV2 parse mode but should be removed for HTML parse mode.
+    """
+    from app.handlers.chat import _format_for_telegram
+
+    tests = [
+        # Basic escapes
+        (r'Текст з \- тире', 'Текст з - тире'),
+        (r'Крапка\. в кінці', 'Крапка. в кінці'),
+        (r'\~ тильда \~', '~ тильда ~'),
+        (r'\[дужки\]', '[дужки]'),
+        (r'\(скобки\)', '(скобки)'),
+        (r'Знак \+ плюс', 'Знак + плюс'),
+        (r'Знак \= рівності', 'Знак = рівності'),
+        (r'Вертикальна \| риска', 'Вертикальна | риска'),
+        
+        # Mixed with actual formatting
+        (r'Це **жирний\. текст**', 'Це <b>жирний. текст</b>'),
+        (r'\- Пункт списку', '- Пункт списку'),
+        (r'\- @vsevolod_dobrovolskyi', '- @vsevolod_dobrovolskyi'),
+        
+        # Real example from screenshot
+        (r'Це\, блять\, дуже важливо\!', 'Це, блять, дуже важливо!'),
+    ]
+    
+    for input_text, expected in tests:
+        result = _format_for_telegram(input_text)
+        assert result == expected, f"Failed for: {input_text}\nExpected: {expected}\nGot: {result}"

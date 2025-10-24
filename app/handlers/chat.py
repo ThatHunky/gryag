@@ -787,6 +787,7 @@ def _format_for_telegram(text: str) -> str:
     - ||spoiler|| -> <tg-spoiler>spoiler</tg-spoiler>
 
     Escapes HTML special characters to prevent parsing errors.
+    Preserves Telegram usernames (@username) without treating underscores as formatting.
     """
     if not text:
         return text
@@ -797,15 +798,33 @@ def _format_for_telegram(text: str) -> str:
     # Storage for protected content
     protected = []
 
-    def protect_content(content, tag):
+    def protect_content(content, tag=None):
         """Store content and return placeholder."""
-        escaped = html.escape(content)
-        # Use a placeholder that won't be affected by markdown parsing
-        placeholder = f"\x00PROTECTED{len(protected)}\x00"
-        protected.append((tag, escaped))
+        if tag:
+            # For formatting tags, escape HTML
+            escaped = html.escape(content)
+            placeholder = f"\ue000TGFMT{len(protected)}\ue001"
+            protected.append((tag, escaped))
+        else:
+            # For raw content (like usernames), don't escape yet
+            placeholder = f"\ue000RAW{len(protected)}\ue001"
+            protected.append((None, content))
         return placeholder
 
-    # Step 1: Extract and protect formatted blocks (order matters!)
+    # Step 0: Remove MarkdownV2 escape sequences (Gemini sometimes generates these)
+    # MarkdownV2 requires escaping special chars with \, but we use HTML mode
+    # Remove backslash before: _ * [ ] ( ) ~ ` > # + - = | { } . ! ,
+    text = re.sub(r"\\([_*\[\]()~`>#+=\-|{}.!,])", r"\1", text)
+
+    # Step 1: Protect Telegram usernames (@username) to prevent underscore processing
+    # Match @username pattern (alphanumeric, underscore, 5-32 chars)
+    text = re.sub(
+        r"@([a-zA-Z0-9_]{5,32})\b",
+        lambda m: protect_content(m.group(0)),
+        text,
+    )
+
+    # Step 2: Extract and protect formatted blocks (order matters!)
 
     # Protect spoilers ||text||
     text = re.sub(
@@ -829,13 +848,23 @@ def _format_for_telegram(text: str) -> str:
         text,
     )
 
-    # Step 2: HTML-escape the rest of the text
+    # Step 3: HTML-escape the rest of the text
     text = html.escape(text)
 
-    # Step 3: Restore protected content with HTML tags
+    # Step 4: Restore protected content with HTML tags or as-is
     for i, (tag, content) in enumerate(protected):
-        placeholder = f"\x00PROTECTED{i}\x00"
-        text = text.replace(placeholder, f"<{tag}>{content}</{tag}>")
+        if tag:
+            # Formatted content with tags
+            placeholder = f"\ue000TGFMT{i}\ue001"
+            text = text.replace(placeholder, f"<{tag}>{content}</{tag}>")
+        else:
+            # Raw content (usernames) - escape after restoring
+            placeholder = f"\ue000RAW{i}\ue001"
+            text = text.replace(placeholder, html.escape(content))
+
+    # Step 5: Safety check - remove any leaked placeholder patterns
+    # This catches cases where Unicode chars were stripped but pattern text remains
+    text = re.sub(r"TGFMT\d+|RAW\d+", "", text)
 
     return text
 

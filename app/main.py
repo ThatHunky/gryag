@@ -178,6 +178,7 @@ async def main() -> None:
         db_path=settings.db_path,
         context_store=store,
         target_chat_ids=donation_chat_ids,
+        ignored_chat_ids=settings.donation_ignored_chat_ids_list,
     )
     await donation_scheduler.start()
     logging.info(

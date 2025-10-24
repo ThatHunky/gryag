@@ -4,6 +4,60 @@ All notable changes to gryag's memory, context, and learning systems.
 
 ## [Unreleased]
 
+### 2025-01-24 — Donation Message Ignore List
+
+**Summary**: Added configuration to exclude specific chats from receiving donation messages.
+
+**Changes**:
+- Added `DONATION_IGNORED_CHAT_IDS` environment variable to `.env.example`
+- Added `donation_ignored_chat_ids` field and `donation_ignored_chat_ids_list` property to `Settings` class
+- Updated `DonationScheduler` to accept and respect ignored chat IDs list
+- Both scheduled and manual (`/gryagdonate`) donation messages now skip ignored chats
+- Added comprehensive test suite (5 tests) to verify ignored chat functionality
+
+**Files Changed**:
+- `app/config.py` - Added config field and property
+- `app/services/donation_scheduler.py` - Added ignored_chat_ids parameter and filtering logic
+- `app/main.py` - Pass ignored chat IDs to scheduler initialization
+- `.env.example` - Added DONATION_IGNORED_CHAT_IDS documentation
+- `tests/unit/test_donation_scheduler.py` - New test file with 5 tests
+
+**Usage**:
+```bash
+# In .env file, add comma-separated chat IDs to ignore:
+DONATION_IGNORED_CHAT_IDS=-100123456789,-100987654321
+```
+
+**Verification**: All 370 tests passing, including 5 new donation scheduler tests.
+
+### 2025-01-08 — Placeholder Pattern Sanitization
+
+**Summary**: Fixed placeholder text (TGFMT1, RAW2) appearing in bot responses.
+
+**Problem**:
+- Patterns like "TGFMT1", "RAW2" appearing in bot responses (especially from web search)
+- Unicode Private Use Area delimiters (\ue000, \ue001) being stripped during text processing
+- Bare placeholder patterns leaking into conversation context
+- Gemini regenerating these patterns in new responses
+
+**Root Cause**:
+- When bot replies containing placeholders were quoted in reply excerpts, Unicode characters could be stripped by text processing
+- Bare "TGFMT" patterns remained in context sent to Gemini
+- LLM learned these patterns and reproduced them
+
+**Solution**:
+- Added `sanitize_placeholder_text()` in `conversation_formatter.py`
+- Applied sanitization to all text entering conversation context
+- Added Step 5 safety check in `_format_for_telegram()` to catch leaked patterns
+- Created comprehensive test suite (11 tests)
+
+**Files Changed**:
+- `app/handlers/chat.py` - Added output sanitization safety check
+- `app/services/conversation_formatter.py` - Added sanitization function
+- `tests/unit/test_placeholder_sanitization.py` - Full test coverage
+
+**Verification**: 34 tests passing (23 formatting + 11 sanitization)
+
 ### 2025-10-24 — Fixed Message Formatting (Complete)
 
 **Summary**: Fixed all message formatting issues - bold, italic, and spoiler tags now render correctly.

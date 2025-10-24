@@ -15,7 +15,7 @@ import re
 from typing import Any
 
 
-def parse_user_id_short(user_id: int | None) -> str:
+def parse_user_id_short(user_id: int | str | None) -> str:
     """
     Convert user_id to string for compact format.
 
@@ -23,13 +23,19 @@ def parse_user_id_short(user_id: int | None) -> str:
     Now returns full ID for clarity and accurate user identification.
 
     Args:
-        user_id: Telegram user ID (or None for bot)
+        user_id: Telegram user ID (int, str, or None for bot)
 
     Returns:
         Full user ID as string, or empty string if None
     """
     if user_id is None:
         return ""
+    # Handle string user_id (convert to int first)
+    if isinstance(user_id, str):
+        try:
+            user_id = int(user_id)
+        except (ValueError, TypeError):
+            return user_id  # Return as-is if conversion fails
     return str(abs(user_id))
 
 
@@ -197,11 +203,11 @@ def extract_text_from_parts(parts: list[dict[str, Any]], skip_meta: bool = True)
 
 
 def format_message_compact(
-    user_id: int | None,
+    user_id: int | str | None,
     username: str,
     text: str,
     media_description: str = "",
-    reply_to_user_id: int | None = None,
+    reply_to_user_id: int | str | None = None,
     reply_to_username: str | None = None,
     reply_excerpt: str | None = None,
     user_id_map: dict[int, str] | None = None,
@@ -211,11 +217,11 @@ def format_message_compact(
     Format a single message in compact plain text format.
 
     Args:
-        user_id: Telegram user ID (None for bot)
+        user_id: Telegram user ID (int, str, or None for bot)
         username: Display name
         text: Message text content
         media_description: Optional media description like "[Image]"
-        reply_to_user_id: User ID being replied to
+        reply_to_user_id: User ID being replied to (int, str, or None)
         reply_to_username: Username being replied to
         reply_excerpt: Optional excerpt from the replied message
         user_id_map: Optional collision map for short IDs

@@ -170,6 +170,89 @@ async def view_default_prompt_command(message: Message, settings: Settings) -> N
     )
 
 
+@router.message(Command(commands=["gryagshowprompt", "showprompt"]))
+async def show_effective_prompt_command(
+    message: Message,
+    settings: Settings,
+    persona_loader: object | None = None,
+    prompt_manager: SystemPromptManager | None = None,
+) -> None:
+    """Admin command to show the effective system prompt used by the bot.
+
+    This shows the active prompt (DB override) if present, otherwise the
+    persona loader output (from templates/YAML), otherwise the hardcoded
+    `SYSTEM_PERSONA`. The full prompt is sent as a file for easy inspection.
+    """
+    if not message.from_user or not _is_admin(message.from_user.id, settings):
+        await message.reply(ADMIN_ONLY)
+        return
+
+    # Determine current time (reuse same logic as chat handler)
+    try:
+        from zoneinfo import ZoneInfo
+
+        kyiv_tz = ZoneInfo("Europe/Kiev")
+        current_time = datetime.now(kyiv_tz).strftime("%A, %B %d, %Y at %H:%M:%S")
+    except Exception:
+        import datetime as dt
+
+        utc_now = datetime.utcnow()
+        kyiv_time = utc_now + dt.timedelta(hours=3)
+        current_time = kyiv_time.strftime("%A, %B %d, %Y at %H:%M:%S")
+
+    # Fetch active DB prompt if available
+    active_prompt = None
+    try:
+        if prompt_manager is not None:
+            active_prompt = await prompt_manager.get_active_prompt(chat_id=None)
+    except Exception:
+        logger.exception("Failed to fetch active prompt from prompt_manager")
+
+    persona_text = None
+    persona_source = None
+    try:
+        if persona_loader is not None:
+            # persona_loader.get_system_prompt may accept current_time
+            try:
+                persona_text = persona_loader.get_system_prompt(
+                    current_time=current_time
+                )
+            except TypeError:
+                persona_text = persona_loader.get_system_prompt()
+            persona_source = getattr(persona_loader, "persona", None)
+    except Exception:
+        logger.exception("Failed to get persona text from PersonaLoader")
+
+    if active_prompt:
+        effective = active_prompt.prompt_text
+        source = f"DB active prompt (version v{active_prompt.version})"
+    elif persona_text:
+        effective = persona_text
+        source = f"Persona template ({getattr(persona_source, 'name', 'template')})"
+    else:
+        effective = SYSTEM_PERSONA
+        source = "Hardcoded app/persona.py (SYSTEM_PERSONA)"
+
+    preview = _format_prompt_preview(effective, max_length=500)
+
+    response = (
+        f"📋 <b>Ефективний системний промпт</b>\n\n"
+        f"Джерело: {source}\n"
+        f"Оновлено/перевірено: {current_time}\n"
+        f"Довжина: {len(effective)} символів\n\n"
+        f"<b>Попередній перегляд:</b>\n{preview}\n\n"
+        f"Повний текст промпту надіслано файлом."
+    )
+
+    await message.reply(response)
+
+    prompt_file = BufferedInputFile(
+        effective.encode("utf-8"),
+        filename=f"effective_system_prompt_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+    )
+    await message.reply_document(prompt_file, caption="Ефективний системний промпт")
+
+
 @router.message(Command(commands=["gryagsetprompt", "setprompt"]))
 async def set_prompt_command(
     message: Message,

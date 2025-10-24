@@ -23,7 +23,7 @@ class RateLimiter:
         # Track when we last sent throttle error message to each user
         # Format: {user_id: last_error_ts}
         self._last_error_message: dict[int, int] = {}
-        self._error_message_cooldown = 600  # 10 minutes
+        self._error_message_cooldown = 3600  # 1 hour
 
     async def init(self) -> None:
         """Ensure database is reachable."""
@@ -35,7 +35,7 @@ class RateLimiter:
         """
         Check if we should send throttle error message to user.
 
-        Only sends error messages once per 10 minutes to avoid spam.
+        Only sends error messages once per hour to avoid spam.
 
         Args:
             user_id: User ID

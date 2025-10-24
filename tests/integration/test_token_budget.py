@@ -58,17 +58,30 @@ async def test_immediate_context_respects_budget(
     chat_id = 123
     thread_id = None
 
-    # Add messages with varying lengths
+    # Add messages with varying lengths (user + model pairs)
     for i in range(10):
-        text = f"Message {i}: " + " ".join(
-            [f"word{j}" for j in range(50)]
-        )  # ~50 words each
+        # User message
+        user_text = f"Message {i}: " + " ".join(
+            [f"word{j}" for j in range(20)]
+        )  # ~20 words each (~26 tokens)
         await store.add_turn(
             chat_id=chat_id,
             thread_id=thread_id,
             user_id=i,
             role="user",
-            text=text,
+            text=user_text,
+            media=None,
+        )
+        # Model response
+        model_text = f"Response {i}: " + " ".join(
+            [f"reply{j}" for j in range(20)]
+        )  # ~20 words each (~26 tokens)
+        await store.add_turn(
+            chat_id=chat_id,
+            thread_id=thread_id,
+            user_id=None,
+            role="model",
+            text=model_text,
             media=None,
         )
 

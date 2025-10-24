@@ -357,6 +357,8 @@ class MultiLevelContextManager:
         # Convert message count to turn count (divide by 2, round up)
         limit = (self.settings.immediate_context_size + 1) // 2
         messages = await self.context_store.recent(chat_id, thread_id, limit)
+        # Filter and sanitize fetched messages before further processing
+        messages = self._filter_history(messages)
 
         # Debug: Log media presence before truncation
         media_count_before = sum(
@@ -413,6 +415,8 @@ class MultiLevelContextManager:
 
         # Get recent messages beyond immediate
         all_recent = await self.context_store.recent(chat_id, thread_id, limit)
+        # Filter and sanitize fetched messages before slicing into recent_only
+        all_recent = self._filter_history(all_recent)
 
         # Skip immediate context (already included)
         immediate_size = self.settings.immediate_context_size
@@ -803,6 +807,146 @@ class MultiLevelContextManager:
 
         return truncated
 
+    def _is_allowed_message(self, msg: dict[str, Any]) -> bool:
+        """
+        Determine if a message is allowed to be included in LLM-visible context.
+
+        Rules:
+        - Exclude messages with visibility set to non-public (e.g., 'hidden', 'deleted')
+        - Exclude messages explicitly marked as internal/debug
+        - Exclude messages whose role is 'system' or 'internal'
+        """
+        if not isinstance(msg, dict):
+            return False
+
+        # Visibility flags
+        visibility = msg.get("visibility") or msg.get("vis") or "public"
+        if str(visibility).lower() in ("hidden", "deleted", "internal"):
+            return False
+
+        # Explicit internal/debug flags
+        if msg.get("internal") or msg.get("is_debug") or msg.get("debug"):
+            return False
+
+        # Common role field
+        role = msg.get("role") or msg.get("sender_role") or msg.get("actor_role")
+        if role and str(role).lower() in ("system", "internal"):
+            return False
+
+        return True
+
+    def _sanitize_text(self, text: str | None) -> str | None:
+        """Sanitize text: redact emails, phone numbers, and strip obvious debug markers."""
+        import re
+
+        if text is None:
+            return None
+        if not text:
+            return ""
+
+        # Redact emails
+        text = re.sub(
+            r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "[redacted_email]", text
+        )
+
+        # Redact phone numbers (but NOT user IDs in Username#123456 format)
+        # Match phone patterns but avoid matching:
+        # - Numbers after # (user IDs)
+        # - Numbers after word characters (part of identifiers)
+        # - Numbers followed by : or word chars (IDs, not phones)
+        text = re.sub(
+            r"(?<!#)(?<!\w)\+?\d[\d\-() ]{6,}\d(?![\w:])", "[redacted_phone]", text
+        )
+
+        # Remove leading debug lines
+        text = re.sub(r"(?im)^\s*(debug|internal|trace):.*$", "", text)
+
+        # Collapse repeated whitespace
+        text = re.sub(r"\s+", " ", text).strip()
+
+        return text
+
+    def _sanitize_message(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """Return a sanitized shallow copy of a message suitable for inclusion in prompts."""
+        import copy
+
+        new_msg = copy.deepcopy(msg)
+
+        # Remove metadata/provenance keys that should not be revealed
+        for k in (
+            "provenance",
+            "metadata",
+            "internal_notes",
+            "debug_info",
+            "source",
+            "score",
+        ):
+            if k in new_msg:
+                new_msg.pop(k, None)
+
+        # Sanitize parts (text and placeholders). Keep minimal structure.
+        parts = []
+        for part in new_msg.get("parts", []):
+            if isinstance(part, dict):
+                if "text" in part:
+                    clean = self._sanitize_text(part.get("text"))
+                    parts.append({"text": clean})
+                elif "inline_data" in part:
+                    # Replace inline media with a harmless placeholder (no binary data)
+                    mime = part.get("inline_data", {}).get("mime_type", "media")
+                    parts.append({"text": f"[media: {mime}]"})
+                elif "file_data" in part:
+                    uri = part.get("file_data", {}).get("file_uri", "file")
+                    parts.append({"text": f"[file: {uri}]"})
+                else:
+                    # Fallback: stringify small values
+                    text = " ".join(
+                        str(v)
+                        for v in part.values()
+                        if isinstance(v, (str, int, float))
+                    )
+                    parts.append({"text": self._sanitize_text(text)})
+            else:
+                # Non-dict parts: coerce to text
+                parts.append({"text": self._sanitize_text(str(part))})
+
+        new_msg["parts"] = parts
+
+        # Sanitize top-level textual fields
+        for txt_field in ("text", "content", "body"):
+            if txt_field in new_msg and isinstance(new_msg[txt_field], str):
+                new_msg[txt_field] = self._sanitize_text(new_msg[txt_field])
+
+        return new_msg
+
+    def _filter_history(self, history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Filter and sanitize a list of historical messages.
+
+        Preserves chronological order. Removes messages that shouldn't be exposed to LLM.
+        """
+        if not history:
+            return []
+
+        filtered: list[dict[str, Any]] = []
+
+        for msg in history:
+            try:
+                if not self._is_allowed_message(msg):
+                    LOGGER.debug(
+                        "Filtered message from history",
+                        extra={"reason": "internal_or_hidden", "msg_id": msg.get("id")},
+                    )
+                    continue
+
+                sanitized = self._sanitize_message(msg)
+                filtered.append(sanitized)
+            except Exception as e:
+                LOGGER.warning(
+                    f"Failed to sanitize history message: {e}", exc_info=True
+                )
+
+        return filtered
+
     def _deduplicate_snippets(
         self,
         snippets: list[dict[str, Any]],
@@ -1007,20 +1151,25 @@ class MultiLevelContextManager:
         system_parts = []
 
         if context.background and context.background.profile_summary:
-            system_parts.append(f"User Profile: {context.background.profile_summary}")
+            system_parts.append(
+                f"User Profile: {self._sanitize_text(context.background.profile_summary)}"
+            )
 
         if context.relevant and context.relevant.snippets:
-            relevant_texts = [
-                f"[Relevance: {s['score']:.2f}] {s['text'][:200]}..."
-                for s in context.relevant.snippets[:5]
-            ]
+            relevant_texts = []
+            for s in context.relevant.snippets[:5]:
+                txt = s.get("text", "")
+                txt = self._sanitize_text(txt[:200])
+                score = s.get("score", 0.0)
+                relevant_texts.append(f"[Relevance: {score:.2f}] {txt}...")
             system_parts.append("Relevant Past Context:\n" + "\n".join(relevant_texts))
 
         if context.episodes and context.episodes.episodes:
-            episode_texts = [
-                f"[{ep['topic']}] {ep['summary'][:150]}..."
-                for ep in context.episodes.episodes
-            ]
+            episode_texts = []
+            for ep in context.episodes.episodes:
+                topic = self._sanitize_text(str(ep.get("topic", "")))
+                summary = self._sanitize_text(ep.get("summary", "")[:150])
+                episode_texts.append(f"[{topic}] {summary}...")
             system_parts.append("Memorable Events:\n" + "\n".join(episode_texts))
 
         system_context = "\n\n".join(system_parts) if system_parts else None
@@ -1079,20 +1228,25 @@ class MultiLevelContextManager:
         system_parts = []
 
         if context.background and context.background.profile_summary:
-            system_parts.append(f"User Profile: {context.background.profile_summary}")
+            system_parts.append(
+                f"User Profile: {self._sanitize_text(context.background.profile_summary)}"
+            )
 
         if context.relevant and context.relevant.snippets:
-            relevant_texts = [
-                f"[Relevance: {s['score']:.2f}] {s['text'][:200]}..."
-                for s in context.relevant.snippets[:5]
-            ]
+            relevant_texts = []
+            for s in context.relevant.snippets[:5]:
+                txt = s.get("text", "")
+                txt = self._sanitize_text(txt[:200])
+                score = s.get("score", 0.0)
+                relevant_texts.append(f"[Relevance: {score:.2f}] {txt}...")
             system_parts.append("Relevant Past Context:\n" + "\n".join(relevant_texts))
 
         if context.episodes and context.episodes.episodes:
-            episode_texts = [
-                f"[{ep['topic']}] {ep['summary'][:150]}..."
-                for ep in context.episodes.episodes
-            ]
+            episode_texts = []
+            for ep in context.episodes.episodes:
+                topic = self._sanitize_text(str(ep.get("topic", "")))
+                summary = self._sanitize_text(ep.get("summary", "")[:150])
+                episode_texts.append(f"[{topic}] {summary}...")
             system_parts.append("Memorable Events:\n" + "\n".join(episode_texts))
 
         system_context = "\n\n".join(system_parts) if system_parts else None

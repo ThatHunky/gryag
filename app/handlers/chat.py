@@ -522,6 +522,15 @@ def _clean_response_text(text: str) -> str:
     # Remove leading metadata
     text = _strip_leading_metadata(text)
 
+    # Remove bracketed system markers that Gemini sometimes adds
+    # Examples: [GENERATED_IMAGE], [ATTACHMENT], [IMAGE_GENERATED], etc.
+    text = re.sub(
+        r"\[(?:GENERATED_IMAGE|IMAGE_GENERATED|ATTACHMENT|GENERATED|IMAGE)\]",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
     # Clean up extra whitespace and empty lines
     lines = [line.strip() for line in text.split("\n")]
     lines = [line for line in lines if line and not line.startswith("[meta")]
@@ -768,47 +777,178 @@ async def _update_user_profile_background(
         telemetry.increment_counter("profile_update_errors")
 
 
-def _escape_markdown(text: str) -> str:
+def _format_for_telegram(text: str) -> str:
     """
-    Clean up text that might break Telegram Markdown parsing.
+    Format text for Telegram HTML parse mode.
 
-    Since we send replies using Markdown parse mode, we strip unwanted
-    emphasis markers while keeping legitimate list bullets and usernames.
+    Converts markdown/MarkdownV2 syntax to HTML:
+    - **bold** or __bold__ -> <b>bold</b>
+    - *italic* or _italic_ -> <i>italic</i>
+    - ||spoiler|| -> <tg-spoiler>spoiler</tg-spoiler>
+
+    Escapes HTML special characters to prevent parsing errors.
     """
     if not text:
         return text
 
-    def _strip_inline(pattern: re.Pattern[str], value: str) -> str:
-        return pattern.sub(r"\1", value)
+    import html
+    import re
 
-    emphasis_star = re.compile(r"(?<!\S)\*(?!\s)([^*]+?)(?<!\s)\*(?!\S)")
-    emphasis_underscore = re.compile(r"(?<!\S)_(?!\s)([^_]+?)(?<!\s)_(?!\S)")
+    # Storage for protected content
+    protected = []
 
-    text = _strip_inline(emphasis_star, text)
-    text = _strip_inline(emphasis_underscore, text)
+    def protect_content(content, tag):
+        """Store content and return placeholder."""
+        escaped = html.escape(content)
+        # Use a placeholder that won't be affected by markdown parsing
+        placeholder = f"\x00PROTECTED{len(protected)}\x00"
+        protected.append((tag, escaped))
+        return placeholder
 
-    # Collapse excessive decorative runs while leaving bullets intact
-    text = re.sub(r"\*{3,}", "**", text)
-    text = re.sub(r"_{3,}", "__", text)
+    # Step 1: Extract and protect formatted blocks (order matters!)
 
-    # Protect valid Markdown bullets so we do not escape their marker
-    bullet_placeholder = "\ufff0"
+    # Protect spoilers ||text||
+    text = re.sub(
+        r"\|\|(.*?)\|\|", lambda m: protect_content(m.group(1), "tg-spoiler"), text
+    )
 
-    def _protect_bullet(match: re.Match[str]) -> str:
-        return f"{match.group(1)}{match.group(2)}{bullet_placeholder} "
+    # Protect bold **text** or __text__
+    text = re.sub(r"\*\*(.*?)\*\*", lambda m: protect_content(m.group(1), "b"), text)
+    text = re.sub(r"__(.*?)__", lambda m: protect_content(m.group(1), "b"), text)
 
-    text = re.sub(r"(^|\n)(\s*)\* (?=\S)", _protect_bullet, text)
+    # Protect italic *text* or _text_ (but not ** or __)
+    # Negative lookbehind/lookahead to avoid matching ** or __
+    text = re.sub(
+        r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)",
+        lambda m: protect_content(m.group(1), "i"),
+        text,
+    )
+    text = re.sub(
+        r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)",
+        lambda m: protect_content(m.group(1), "i"),
+        text,
+    )
 
-    # Escape special Telegram markdown characters that might break rendering
-    text = text.replace("\\", "\\\\")
-    text = re.sub(r"(?<!\\)_", r"\_", text)
-    text = text.replace("*", r"\*")
-    text = text.replace(bullet_placeholder, "*")
+    # Step 2: HTML-escape the rest of the text
+    text = html.escape(text)
 
-    # Only escape brackets and backticks that could break formatting
-    text = re.sub(r"([`\[\]])", r"\\\1", text)
+    # Step 3: Restore protected content with HTML tags
+    for i, (tag, content) in enumerate(protected):
+        placeholder = f"\x00PROTECTED{i}\x00"
+        text = text.replace(placeholder, f"<{tag}>{content}</{tag}>")
 
     return text
+
+
+def _escape_markdown(text: str) -> str:
+    """
+    Clean up text that might break Telegram Markdown parsing.
+
+    Since we send replies using Markdown parse mode, we preserve intentional
+    formatting (bold/italic) while escaping special characters that break parsing.
+
+    NOTE: This function is deprecated. Use _format_for_telegram() with HTML parse mode instead.
+    """
+    if not text:
+        return text
+
+    # Strategy: Use regex to preserve markdown formatting while escaping special chars
+    # We need to:
+    # 1. Protect markdown formatting: **bold**, *bold*, __italic__, _italic_, `code`, ```code```
+    # 2. Escape all MarkdownV2 special chars OUTSIDE of these formatting blocks
+    # 3. Preserve list bullets
+
+    # Characters that need escaping in MarkdownV2
+    # Complete list from Telegram docs: _*[]()~`>#+-=|{}.!
+    # We handle * and _ specially to preserve intentional formatting
+    special_chars = set("_*[]()~`><#+-=|{}.!\\")
+
+    result = []
+    i = 0
+    text_len = len(text)
+
+    while i < text_len:
+        # Check for code blocks (triple backticks)
+        if i + 2 < text_len and text[i : i + 3] == "```":
+            # Find closing triple backticks
+            end = text.find("```", i + 3)
+            if end != -1:
+                # Include entire code block as-is
+                result.append(text[i : end + 3])
+                i = end + 3
+                continue
+
+        # Check for inline code (single backtick)
+        if text[i] == "`":
+            # Find closing backtick
+            end = text.find("`", i + 1)
+            if end != -1:
+                # Escape backticks but include content
+                result.append("\\`")
+                result.append(text[i + 1 : end])
+                result.append("\\`")
+                i = end + 1
+                continue
+
+        # Check for bold (**text** or __text__)
+        if i + 1 < text_len and text[i : i + 2] in ("**", "__"):
+            marker = text[i : i + 2]
+            # Find closing marker
+            end = text.find(marker, i + 2)
+            if end != -1 and end > i + 2:  # Must have content between markers
+                # Include formatting as-is
+                result.append(marker)
+                # Recursively escape content inside (but keep nested formatting)
+                inner_content = text[i + 2 : end]
+                result.append(inner_content)  # Don't escape inside formatting
+                result.append(marker)
+                i = end + 2
+                continue
+
+        # Check for italic (*text* or _text_)
+        if text[i] in ("*", "_"):
+            marker = text[i]
+            # Find closing marker (but not if it's part of ** or __)
+            if not (i + 1 < text_len and text[i + 1] == marker):
+                # Look for single marker
+                j = i + 1
+                while j < text_len:
+                    if text[j] == marker:
+                        # Make sure it's not part of double marker
+                        if not (j + 1 < text_len and text[j + 1] == marker):
+                            # Found closing marker
+                            if j > i + 1:  # Must have content
+                                result.append(marker)
+                                result.append(
+                                    text[i + 1 : j]
+                                )  # Don't escape inside formatting
+                                result.append(marker)
+                                i = j + 1
+                                break
+                    j += 1
+                else:
+                    # No closing marker found, escape the character
+                    result.append(f"\\{marker}")
+                    i += 1
+                continue
+
+        # Check for list bullets at start of line
+        if text[i] == "*" and (i == 0 or text[i - 1] == "\n"):
+            # Check if it's a bullet (* followed by space)
+            if i + 1 < text_len and text[i + 1] == " ":
+                result.append("* ")
+                i += 2
+                continue
+
+        # Regular character - escape if it's a special char
+        char = text[i]
+        if char in special_chars:
+            result.append(f"\\{char}")
+        else:
+            result.append(char)
+        i += 1
+
+    return "".join(result)
 
 
 def _summarize_long_context(
@@ -1221,7 +1361,9 @@ async def handle_group_message(
         raw_text, chat_id, thread_id, user_id
     )
     if poll_vote_result:
-        await message.reply(poll_vote_result, parse_mode="Markdown")
+        # Format for Telegram HTML mode for consistent formatting
+        poll_formatted = _format_for_telegram(poll_vote_result)
+        await message.reply(poll_formatted, parse_mode=ParseMode.HTML)
         return
 
     reply_context = None
@@ -1442,6 +1584,17 @@ async def handle_group_message(
 
     # Fetch custom system prompt from database (if configured by admin)
     base_system_prompt = SYSTEM_PERSONA
+
+    # Use persona from loader if available
+    if persona_loader is not None:
+        try:
+            base_system_prompt = persona_loader.get_system_prompt(
+                current_time=current_time
+            )
+        except Exception as e:
+            LOGGER.warning(
+                f"Failed to get system prompt from persona loader, using default: {e}"
+            )
 
     if prompt_manager:
         try:
@@ -2138,25 +2291,30 @@ async def handle_group_message(
                 if not fallback_success and not reply_text:
                     reply_text = "Нічого не вийшло — сервіс брикнувся."
 
+        # Memory-tool specific fallback: if Gemini returned nothing but a memory tool was used, confirm action
+        if (not reply_text or reply_text.isspace()) and tools_used_in_request:
+            if "forget_all_facts" in tools_used_in_request:
+                reply_text = "Готово. Я забув усе про тебе в цьому чаті."
+            elif "remember_fact" in tools_used_in_request:
+                reply_text = "Запам’ятав."
+            elif "update_fact" in tools_used_in_request:
+                reply_text = "Оновив."
+            elif "forget_fact" in tools_used_in_request:
+                reply_text = "Видалив."
+
         if not reply_text or reply_text.isspace():
             reply_text = _get_response(
                 "empty_reply", persona_loader, EMPTY_REPLY, bot_username=bot_username
             )
 
         reply_trimmed = reply_text[:4096]
-        reply_markdown_safe = _escape_markdown(reply_trimmed)
-        try:
-            response_message = await message.reply(
-                reply_markdown_safe,
-                parse_mode=ParseMode.MARKDOWN,
-                disable_web_page_preview=True,
-            )
-        except TelegramBadRequest:
-            LOGGER.warning(
-                "Failed to render Markdown reply; falling back to plain text",
-                exc_info=True,
-            )
-            response_message = await message.reply(reply_trimmed)
+        # Format for Telegram HTML mode (handles spoilers, escapes HTML)
+        reply_formatted = _format_for_telegram(reply_trimmed)
+        response_message = await message.reply(
+            reply_formatted,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
 
         model_meta = _build_model_metadata(
             response=response_message,

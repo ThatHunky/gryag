@@ -85,16 +85,17 @@ async def test_add_fact(profile_repo):
 
     # Add fact
     fact = UserFact(
-        fact_id=None,
+        id=None,
         user_id=123,
         chat_id=456,
-        category="personal",
-        fact_text="Lives in Kyiv",
+        fact_type="personal",
+        fact_key="location",
+        fact_value="Lives in Kyiv",
         confidence=0.9,
     )
     saved_fact = await profile_repo.add_fact(fact)
 
-    assert saved_fact.fact_id is not None
+    assert saved_fact.id is not None
     assert saved_fact.confidence == 0.9
 
 
@@ -107,19 +108,21 @@ async def test_get_facts(profile_repo):
 
     # Add facts
     fact1 = UserFact(
-        fact_id=None,
+        id=None,
         user_id=123,
         chat_id=456,
-        category="personal",
-        fact_text="Lives in Kyiv",
+        fact_type="personal",
+        fact_key="location",
+        fact_value="Lives in Kyiv",
         confidence=0.9,
     )
     fact2 = UserFact(
-        fact_id=None,
+        id=None,
         user_id=123,
         chat_id=456,
-        category="preference",
-        fact_text="Likes pizza",
+        fact_type="preference",
+        fact_key="food",
+        fact_value="Likes pizza",
         confidence=0.8,
     )
 
@@ -130,10 +133,10 @@ async def test_get_facts(profile_repo):
     facts = await profile_repo.get_facts(123, 456)
     assert len(facts) == 2
 
-    # Get facts by category
-    personal_facts = await profile_repo.get_facts(123, 456, category="personal")
+    # Get facts by type
+    personal_facts = await profile_repo.get_facts(123, 456, fact_type="personal")
     assert len(personal_facts) == 1
-    assert personal_facts[0].fact_text == "Lives in Kyiv"
+    assert personal_facts[0].fact_value == "Lives in Kyiv"
 
 
 @pytest.mark.asyncio
@@ -144,24 +147,25 @@ async def test_update_fact(profile_repo):
     await profile_repo.save(profile)
 
     fact = UserFact(
-        fact_id=None,
+        id=None,
         user_id=123,
         chat_id=456,
-        category="personal",
-        fact_text="Original text",
+        fact_type="personal",
+        fact_key="description",
+        fact_value="Original text",
         confidence=0.5,
     )
     saved_fact = await profile_repo.add_fact(fact)
 
     # Update fact
-    saved_fact.fact_text = "Updated text"
+    saved_fact.fact_value = "Updated text"
     saved_fact.confidence = 0.9
     await profile_repo.update_fact(saved_fact)
 
     # Verify update
     facts = await profile_repo.get_facts(123, 456)
     assert len(facts) == 1
-    assert facts[0].fact_text == "Updated text"
+    assert facts[0].fact_value == "Updated text"
     assert facts[0].confidence == 0.9
 
 
@@ -173,17 +177,18 @@ async def test_delete_fact(profile_repo):
     await profile_repo.save(profile)
 
     fact = UserFact(
-        fact_id=None,
+        id=None,
         user_id=123,
         chat_id=456,
-        category="personal",
-        fact_text="To be deleted",
+        fact_type="personal",
+        fact_key="temp",
+        fact_value="To be deleted",
         confidence=0.5,
     )
     saved_fact = await profile_repo.add_fact(fact)
 
     # Delete fact
-    deleted = await profile_repo.delete_fact(saved_fact.fact_id)
+    deleted = await profile_repo.delete_fact(saved_fact.id)
     assert deleted is True
 
     # Verify deletion
@@ -213,18 +218,18 @@ async def test_profile_to_dict(profile_repo):
 async def test_fact_to_dict(profile_repo):
     """Test converting fact to dictionary."""
     fact = UserFact(
-        fact_id=1,
+        id=1,
         user_id=123,
         chat_id=456,
-        category="personal",
-        fact_text="Test fact",
+        fact_type="personal",
+        fact_key="test_key",
+        fact_value="Test fact",
         confidence=0.8,
-        metadata={"source": "test"},
     )
 
     data = fact.to_dict()
 
-    assert data["fact_id"] == 1
-    assert data["category"] == "personal"
+    assert data["id"] == 1
+    assert data["fact_type"] == "personal"
     assert data["confidence"] == 0.8
-    assert data["metadata"]["source"] == "test"
+    assert data["fact_value"] == "Test fact"

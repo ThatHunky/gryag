@@ -41,6 +41,14 @@ See `AGENTS.md` and `scripts/README.md` for complete organization structure.
 - Root `main.py` is a **deprecated shim** (now in `scripts/deprecated/`) - always use `app.main`
 - Main initializes all services and wires aiogram dispatcher with middlewares
 
+**Development Environment**:
+
+- **ALWAYS activate the virtual environment** before running Python commands: `source .venv/bin/activate` or use `.venv/bin/python3` directly
+- Use `python3` (not `python`) for explicit Python 3 commands
+- Use `.venv/bin/pytest` or activate venv before `pytest`
+- Install packages: `.venv/bin/pip install <package>` or activate venv first
+- The venv is located at `.venv/` in the project root
+
 **Core directories**:
 
 - `app/handlers/` - Message routers (chat, admin, profile_admin)
@@ -79,6 +87,7 @@ Purpose: give an AI coding agent only the essential, actionable facts to be prod
 
   - Run locally: `python -m app.main` (root `main.py` is deprecated; see `scripts/deprecated/`).
   - Docker: `docker-compose up bot` (service name `bot` in `docker-compose.yml`).
+  - **Virtual environment**: ALWAYS use `.venv/bin/python3` or activate venv first with `source .venv/bin/activate`.
 
 - Key architecture facts (where to look):
 
@@ -96,8 +105,9 @@ Purpose: give an AI coding agent only the essential, actionable facts to be prod
 
 - Tests & validation:
 
-  - Run full test suite: `make test` or `pytest tests/`.
+  - Run full test suite: `make test` or `.venv/bin/pytest tests/` (with venv activated: `pytest tests/`).
   - Fast unit tests: `tests/unit/`. Integration tests use SQLite and fixtures in `tests/conftest.py`.
+  - **Always use venv**: `.venv/bin/pytest` or activate with `source .venv/bin/activate` first.
 
 - Common edit patterns (examples):
 
@@ -109,6 +119,7 @@ Purpose: give an AI coding agent only the essential, actionable facts to be prod
 
   - Env vars live in `.env.example`. Common toggles: `ENABLE_MULTI_LEVEL_CONTEXT`, `FACT_EXTRACTION_METHOD`, `USE_REDIS`, `ENABLE_SEARCH_GROUNDING`.
   - Embeddings: model `text-embedding-004`, stored as JSON arrays on `messages` table (see `db/schema.sql`).
+  - Package installation: `.venv/bin/pip install <package>` or activate venv first.
 
 - PR / automation rules for agents:
   - Keep edits small. If changing >3 files, add a one-line `docs/CHANGELOG.md` entry and update `docs/README.md` with verification steps.

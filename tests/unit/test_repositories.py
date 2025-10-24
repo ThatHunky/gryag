@@ -2,16 +2,17 @@
 
 import pytest
 from pathlib import Path
+from dataclasses import dataclass
 from app.repositories.base import Repository
 from app.core.exceptions import DatabaseError
 
 
+@dataclass
 class TestEntity:
     """Test entity for repository tests."""
 
-    def __init__(self, id: int, name: str):
-        self.id = id
-        self.name = name
+    id: int
+    name: str
 
 
 class TestRepository(Repository[TestEntity]):

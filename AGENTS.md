@@ -5,9 +5,10 @@ This repository accepts limited automated edits from trusted agents. The rules b
 Short contract for agents:
 
 - **No littering**: NEVER create files at the repository root. Follow the strict organization rules below.
+- **Virtual environment**: ALWAYS activate `.venv` before running Python commands: `source .venv/bin/activate` or use `.venv/bin/python3` directly. Use `python3` (not `python`) for explicit Python 3.
 - Readability: Keep edits small and focused. If you must change >3 files, add a brief `docs/CHANGELOG.md` entry and update `docs/README.md` describing the changes.
 - Docs: Put long-form documentation under `docs/` (see `docs/README.md`) and prefer `git mv` for renames. Preserve relative links inside moved files.
-- Tests & Validation: If you change runnable code, run the project's tests or a quick smoke run where possible and include the result in your commit message.
+- Tests & Validation: If you change runnable code, run the project's tests with `.venv/bin/pytest` or activate venv first, and include the result in your commit message.
 - No secrets: Never add secrets, tokens, or credentials to the repository. If a secret is required, note the required env var in a `.env.example` update.
 - Backwards compatible: Avoid breaking public APIs. If a change is large and may break things, create a draft PR and describe the migration steps in `docs/README.md`.
 - Transparency: For any multi-file change add a one-paragraph summary to `docs/README.md` describing what moved/was added and how to verify.
@@ -62,12 +63,22 @@ The repository root must remain clean. **Only these files are allowed at root:**
 - The canonical conversation format is documented in `docs/overview/CURRENT_CONVERSATION_PATTERN.md`.
 - If the pattern changes, update that file and update this file and `.github/copilot-instructions.md` to reference the new pattern.
 
+## Development Environment
+
+**Critical**: This project uses a Python virtual environment at `.venv/`.
+
+- **Always activate venv**: `source .venv/bin/activate` before running commands
+- **Or use direct paths**: `.venv/bin/python3`, `.venv/bin/pytest`, `.venv/bin/pip`
+- **Use `python3`**: Never use bare `python` command - always `python3`
+- **Run tests**: `.venv/bin/pytest tests/` or activate venv first
+- **Install packages**: `.venv/bin/pip install <package>` or activate venv first
+
 If you need to create new files:
 
 1. **Never create files at repository root** - use the organization rules above
 2. Use `git mv <src> <dest>` if moving existing files (preserves history)
 3. Add a one-line entry in `docs/README.md` or `docs/CHANGELOG.md` 
 4. Add a verification command (e.g., `grep -r "keyword" newdir/`)
-5. Run the project's quick sanity checks when possible
+5. Run the project's quick sanity checks when possible: `.venv/bin/pytest tests/`
 
 If you cannot run tests (no runtime available), still add the changelog entry and a short note explaining why tests were skipped.

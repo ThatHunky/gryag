@@ -6,7 +6,7 @@ Handles data access for user profiles and facts.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.core.exceptions import DatabaseError, UserProfileNotFoundError
@@ -26,16 +26,21 @@ class UserProfile:
         first_name: Optional[str] = None,
         last_name: Optional[str] = None,
         username: Optional[str] = None,
-        created_at: Optional[datetime] = None,
-        updated_at: Optional[datetime] = None,
+        first_seen: Optional[int] = None,  # Added to match schema
+        last_seen: Optional[int] = None,  # Added to match schema
+        created_at: Optional[int] = None,  # Changed to int (Unix timestamp)
+        updated_at: Optional[int] = None,  # Changed to int (Unix timestamp)
     ):
         self.user_id = user_id
         self.chat_id = chat_id
         self.first_name = first_name
         self.last_name = last_name
         self.username = username
-        self.created_at = created_at or datetime.utcnow()
-        self.updated_at = updated_at or datetime.utcnow()
+        now = int(datetime.now(timezone.utc).timestamp())
+        self.first_seen = first_seen or now
+        self.last_seen = last_seen or now
+        self.created_at = created_at or now
+        self.updated_at = updated_at or now
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -45,8 +50,10 @@ class UserProfile:
             "first_name": self.first_name,
             "last_name": self.last_name,
             "username": self.username,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "first_seen": self.first_seen,
+            "last_seen": self.last_seen,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
         }
 
 
@@ -58,41 +65,50 @@ class UserFact:
 
     def __init__(
         self,
-        fact_id: Optional[int],
+        id: Optional[int],  # Changed from fact_id to match schema
         user_id: int,
         chat_id: int,
-        category: str,
-        fact_text: str,
+        fact_type: str,  # Changed from category to match schema
+        fact_key: str,  # Added to match schema
+        fact_value: str,  # Changed from fact_text to match schema
         confidence: float,
         source_message_id: Optional[int] = None,
-        created_at: Optional[datetime] = None,
-        updated_at: Optional[datetime] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        evidence_text: Optional[str] = None,  # Added to match schema
+        is_active: int = 1,  # Added to match schema
+        created_at: Optional[int] = None,  # Changed to int (Unix timestamp)
+        updated_at: Optional[int] = None,  # Changed to int (Unix timestamp)
+        last_mentioned: Optional[int] = None,  # Added to match schema
     ):
-        self.fact_id = fact_id
+        self.id = id
         self.user_id = user_id
         self.chat_id = chat_id
-        self.category = category
-        self.fact_text = fact_text
+        self.fact_type = fact_type
+        self.fact_key = fact_key
+        self.fact_value = fact_value
         self.confidence = confidence
         self.source_message_id = source_message_id
-        self.created_at = created_at or datetime.utcnow()
-        self.updated_at = updated_at or datetime.utcnow()
-        self.metadata = metadata or {}
+        self.evidence_text = evidence_text
+        self.is_active = is_active
+        self.created_at = created_at or int(datetime.now(timezone.utc).timestamp())
+        self.updated_at = updated_at or int(datetime.now(timezone.utc).timestamp())
+        self.last_mentioned = last_mentioned
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return {
-            "fact_id": self.fact_id,
+            "id": self.id,
             "user_id": self.user_id,
             "chat_id": self.chat_id,
-            "category": self.category,
-            "fact_text": self.fact_text,
+            "fact_type": self.fact_type,
+            "fact_key": self.fact_key,
+            "fact_value": self.fact_value,
             "confidence": self.confidence,
             "source_message_id": self.source_message_id,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
-            "metadata": self.metadata,
+            "evidence_text": self.evidence_text,
+            "is_active": self.is_active,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "last_mentioned": self.last_mentioned,
         }
 
 
@@ -114,7 +130,7 @@ class UserProfileRepository(Repository[UserProfile]):
         """
         query = """
             SELECT user_id, chat_id, first_name, last_name, username,
-                   created_at, updated_at
+                   first_seen, last_seen, created_at, updated_at
             FROM user_profiles
             WHERE user_id = ? AND chat_id = ?
         """
@@ -129,12 +145,10 @@ class UserProfileRepository(Repository[UserProfile]):
             first_name=row["first_name"],
             last_name=row["last_name"],
             username=row["username"],
-            created_at=(
-                datetime.fromisoformat(row["created_at"]) if row["created_at"] else None
-            ),
-            updated_at=(
-                datetime.fromisoformat(row["updated_at"]) if row["updated_at"] else None
-            ),
+            first_seen=row["first_seen"],
+            last_seen=row["last_seen"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
         )
 
     async def save(self, profile: UserProfile) -> UserProfile:
@@ -146,15 +160,17 @@ class UserProfileRepository(Repository[UserProfile]):
         Returns:
             Saved profile
         """
+        now = int(datetime.now(timezone.utc).timestamp())
         query = """
             INSERT INTO user_profiles (
                 user_id, chat_id, first_name, last_name, username,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                first_seen, last_seen, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id, chat_id) DO UPDATE SET
                 first_name = excluded.first_name,
                 last_name = excluded.last_name,
                 username = excluded.username,
+                last_seen = excluded.last_seen,
                 updated_at = excluded.updated_at
         """
         await self._execute(
@@ -165,8 +181,10 @@ class UserProfileRepository(Repository[UserProfile]):
                 profile.first_name,
                 profile.last_name,
                 profile.username,
-                profile.created_at.isoformat(),
-                datetime.utcnow().isoformat(),
+                profile.first_seen,
+                now,  # last_seen
+                profile.created_at,
+                now,  # updated_at
             ),
         )
 
@@ -187,25 +205,25 @@ class UserProfileRepository(Repository[UserProfile]):
         return cursor.rowcount > 0
 
     async def get_facts(
-        self, user_id: int, chat_id: int, category: Optional[str] = None
+        self, user_id: int, chat_id: int, fact_type: Optional[str] = None
     ) -> List[UserFact]:
         """Get facts for a user.
 
         Args:
             user_id: User ID
             chat_id: Chat ID
-            category: Optional category filter
+            fact_type: Optional fact type filter
 
         Returns:
             List of UserFact objects
         """
-        if category:
+        if fact_type:
             query = """
                 SELECT * FROM user_facts
-                WHERE user_id = ? AND chat_id = ? AND category = ?
+                WHERE user_id = ? AND chat_id = ? AND fact_type = ?
                 ORDER BY confidence DESC, created_at DESC
             """
-            rows = await self._fetch_all(query, (user_id, chat_id, category))
+            rows = await self._fetch_all(query, (user_id, chat_id, fact_type))
         else:
             query = """
                 SELECT * FROM user_facts
@@ -216,27 +234,21 @@ class UserProfileRepository(Repository[UserProfile]):
 
         facts = []
         for row in rows:
-            metadata = json.loads(row["metadata"]) if row.get("metadata") else {}
             facts.append(
                 UserFact(
-                    fact_id=row["fact_id"],
+                    id=row["id"],
                     user_id=row["user_id"],
                     chat_id=row["chat_id"],
-                    category=row["category"],
-                    fact_text=row["fact_text"],
+                    fact_type=row["fact_type"],
+                    fact_key=row["fact_key"],
+                    fact_value=row["fact_value"],
                     confidence=row["confidence"],
-                    source_message_id=row.get("source_message_id"),
-                    created_at=(
-                        datetime.fromisoformat(row["created_at"])
-                        if row["created_at"]
-                        else None
-                    ),
-                    updated_at=(
-                        datetime.fromisoformat(row["updated_at"])
-                        if row["updated_at"]
-                        else None
-                    ),
-                    metadata=metadata,
+                    source_message_id=row["source_message_id"],
+                    evidence_text=row["evidence_text"],
+                    is_active=row["is_active"],
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"],
+                    last_mentioned=row["last_mentioned"],
                 )
             )
         return facts
@@ -248,30 +260,33 @@ class UserProfileRepository(Repository[UserProfile]):
             fact: UserFact to add
 
         Returns:
-            Saved fact with generated fact_id
+            Saved fact with generated id
         """
         query = """
             INSERT INTO user_facts (
-                user_id, chat_id, category, fact_text, confidence,
-                source_message_id, created_at, updated_at, metadata
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                user_id, chat_id, fact_type, fact_key, fact_value, confidence,
+                source_message_id, evidence_text, is_active, created_at, updated_at, last_mentioned
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         cursor = await self._execute(
             query,
             (
                 fact.user_id,
                 fact.chat_id,
-                fact.category,
-                fact.fact_text,
+                fact.fact_type,
+                fact.fact_key,
+                fact.fact_value,
                 fact.confidence,
                 fact.source_message_id,
-                fact.created_at.isoformat(),
-                fact.updated_at.isoformat(),
-                json.dumps(fact.metadata) if fact.metadata else "{}",
+                fact.evidence_text,
+                fact.is_active,
+                fact.created_at,
+                fact.updated_at,
+                fact.last_mentioned,
             ),
         )
 
-        fact.fact_id = cursor.lastrowid
+        fact.id = cursor.lastrowid
         return fact
 
     async def update_fact(self, fact: UserFact) -> UserFact:
@@ -286,29 +301,33 @@ class UserProfileRepository(Repository[UserProfile]):
         Raises:
             UserProfileNotFoundError: If fact doesn't exist
         """
-        if not fact.fact_id:
-            raise ValueError("Fact must have fact_id to update")
+        if not fact.id:
+            raise ValueError("Fact must have id to update")
 
         query = """
             UPDATE user_facts
-            SET fact_text = ?, confidence = ?, updated_at = ?, metadata = ?
-            WHERE fact_id = ?
+            SET fact_key = ?, fact_value = ?, confidence = ?, evidence_text = ?, 
+                is_active = ?, updated_at = ?, last_mentioned = ?
+            WHERE id = ?
         """
         cursor = await self._execute(
             query,
             (
-                fact.fact_text,
+                fact.fact_key,
+                fact.fact_value,
                 fact.confidence,
-                datetime.utcnow().isoformat(),
-                json.dumps(fact.metadata) if fact.metadata else "{}",
-                fact.fact_id,
+                fact.evidence_text,
+                fact.is_active,
+                int(datetime.now(timezone.utc).timestamp()),
+                fact.last_mentioned,
+                fact.id,
             ),
         )
 
         if cursor.rowcount == 0:
             raise UserProfileNotFoundError(
                 "Fact not found",
-                context={"fact_id": fact.fact_id},
+                context={"id": fact.id},
             )
 
         return fact
@@ -322,6 +341,6 @@ class UserProfileRepository(Repository[UserProfile]):
         Returns:
             True if deleted, False if not found
         """
-        query = "DELETE FROM user_facts WHERE fact_id = ?"
+        query = "DELETE FROM user_facts WHERE id = ?"
         cursor = await self._execute(query, (fact_id,))
         return cursor.rowcount > 0

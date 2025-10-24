@@ -45,8 +45,8 @@ def _generate_poll_id(chat_id: int, thread_id: Optional[int]) -> str:
 
 def _format_poll_display(poll_data: dict[str, Any]) -> str:
     """Format poll for display."""
-    poll_text = f"📋 **Опитування**\n\n"
-    poll_text += f"❓ **{poll_data['question']}**\n\n"
+    poll_text = f"📋 Опитування\n\n"
+    poll_text += f"❓ {poll_data['question']}\n\n"
 
     total_votes = sum(opt["votes"] for opt in poll_data["options"])
 
@@ -357,8 +357,8 @@ async def _handle_get_results(params: dict[str, Any]) -> str:
     # Generate detailed results
     total_votes = sum(opt["votes"] for opt in poll_data["options"])
 
-    results_text = f"📊 **Результати опитування:**\n\n"
-    results_text += f"❓ **{poll_data['question']}**\n\n"
+    results_text = f"📊 Результати опитування:\n\n"
+    results_text += f"❓ {poll_data['question']}\n\n"
 
     for i, option in enumerate(poll_data["options"]):
         votes = option["votes"]
@@ -366,7 +366,7 @@ async def _handle_get_results(params: dict[str, Any]) -> str:
         bar_length = int(percentage / 10)  # 10% per bar segment
         bar = "█" * bar_length + "░" * (10 - bar_length)
         results_text += f"{i + 1}. {option['text']}\n"
-        results_text += f"`{bar}` {votes} ({percentage:.1f}%)\n\n"
+        results_text += f"{bar} {votes} ({percentage:.1f}%)\n\n"
 
     results_text += f"👥 Всього голосів: {total_votes}\n"
 

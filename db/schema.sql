@@ -97,6 +97,8 @@ CREATE INDEX IF NOT EXISTS idx_poll_votes_user
 CREATE TABLE IF NOT EXISTS user_profiles (
     user_id INTEGER NOT NULL,
     chat_id INTEGER NOT NULL,
+    first_name TEXT,
+    last_name TEXT,
     display_name TEXT,
     username TEXT,
     pronouns TEXT,

@@ -690,8 +690,16 @@ class GeminiClient:
                 self._logger.info(
                     f"Found {len(tool_calls)} tool calls: {[name for name, _ in tool_calls]}"
                 )
+                # Normalize tool names (Gemini may prefix names with namespaces like 'default_api:search_web')
+                normalized_tool_calls: list[tuple[str, dict[str, Any]]] = []
+                for raw_name, args in tool_calls:
+                    key = raw_name.split(":")[-1] if ":" in raw_name else raw_name
+                    normalized_tool_calls.append((key, args))
+
                 local_tool_calls = [
-                    (name, args) for (name, args) in tool_calls if name in callbacks
+                    (key, args)
+                    for (key, args) in normalized_tool_calls
+                    if key in callbacks
                 ]
                 if not local_tool_calls:
                     self._logger.warning(
@@ -778,6 +786,53 @@ class GeminiClient:
                 except Exception as fallback_exc:  # pragma: no cover
                     self._logger.exception("Gemini fallback follow-up failed")
                     raise GeminiError("Gemini tool-followup failed") from fallback_exc
+
+        # Check if we exited the loop with tool calls but no text response
+        # This happens when Gemini keeps calling tools without providing a final answer
+        extracted_text = self._extract_text(current_response)
+        if not extracted_text or extracted_text.isspace():
+            # Check if last response has function_calls
+            has_function_calls = False
+            candidates = getattr(current_response, "candidates", None) or []
+            for candidate in candidates:
+                content = getattr(candidate, "content", None)
+                if content:
+                    parts = getattr(content, "parts", None) or []
+                    for part in parts:
+                        if (
+                            hasattr(part, "function_call")
+                            and part.function_call is not None
+                        ):
+                            has_function_calls = True
+                            break
+                if has_function_calls:
+                    break
+
+            if has_function_calls:
+                self._logger.warning(
+                    "Gemini returned only function_calls without text after tool execution. "
+                    "Retrying without tools to force text response."
+                )
+                try:
+                    # Force a response without tools - append a hint to conversation
+                    contents.append(
+                        {
+                            "role": "user",
+                            "parts": [
+                                {
+                                    "text": "[Provide your response now based on the tool results]"
+                                }
+                            ],
+                        }
+                    )
+                    current_response = await self._invoke_model(
+                        contents,
+                        None,  # No tools - force text response
+                        system_instruction,
+                    )
+                except Exception as exc:
+                    self._logger.exception("Failed to force text response after tools")
+                    # Continue with current_response - handler will use fallback
 
         return current_response
 

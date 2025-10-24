@@ -37,6 +37,7 @@ from app.services.fact_extractors import create_hybrid_extractor
 from app.services.profile_summarization import ProfileSummarizer
 from app.services.rate_limiter import RateLimiter
 from app.services.feature_rate_limiter import FeatureRateLimiter
+from app.services.donation_scheduler import DonationScheduler
 from app.services.resource_monitor import (
     get_resource_monitor,
     run_resource_monitoring_task,
@@ -164,6 +165,24 @@ async def main() -> None:
     # Initialize profile summarization (Phase 2)
     profile_summarizer = ProfileSummarizer(settings, profile_store, gemini_client)
     await profile_summarizer.start()
+
+    # Initialize donation reminder scheduler
+    # Get target chat IDs from settings (whitelist if enabled, otherwise empty list for manual management)
+    donation_chat_ids = (
+        settings.allowed_chat_ids_list
+        if settings.bot_behavior_mode == "whitelist"
+        else []
+    )
+    donation_scheduler = DonationScheduler(
+        bot=bot,
+        db_path=settings.db_path,
+        context_store=store,
+        target_chat_ids=donation_chat_ids,
+    )
+    await donation_scheduler.start()
+    logging.info(
+        "Donation scheduler initialized (sends to groups with recent activity every 2 days at 18:00 Ukraine time)"
+    )
 
     # Phase 3: Initialize hybrid search and episodic memory
     hybrid_search = HybridSearchEngine(
@@ -361,6 +380,7 @@ async def main() -> None:
         rate_limiter=rate_limiter,
         image_gen_service=image_gen_service,
         feature_limiter=feature_limiter,
+        donation_scheduler=donation_scheduler,
     )
 
     dispatcher.message.middleware(chat_meta_middleware)
@@ -406,6 +426,10 @@ async def main() -> None:
 
         # Cleanup profile summarizer
         await profile_summarizer.stop()
+
+        # Cleanup donation scheduler
+        await donation_scheduler.stop()
+        logging.info("Donation scheduler stopped")
 
         # Cleanup: Close aiohttp sessions for external services
         from app.services.weather import cleanup_weather_service

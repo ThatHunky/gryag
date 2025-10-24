@@ -4,6 +4,39 @@ All notable changes to gryag's memory, context, and learning systems.
 
 ## [Unreleased]
 
+### 2025-10-24 — Fixed Message Formatting (Complete)
+
+**Summary**: Fixed all message formatting issues - bold, italic, and spoiler tags now render correctly.
+
+**Problem**:
+
+- Asterisks showing literally: `**текст**` instead of **bold**
+- Underscores showing literally: `*текст*` instead of *italic*
+- Spoiler tags showing literally: `||текст||` instead of clickable spoilers
+
+**Root Cause**:
+
+- Gemini generates markdown syntax (`**bold**`, `*italic*`, `||spoiler||`)
+- Previous fix only converted spoilers, not bold/italic
+- Asterisks and underscores were HTML-escaped and displayed literally
+
+**Solution**:
+
+1. **Complete markdown→HTML conversion** - all syntax now converted
+2. **Safe placeholder system** - uses null bytes to avoid regex conflicts
+3. **Comprehensive formatting** - bold, italic, spoilers all work
+
+**Files Changed**:
+
+- `app/handlers/chat.py` - updated `_format_for_telegram()` to convert `**bold**`, `*italic*`, `||spoiler||`
+- `tests/unit/test_telegram_formatting.py` - expanded to 20 comprehensive tests
+
+**Result**: All formatting works correctly. `**текст**` → **bold**, `*текст*` → *italic*, `||текст||` → spoiler.
+
+**Tests**: 319 unit tests pass (including 20 new formatting tests).
+
+**Documentation**: See `docs/fixes/FORMATTING_CONSISTENCY_FIX.md`
+
 ### 2025-10-22 — Command Throttle Fix for Multi-Bot Groups
 
 **Summary**: Fixed bug where bot throttled ALL commands, including those meant for other bots. Now only throttles gryag's own registered commands.

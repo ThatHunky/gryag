@@ -36,6 +36,10 @@ def get_admin_commands(prefix: str = "gryag") -> list[BotCommand]:
             command=f"{prefix}chatinfo",
             description="🔒 Показати ID чату для конфігурації (тільки адміни)",
         ),
+        BotCommand(
+            command=f"{prefix}donate",
+            description="🔒 Надіслати повідомлення з реквізитами для донату (тільки адміни)",
+        ),
     ]
 
 
@@ -292,3 +296,36 @@ async def chatinfo_command(
         response += f"\n✅ Всі чати дозволені (global режим)"
 
     await message.reply(response)
+
+
+@router.message(Command(commands=["gryagdonate", "donate"]))
+async def donate_command(
+    message: Message,
+    settings: Settings,
+    donation_scheduler: Any | None = None,
+    persona_loader: Any | None = None,
+) -> None:
+    """Send donation message to current chat (admin only).
+
+    This allows admins to manually trigger the donation reminder
+    in the current chat without waiting for the scheduled time.
+    """
+    if not _is_admin(message, settings):
+        await message.reply(_get_response("admin_only", persona_loader, ADMIN_ONLY))
+        return
+
+    chat_id = message.chat.id
+
+    if donation_scheduler is None:
+        await message.reply("Donation scheduler is not initialized.")
+        LOGGER.error("Donation scheduler is None in donate_command")
+        return
+
+    # Send donation message immediately
+    success = await donation_scheduler.send_now(chat_id)
+
+    if success:
+        LOGGER.info(f"Admin {message.from_user.id} triggered donation message in chat {chat_id}")
+    else:
+        await message.reply("Failed to send donation message. Check logs for details.")
+        LOGGER.error(f"Failed to send donation message in chat {chat_id}")

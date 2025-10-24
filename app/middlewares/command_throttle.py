@@ -101,6 +101,18 @@ class CommandThrottleMiddleware(BaseMiddleware):
         if not event.from_user:
             return await handler(event, data)
 
+        # Ignore commands from other bots
+        if getattr(event.from_user, "is_bot", False):
+            logger.debug(
+                "Ignoring command from bot user",
+                extra={
+                    "user_id": getattr(event.from_user, "id", None),
+                    "username": getattr(event.from_user, "username", None),
+                    "command": event.text.split()[0] if event.text else "",
+                },
+            )
+            return await handler(event, data)
+
         # Extract command name (without @ mention if present)
         command_with_args = event.text.split()[0] if event.text.split() else event.text
         command_base = command_with_args.split("@")[0].lstrip("/").lower()

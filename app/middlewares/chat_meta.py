@@ -49,6 +49,7 @@ class ChatMetaMiddleware(BaseMiddleware):
         rate_limiter: RateLimiter | None = None,
         image_gen_service: Any | None = None,
         feature_limiter: Any | None = None,
+        donation_scheduler: Any | None = None,
     ) -> None:
         self._bot = bot
         self._settings = settings
@@ -68,6 +69,7 @@ class ChatMetaMiddleware(BaseMiddleware):
         self._rate_limiter = rate_limiter
         self._image_gen_service = image_gen_service
         self._feature_limiter = feature_limiter
+        self._donation_scheduler = donation_scheduler
         self._bot_username: str | None = None
         self._bot_id: int | None = None
         self._lock = asyncio.Lock()
@@ -146,4 +148,6 @@ class ChatMetaMiddleware(BaseMiddleware):
             data["persona_loader"] = self._persona_loader
         if self._image_gen_service is not None:
             data["image_gen_service"] = self._image_gen_service
+        if self._donation_scheduler is not None:
+            data["donation_scheduler"] = self._donation_scheduler
         return await handler(event, data)

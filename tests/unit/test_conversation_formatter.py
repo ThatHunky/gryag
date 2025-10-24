@@ -37,6 +37,18 @@ class TestParseUserIdShort:
     def test_large_user_id(self):
         assert parse_user_id_short(999999999999) == "999999999999"
 
+    def test_string_user_id(self):
+        # Handle string user IDs (convert to int first)
+        assert parse_user_id_short("123456789") == "123456789"
+
+    def test_string_negative_user_id(self):
+        # Handle string negative user IDs
+        assert parse_user_id_short("-987654321") == "987654321"
+
+    def test_invalid_string_user_id(self):
+        # Invalid string returns as-is
+        assert parse_user_id_short("invalid") == "invalid"
+
 
 class TestBuildCollisionMap:
     """Test collision handling (simplified with full IDs)."""

@@ -170,7 +170,7 @@ Once I know which approach you want, I’ll make the updates.
 
 ---
 
-_**User (2025-10-25 12:19Z)**_
+_**User (2025-10-25 12:22Z)**_
 
 1
 
@@ -178,7 +178,127 @@ _**User (2025-10-25 12:19Z)**_
 
 _**Assistant (copilot/gpt-5-codex)**_
 
+**Planning persona template simplification****Simplifying persona templates****Reviewing prompt parameter usage****Refactoring system prompt handling**
 
+I'm planning to simplify `get_system_prompt` by removing placeholder formatting and adding validation to ensure system prompts contain no placeholders. To maintain robustness, I'll raise errors on invalid prompts and fallback to a default persona if needed, while revising templates to have no curly braces and hardcode necessary names carefully.**Adjusting placeholders and template text**
+```
+
+```
+**Adjusting English template placeholders**
+```
+
+```
+**Checking for braces presence****Updating persona loader with prompt validation**
+```
+
+```
+**Adding prompt validation methods**
+```
+
+```
+**Verifying default persona formatting****Reviewing persona loading and validation**
+
+I’m working through how `_ensure_plain_system_prompt` raising a ValueError triggers fallback to the default persona in `_load_persona_from_yaml`, making sure fallback messages are clear and logging is sufficient. I want to confirm that the default `SYSTEM_PERSONA` doesn't include any braces requiring validation—considering adding a call to `_ensure_plain_system_prompt` in `_get_default_persona` to check this, though I’m weighing whether it’s worth risking raising an error there. Also, I’m reviewing the templates and code touched to keep the changelog correct and checking for any leftover placeholder instructions referencing braces.
+```
+
+```
+**Summarizing final changes and next steps**
+
+I'm preparing a clear, concise explanation of the updates made to persona templates and the loader, highlighting the switch to treating templates as plain text without formatting, cautioning about braces, and suggesting verification with a grep command. I'll include recommended testing steps like running pytest or make test, and provide the file paths involved to keep everything transparent and easy to follow.Updated `ukrainian_gryag.txt` so the identity and closing instructions name `гряг` directly, eliminating `{bot_*}` placeholders.  
+Reworded `english_assistant.txt` to avoid brace-based placeholders entirely.  
+Reworked `loader.py` to treat persona templates as plain text: added a guard that rejects prompts containing braces, ensured the default persona passes the same check, and stopped performing `.format()` substitution (legacy kwargs now just get ignored with a debug log).
+
+Run `pytest` when you get a moment to be sure the loader changes didn’t break anything.
+
+---
+
+_**User (2025-10-25 12:24Z)**_
+
+We also need to fix the mention formatting.
+
+---
+
+_**Assistant (copilot/gpt-5-codex)**_
+
+**Checking for updated template placeholders****Searching for leftover placeholders****Analyzing mention formatting issues****Analyzing mention formatting issue****Clarifying mention formatting instructions**
+```
+
+```
+**Checking English template for examples****Checking response template placeholders****Evaluating placeholder handling****Checking top of chat.py****Analyzing placeholder formatting fix**Tweaked `ukrainian_gryag.txt` so the mention guideline shows the correct Markdown pattern—`[display name](tg://user?id=...)`—and explicitly tells the persona not to output the literal word “mention”. Everything else from the earlier placeholder cleanup stays intact. 
+
+Reload the running bot (or whichever process caches personas) so it picks up the new instructions; once it’s using the updated prompt, mentions should render with real names instead of `{bot_display_name}` or `[mention]`.
+
+---
+
+_**User (2025-10-25 12:25Z)**_
+
+also let's remove this completely, simplify further
+
+---
+
+_**Assistant (copilot/gpt-5-codex)**_
+
+**Evaluating removal scope in templates**I want to double-check your intent before touching anything. Do you want me to remove the whole “User Relationships” section from the persona template (and potentially the corresponding `admin_users` block in `ukrainian_gryag.yaml`), or is there something else you had in mind?
+
+---
+
+_**User (2025-10-25 12:28Z)**_
+
+Need to remove *it* from the `.yaml` as well as related (possible) code function
+
+---
+
+_**Assistant (copilot/gpt-5-codex)**_
+
+**Searching for admin_users usage****Considering removal of AdminUser concept****Searching for persona_loader.is_admin usage****Searching for persona_loader.is_admin usage****Planning removal of admin_users concept**
+
+I’m outlining steps to fully remove the admin_users concept, including cleaning up YAML config, persona templates, loader methods, related dataclasses, and test references, while making sure no residual code still depends on admin-related logic.**Handling text escaping****Inspecting feature_rate_limiter expectations****Investigating admin ID source****Planning admin removal and test updates****Checking unused configuration references****Planning admin_users removal**
+
+I’m preparing to remove admin_users references from the persona config by updating multiple files: the persona template, YAML files, base.py, loader.py, and test scripts. Since this affects more than three files, I’ll also update docs/CHANGELOG and docs/README to keep the documentation consistent and avoid stale info.**Updating references to admin_users**
+
+---
+
+_**User (2025-10-25 12:29Z)**_
+
+Wait! I don't mean removing admin users as a concept! I meant separately sending them in the prompt - that needs to be disabled!  
+
+---
+
+_**Assistant (copilot/gpt-5-codex)**_
+
+**Clarifying admin users handling****Removing User Relationships from prompt template****Preparing patch to remove section**
+```
+
+```
+**Preparing final response**Removed the “User Relationships” block from `ukrainian_gryag.txt`, so the system prompt no longer spells out admin details while leaving the admin configuration in `ukrainian_gryag.yaml` untouched. Restart or reload the bot so it reads the updated template, then spot-check a reply to confirm the prompt no longer mentions those admins.
+
+---
+
+_**User (2025-10-25 12:31Z)**_
+
+NO! FROM THE YAML!
+
+---
+
+_**Assistant (copilot/gpt-5-codex)**_
+
+**Clarifying intent on removing admin info from YAML****Evaluating admin info removal from YAML****Searching references to admin_users****Removing admin block from YAML and checking fallback**
+```
+
+```
+**Evaluating persona loader adjustments**Removed the `admin_users` block from `ukrainian_gryag.yaml`, so the persona config no longer injects those identities into the prompt loader. Reload the bot (or whichever service caches personas) so the change takes effect.
+
+---
+
+_**User (2025-10-25 12:32Z)**_
+
+Does it pass current time in the prompt?
+
+---
+
+_**Assistant (copilot/gpt-5-codex)**_
+
+**Verifying current time inclusion in system prompt**`PersonaLoader.get_system_prompt` now ignores kwargs, so the template itself stays plain. In the chat handler (`chat.py`), after calling `persona_loader.get_system_prompt(current_time=...)`, it still builds `timestamp_context = "\n\n# Current Time\n\nThe current time is: …"` and concatenates that onto the base persona before sending the request. Same logic runs in the prompt admin preview. So the final prompt still carries the current-time block even though the template isn’t doing substitution.
 
 ---
 

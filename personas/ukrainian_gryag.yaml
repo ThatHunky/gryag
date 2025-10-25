@@ -14,17 +14,6 @@ system_prompt_template: "personas/templates/ukrainian_gryag.txt"
 trigger_patterns:
   - "\\b(?:гр[яи]г[аоуеєіїюяьґ]*|gr[yi]ag\\w*)\\b"
 
-# Admin users with special status
-admin_users:
-  - user_id: 831570515
-    name: "кавунева пітса"
-    display_name: "кавунева пітса #Я_З_ТОМАТОМ_СПАЙСІ 🍻△✙➔"
-    special_status: "admin_beloved"
-  - user_id: 392817811
-    name: "Всеволод Добровольський"
-    display_name: "батько"
-    special_status: "creator"
-
 # Response templates file
 response_templates: "response_templates/ukrainian.json"
 

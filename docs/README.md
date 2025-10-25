@@ -1,4 +1,5 @@
 # Docs
+<!-- markdownlint-disable -->
 
 This directory contains the repository documentation organized into subfolders. When moving or reorganizing docs, follow the rules in `AGENTS.md` and add a short summary here describing the change.
 
@@ -14,6 +15,8 @@ Structure recommended:
 - docs/fixes/ — bug fix documentation
 
 ## Recent Changes
+
+**October 31, 2025**: **🎯 Speaker Headers for Context** - Added `[speaker …]` annotations and sender metadata so Gemini can reliably separate user vs bot turns in stored history and live prompts. Verification: `.venv/bin/pytest tests/integration/test_context_store.py tests/unit/test_external_ids.py`
 
 **October 24, 2025**: **🐛 Telegram Formatting Bugs Fixed** - Fixed three critical formatting bugs: (1) Bot responses showing literal "PROTECTED" text instead of formatted bold/italic (caused by HTML-escaped placeholders), (2) Underscores in Telegram usernames (like @vsevolod_dobrovolskyi) being incorrectly formatted as italic, (3) MarkdownV2 escape sequences (`\-`, `\.`, `\!`, etc.) showing literally when Gemini generates text for the wrong parse mode. Solutions: Changed placeholders to Unicode Private Use Area characters, added username pattern protection, added MarkdownV2 escape sequence removal. All 23 formatting tests pass. See `docs/fixes/telegram-formatting-placeholder-bug-2025-10-24.md`. Verification: `pytest tests/unit/test_telegram_formatting.py -v`
 

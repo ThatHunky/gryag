@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 import math
@@ -50,6 +51,82 @@ META_KEY_ORDER = [
     "reply_to_name",
     "reply_excerpt",
 ]
+
+
+SPEAKER_ALLOWED_ROLES = {"user", "assistant", "system", "tool"}
+
+
+@dataclass(slots=True)
+class TurnSender:
+    role: str | None = None
+    name: str | None = None
+    username: str | None = None
+    is_bot: bool | None = None
+
+
+def _sanitize_header_value(value: str) -> str:
+    """Sanitize text for speaker header blocks."""
+    cleaned = (
+        value.replace("\n", " ")
+        .replace("\r", " ")
+        .replace("\t", " ")
+        .replace("[", "")
+        .replace("]", "")
+        .strip()
+    )
+    while "  " in cleaned:
+        cleaned = cleaned.replace("  ", " ")
+    return cleaned
+
+
+def format_speaker_header(
+    role: str | None,
+    sender_id: int | str | None,
+    name: str | None,
+    username: str | None,
+    *,
+    is_bot: bool | int | None = None,
+) -> str:
+    """Format speaker annotation for Gemini context messages."""
+    pieces: list[str] = []
+
+    normalized_role = (role or "user").lower()
+    if normalized_role not in SPEAKER_ALLOWED_ROLES:
+        if normalized_role == "model":
+            normalized_role = "assistant"
+        elif normalized_role == "agent":
+            normalized_role = "assistant"
+        else:
+            normalized_role = "user"
+    pieces.append(f"role={normalized_role}")
+
+    if sender_id is not None:
+        try:
+            sender_id_str = str(int(sender_id))
+        except (TypeError, ValueError):
+            sender_id_str = str(sender_id)
+        sender_id_str = sender_id_str.strip()
+        if sender_id_str:
+            pieces.append(f"id={sender_id_str}")
+
+    if name:
+        sanitized_name = _sanitize_header_value(str(name))
+        if sanitized_name:
+            pieces.append(f'name="{sanitized_name}"')
+
+    if username:
+        sanitized_username = _sanitize_header_value(str(username))
+        if sanitized_username:
+            pieces.append(f'username="{sanitized_username}"')
+
+    if is_bot is not None:
+        bot_value = 1 if bool(is_bot) else 0
+        pieces.append(f"is_bot={bot_value}")
+
+    if not pieces:
+        return ""
+
+    return "[speaker " + " ".join(pieces) + "]"
 
 
 def format_metadata(meta: dict[str, Any], include_reply_chain: bool = True) -> str:
@@ -181,6 +258,22 @@ class ContextStore:
                             await db.execute(
                                 "ALTER TABLE messages ADD COLUMN reply_to_external_user_id TEXT"
                             )
+                        if "sender_role" not in cols:
+                            await db.execute(
+                                "ALTER TABLE messages ADD COLUMN sender_role TEXT"
+                            )
+                        if "sender_name" not in cols:
+                            await db.execute(
+                                "ALTER TABLE messages ADD COLUMN sender_name TEXT"
+                            )
+                        if "sender_username" not in cols:
+                            await db.execute(
+                                "ALTER TABLE messages ADD COLUMN sender_username TEXT"
+                            )
+                        if "sender_is_bot" not in cols:
+                            await db.execute(
+                                "ALTER TABLE messages ADD COLUMN sender_is_bot INTEGER DEFAULT 0"
+                            )
                         await db.commit()
                 except Exception:
                     # Best-effort; proceed to full schema application
@@ -218,6 +311,26 @@ class ContextStore:
                     )
                 except aiosqlite.OperationalError:
                     pass
+                try:
+                    await db.execute("ALTER TABLE messages ADD COLUMN sender_role TEXT")
+                except aiosqlite.OperationalError:
+                    pass
+                try:
+                    await db.execute("ALTER TABLE messages ADD COLUMN sender_name TEXT")
+                except aiosqlite.OperationalError:
+                    pass
+                try:
+                    await db.execute(
+                        "ALTER TABLE messages ADD COLUMN sender_username TEXT"
+                    )
+                except aiosqlite.OperationalError:
+                    pass
+                try:
+                    await db.execute(
+                        "ALTER TABLE messages ADD COLUMN sender_is_bot INTEGER DEFAULT 0"
+                    )
+                except aiosqlite.OperationalError:
+                    pass
 
                 # Add last_notice_time column to bans table for throttled ban notices
                 try:
@@ -241,6 +354,8 @@ class ContextStore:
         metadata: dict[str, Any] | None = None,
         embedding: list[float] | None = None,
         retention_days: int | None = None,
+        *,
+        sender: TurnSender | None = None,
     ) -> None:
         await self.init()
         ts = int(time.time())
@@ -264,14 +379,25 @@ class ContextStore:
                 reply_to_ext_message_id = str(metadata.get("reply_to_message_id"))
             if metadata.get("reply_to_user_id") is not None:
                 reply_to_ext_user_id = str(metadata.get("reply_to_user_id"))
+        sender_role: str | None = None
+        sender_name: str | None = None
+        sender_username: str | None = None
+        sender_is_bot: int | None = None
+        if sender:
+            sender_role = sender.role
+            sender_name = sender.name
+            sender_username = sender.username
+            if sender.is_bot is not None:
+                sender_is_bot = 1 if sender.is_bot else 0
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute(
                 """
                 INSERT INTO messages (
                     chat_id, thread_id, user_id, role, text, media, embedding, ts,
-                    external_message_id, external_user_id, reply_to_external_message_id, reply_to_external_user_id
+                    external_message_id, external_user_id, reply_to_external_message_id, reply_to_external_user_id,
+                    sender_role, sender_name, sender_username, sender_is_bot
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chat_id,
@@ -286,6 +412,10 @@ class ContextStore:
                     ext_user_id,
                     reply_to_ext_message_id,
                     reply_to_ext_user_id,
+                    sender_role,
+                    sender_name,
+                    sender_username,
+                    sender_is_bot,
                 ),
             )
             await db.commit()
@@ -462,14 +592,18 @@ class ContextStore:
 
         if thread_id is None:
             query = (
-                "SELECT role, text, media FROM messages "
+                "SELECT role, text, media, external_user_id, user_id, "
+                "sender_role, sender_name, sender_username, sender_is_bot "
+                "FROM messages "
                 "WHERE chat_id = ? AND thread_id IS NULL "
                 "ORDER BY id DESC LIMIT ?"
             )
             params: tuple[Any, ...] = (chat_id, message_limit)
         else:
             query = (
-                "SELECT role, text, media FROM messages "
+                "SELECT role, text, media, external_user_id, user_id, "
+                "sender_role, sender_name, sender_username, sender_is_bot "
+                "FROM messages "
                 "WHERE chat_id = ? AND thread_id = ? "
                 "ORDER BY id DESC LIMIT ?"
             )
@@ -506,6 +640,46 @@ class ContextStore:
                 except json.JSONDecodeError:
                     pass
 
+            stored_sender_role = row["sender_role"]
+            stored_sender_name = row["sender_name"]
+            stored_sender_username = row["sender_username"]
+            stored_sender_is_bot = row["sender_is_bot"]
+            external_sender_id = row["external_user_id"]
+            internal_user_id = row["user_id"]
+
+            sender_role_value = stored_sender_role or row["role"]
+            sender_id_value: int | str | None = None
+            if external_sender_id:
+                sender_id_value = external_sender_id
+            elif stored_meta and stored_meta.get("user_id") is not None:
+                sender_id_value = stored_meta.get("user_id")
+            elif internal_user_id is not None:
+                sender_id_value = internal_user_id
+
+            sender_name_value = stored_sender_name
+            if not sender_name_value and stored_meta:
+                sender_name_value = stored_meta.get("name")
+
+            sender_username_value = stored_sender_username
+            if not sender_username_value and stored_meta:
+                sender_username_value = stored_meta.get("username")
+
+            if stored_sender_is_bot is not None:
+                sender_is_bot_value: bool | int | None = bool(stored_sender_is_bot)
+            elif stored_meta:
+                sender_is_bot_value = stored_meta.get("is_bot")
+            else:
+                sender_is_bot_value = None
+
+            header = format_speaker_header(
+                sender_role_value,
+                sender_id_value,
+                sender_name_value,
+                sender_username_value,
+                is_bot=sender_is_bot_value,
+            )
+            if header:
+                parts.append({"text": header})
             if stored_meta:
                 # For historical context, exclude reply chains to simplify and avoid confusion
                 # This keeps user_id, name, username but removes reply_to_* fields
@@ -759,7 +933,9 @@ class ContextStore:
                 (user_id, cutoff - (cutoff % window_seconds)),
             ) as cursor:
                 row = await cursor.fetchone()
-                return int(row[0] or 0)
+                if not row or row[0] is None:
+                    return 0
+                return int(row[0])
 
     async def reset_quotas(self, chat_id: int) -> int:
         """

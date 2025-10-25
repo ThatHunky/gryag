@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -25,6 +25,11 @@ if TYPE_CHECKING:
     from app.config import Settings
     from app.services.gemini import GeminiClient
     from app.services.user_profile import UserProfileStore
+    from app.services.user_profile_adapter import UserProfileStoreAdapter
+
+    ProfileStoreType = UserProfileStore | UserProfileStoreAdapter
+else:
+    ProfileStoreType = Any
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +40,7 @@ class ProfileSummarizer:
     def __init__(
         self,
         settings: Settings,
-        profile_store: UserProfileStore,
+        profile_store: ProfileStoreType,
         gemini_client: GeminiClient,
     ) -> None:
         """Initialize profile summarizer.

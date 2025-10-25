@@ -49,7 +49,12 @@ from app.handlers.chat_tools import (
     build_tool_callbacks as build_tool_callbacks_registry,
     create_search_messages_tool,
 )
-from app.services.context_store import ContextStore, format_metadata
+from app.services.context_store import (
+    ContextStore,
+    TurnSender,
+    format_metadata,
+    format_speaker_header,
+)
 from app.services.gemini import GeminiClient, GeminiError, GeminiContentBlockedError
 from app.services.media import collect_media_parts
 from app.services.redis_types import RedisLike
@@ -351,6 +356,7 @@ async def _remember_context_message(
     # This is critical for multi-level context to see images in past messages
     try:
         text_content = text or media_summary or ""
+        from_user = message.from_user
 
         # Generate embedding for semantic search
         user_embedding = None
@@ -369,6 +375,7 @@ async def _remember_context_message(
             "user_id": str(message.from_user.id),
             "name": message.from_user.full_name,
             "username": _normalize_username(message.from_user.username),
+            "is_bot": bool(message.from_user.is_bot),
         }
 
         # Store in database for later retrieval
@@ -382,6 +389,12 @@ async def _remember_context_message(
             metadata=user_meta,
             embedding=user_embedding,
             retention_days=settings.retention_days,
+            sender=TurnSender(
+                role="user",
+                name=from_user.full_name if from_user else None,
+                username=_normalize_username(from_user.username) if from_user else None,
+                is_bot=from_user.is_bot if from_user else None,
+            ),
         )
 
         LOGGER.debug(
@@ -414,6 +427,7 @@ def _build_user_metadata(
         "user_id": str(from_user.id) if from_user else None,
         "name": from_user.full_name if from_user else None,
         "username": _normalize_username(from_user.username if from_user else None),
+        "is_bot": bool(from_user.is_bot) if from_user else None,
     }
     reply = message.reply_to_message
     if reply:
@@ -489,6 +503,7 @@ def _build_model_metadata(
         "name": "gryag",
         "username": _normalize_username(bot_username),
         "reply_to_message_id": str(original.message_id),
+        "is_bot": True,
     }
     if origin_user:
         meta["reply_to_user_id"] = origin_user.id
@@ -784,6 +799,7 @@ def _format_for_telegram(text: str) -> str:
     Converts markdown/MarkdownV2 syntax to HTML:
     - **bold** or __bold__ -> <b>bold</b>
     - *italic* or _italic_ -> <i>italic</i>
+    - ~~strikethrough~~ -> <s>strikethrough</s>
     - ||spoiler|| -> <tg-spoiler>spoiler</tg-spoiler>
 
     Escapes HTML special characters to prevent parsing errors.
@@ -830,6 +846,9 @@ def _format_for_telegram(text: str) -> str:
     text = re.sub(
         r"\|\|(.*?)\|\|", lambda m: protect_content(m.group(1), "tg-spoiler"), text
     )
+
+    # Protect strikethrough ~~text~~
+    text = re.sub(r"~~(.*?)~~", lambda m: protect_content(m.group(1), "s"), text)
 
     # Protect bold **text** or __text__
     text = re.sub(r"\*\*(.*?)\*\*", lambda m: protect_content(m.group(1), "b"), text)
@@ -1533,13 +1552,28 @@ async def handle_group_message(
                 len(excerpt),
             )
 
-    # Always prepend metadata as first part for Gemini context
-    user_parts.insert(0, {"text": format_metadata(user_meta)})
+    # Always prepend speaker header and metadata for Gemini context
+    speaker_header = format_speaker_header(
+        role="user",
+        sender_id=user_meta.get("user_id"),
+        name=user_meta.get("name"),
+        username=user_meta.get("username"),
+        is_bot=user_meta.get("is_bot"),
+    )
+    metadata_block = format_metadata(user_meta)
+    prefix_parts: list[dict[str, Any]] = []
+    if speaker_header:
+        prefix_parts.append({"text": speaker_header})
+    if metadata_block:
+        prefix_parts.append({"text": metadata_block})
+    if prefix_parts:
+        user_parts[0:0] = prefix_parts
 
     text_content = raw_text or media_summary or fallback_text or ""
 
     user_embedding = await gemini_client.embed_text(text_content)
 
+    from_user = message.from_user
     await store.add_turn(
         chat_id=chat_id,
         thread_id=thread_id,
@@ -1550,6 +1584,12 @@ async def handle_group_message(
         metadata=user_meta,
         embedding=user_embedding,
         retention_days=settings.retention_days,
+        sender=TurnSender(
+            role="user",
+            name=from_user.full_name if from_user else None,
+            username=_normalize_username(from_user.username) if from_user else None,
+            is_bot=from_user.is_bot if from_user else None,
+        ),
     )
 
     # Phase 4.2: Track message for episode creation
@@ -2000,8 +2040,22 @@ async def handle_group_message(
                 reply_meta["name"] = reply_context_for_history["name"]
             if reply_context_for_history.get("username"):
                 reply_meta["username"] = reply_context_for_history["username"]
+            if reply_context_for_history.get("is_bot") is not None:
+                reply_meta["is_bot"] = reply_context_for_history["is_bot"]
 
-            reply_parts.append({"text": format_metadata(reply_meta)})
+            reply_header = format_speaker_header(
+                role=reply_context_for_history.get("role") or "user",
+                sender_id=reply_meta.get("user_id"),
+                name=reply_meta.get("name"),
+                username=reply_meta.get("username"),
+                is_bot=reply_meta.get("is_bot"),
+            )
+            if reply_header:
+                reply_parts.append({"text": reply_header})
+
+            meta_block = format_metadata(reply_meta)
+            if meta_block:
+                reply_parts.append({"text": meta_block})
 
             # Add text if available
             if reply_context_for_history.get("text"):
@@ -2353,6 +2407,7 @@ async def handle_group_message(
             original=message,
             original_text=text_content,
         )
+        bot_display_name = model_meta.get("name") or "gryag"
 
         model_embedding = await gemini_client.embed_text(reply_trimmed)
 
@@ -2366,6 +2421,12 @@ async def handle_group_message(
             metadata=model_meta,
             embedding=model_embedding,
             retention_days=settings.retention_days,
+            sender=TurnSender(
+                role="assistant",
+                name=bot_display_name,
+                username=_normalize_username(bot_username),
+                is_bot=True,
+            ),
         )
 
     # Bot Self-Learning: Track this interaction for learning

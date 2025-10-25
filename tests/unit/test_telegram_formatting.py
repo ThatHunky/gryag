@@ -151,6 +151,24 @@ def test_format_for_telegram_italic_single_underscore():
     assert result == "This is <i>italic</i> text"
 
 
+def test_format_for_telegram_strikethrough():
+    """Test ~~strikethrough~~ conversion."""
+    from app.handlers.chat import _format_for_telegram
+
+    text = "це ~~теплий~~ крижаний"
+    result = _format_for_telegram(text)
+    assert result == "це <s>теплий</s> крижаний"
+
+
+def test_format_for_telegram_multiple_strikethrough():
+    """Test multiple strikethrough sections."""
+    from app.handlers.chat import _format_for_telegram
+
+    text = "~~wrong~~ right ~~also wrong~~ correct"
+    result = _format_for_telegram(text)
+    assert result == "<s>wrong</s> right <s>also wrong</s> correct"
+
+
 def test_format_for_telegram_mixed_formatting():
     """Test mixed bold and italic."""
     from app.handlers.chat import _format_for_telegram
@@ -265,7 +283,7 @@ def test_format_for_telegram_username_underscores():
 def test_format_for_telegram_markdownv2_escapes():
     """
     Test that MarkdownV2 escape sequences are removed.
-    
+
     Bug: Gemini sometimes generates text with MarkdownV2 escapes (backslashes before special chars)
     which are needed for MarkdownV2 parse mode but should be removed for HTML parse mode.
     """
@@ -273,24 +291,24 @@ def test_format_for_telegram_markdownv2_escapes():
 
     tests = [
         # Basic escapes
-        (r'Текст з \- тире', 'Текст з - тире'),
-        (r'Крапка\. в кінці', 'Крапка. в кінці'),
-        (r'\~ тильда \~', '~ тильда ~'),
-        (r'\[дужки\]', '[дужки]'),
-        (r'\(скобки\)', '(скобки)'),
-        (r'Знак \+ плюс', 'Знак + плюс'),
-        (r'Знак \= рівності', 'Знак = рівності'),
-        (r'Вертикальна \| риска', 'Вертикальна | риска'),
-        
+        (r"Текст з \- тире", "Текст з - тире"),
+        (r"Крапка\. в кінці", "Крапка. в кінці"),
+        (r"\~ тильда \~", "~ тильда ~"),
+        (r"\[дужки\]", "[дужки]"),
+        (r"\(скобки\)", "(скобки)"),
+        (r"Знак \+ плюс", "Знак + плюс"),
+        (r"Знак \= рівності", "Знак = рівності"),
+        (r"Вертикальна \| риска", "Вертикальна | риска"),
         # Mixed with actual formatting
-        (r'Це **жирний\. текст**', 'Це <b>жирний. текст</b>'),
-        (r'\- Пункт списку', '- Пункт списку'),
-        (r'\- @vsevolod_dobrovolskyi', '- @vsevolod_dobrovolskyi'),
-        
+        (r"Це **жирний\. текст**", "Це <b>жирний. текст</b>"),
+        (r"\- Пункт списку", "- Пункт списку"),
+        (r"\- @vsevolod_dobrovolskyi", "- @vsevolod_dobrovolskyi"),
         # Real example from screenshot
-        (r'Це\, блять\, дуже важливо\!', 'Це, блять, дуже важливо!'),
+        (r"Це\, блять\, дуже важливо\!", "Це, блять, дуже важливо!"),
     ]
-    
+
     for input_text, expected in tests:
         result = _format_for_telegram(input_text)
-        assert result == expected, f"Failed for: {input_text}\nExpected: {expected}\nGot: {result}"
+        assert (
+            result == expected
+        ), f"Failed for: {input_text}\nExpected: {expected}\nGot: {result}"

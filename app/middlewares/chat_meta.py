@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aiogram import BaseMiddleware, Bot
 from aiogram.types import Message, CallbackQuery
@@ -10,7 +10,14 @@ from app.config import Settings
 from app.services.context_store import ContextStore
 from app.services.gemini import GeminiClient
 from app.services.redis_types import RedisLike
-from app.services.user_profile import UserProfileStore
+
+if TYPE_CHECKING:
+    from app.services.user_profile import UserProfileStore
+    from app.services.user_profile_adapter import UserProfileStoreAdapter
+
+    ProfileStoreType = UserProfileStore | UserProfileStoreAdapter
+else:
+    ProfileStoreType = Any
 from app.services.fact_extractors import FactExtractor
 from app.services.monitoring.continuous_monitor import ContinuousMonitor
 from app.services.context import (
@@ -35,7 +42,7 @@ class ChatMetaMiddleware(BaseMiddleware):
         settings: Settings,
         store: ContextStore,
         gemini: GeminiClient,
-        profile_store: UserProfileStore,
+        profile_store: ProfileStoreType,
         fact_extractor: FactExtractor,
         chat_profile_store: Any | None = None,
         hybrid_search: HybridSearchEngine | None = None,

@@ -38,6 +38,7 @@ def mock_message():
     message = MagicMock(spec=Message)
     message.from_user = MagicMock(spec=User)
     message.from_user.id = 67890  # Regular user
+    message.reply_to_message = None
     message.chat = MagicMock(spec=Chat)
     message.chat.id = -100111
     return message
@@ -86,6 +87,22 @@ async def test_passes_admin_commands(middleware, mock_message, mock_handler):
 
     assert result == "handler_result"
     mock_handler.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_drops_bot_user_commands(
+    middleware, mock_message, mock_handler, mock_rate_limiter
+):
+    """Commands originating from bot accounts should be ignored entirely."""
+    mock_message.text = "/command"
+    mock_message.from_user.is_bot = True
+    data = {}
+
+    result = await middleware(mock_handler, mock_message, data)
+
+    assert result is None
+    mock_handler.assert_not_called()
+    mock_rate_limiter.check_cooldown.assert_not_called()
 
 
 @pytest.mark.asyncio

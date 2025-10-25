@@ -16,6 +16,7 @@ from typing import Any
 
 import aiosqlite
 
+from app.services import telemetry
 from app.repositories.fact_repository import UnifiedFactRepository
 
 logger = logging.getLogger(__name__)
@@ -394,7 +395,9 @@ class UserProfileStoreAdapter:
             params: list[Any] = [chat_id]
 
             if not include_inactive:
-                query += " AND membership_status IN ('member', 'administrator', 'creator')"
+                query += (
+                    " AND membership_status IN ('member', 'administrator', 'creator')"
+                )
 
             query += """
                 ORDER BY 
@@ -431,6 +434,59 @@ class UserProfileStoreAdapter:
             ) as cursor:
                 rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
+
+    async def get_profiles_needing_summarization(self, limit: int = 50) -> list[int]:
+        """Return user IDs that require profile summarization."""
+        await self.init()
+
+        async with aiosqlite.connect(self._db_path) as db:
+            async with db.execute(
+                """
+                SELECT DISTINCT p.user_id
+                FROM user_profiles p
+                WHERE EXISTS (
+                    SELECT 1 FROM user_facts f
+                    WHERE f.entity_type = 'user'
+                      AND f.entity_id = p.user_id
+                      AND f.is_active = 1
+                )
+                AND (
+                    p.summary IS NULL
+                    OR p.last_seen > COALESCE(p.summary_updated_at, 0)
+                )
+                ORDER BY p.message_count DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [row[0] for row in rows]
+
+    async def update_summary(self, user_id: int, summary: str) -> None:
+        """Update cached summary text for a user across all chats."""
+        await self.init()
+        now = int(time.time())
+
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                """
+                UPDATE user_profiles
+                SET summary = ?, summary_updated_at = ?
+                WHERE user_id = ?
+                """,
+                (summary, now, user_id),
+            )
+            await db.commit()
+
+        logger.info(
+            "Updated summary for user %s (adapter)",
+            user_id,
+            extra={
+                "user_id": user_id,
+                "summary_length": len(summary),
+            },
+        )
+        telemetry.increment_counter("profile_summaries_updated")
 
     async def get_user_summary(
         self,

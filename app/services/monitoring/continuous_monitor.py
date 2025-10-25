@@ -12,7 +12,7 @@ Chat Public Memory (Oct 2025): Extract and store group-level facts
 from __future__ import annotations
 
 import logging
-from typing import Any, List, Tuple
+from typing import TYPE_CHECKING, Any, List, Tuple
 
 from aiogram.types import Message
 
@@ -27,7 +27,15 @@ from app.services.monitoring.conversation_analyzer import (
 from app.services.monitoring.fact_quality_manager import FactQualityManager
 from app.services.monitoring.proactive_trigger import ProactiveTrigger
 from app.services.monitoring.event_system import EventQueue, Event, EventPriority
-from app.services.user_profile import UserProfileStore
+
+if TYPE_CHECKING:
+    from app.services.user_profile import UserProfileStore
+    from app.services.user_profile_adapter import UserProfileStoreAdapter
+
+    ProfileStoreType = UserProfileStore | UserProfileStoreAdapter
+else:
+    ProfileStoreType = Any
+
 from app.services.fact_extractors import FactExtractor
 from app.services.fact_extractors.chat_fact_extractor import ChatFactExtractor
 from app.repositories.chat_profile import ChatProfileRepository, ChatFact
@@ -55,7 +63,7 @@ class ContinuousMonitor:
         settings: Settings,
         context_store: ContextStore,
         gemini_client: GeminiClient,
-        user_profile_store: UserProfileStore,
+        user_profile_store: ProfileStoreType,
         fact_extractor: FactExtractor,
         chat_profile_store: ChatProfileRepository | None = None,
         enable_monitoring: bool = True,

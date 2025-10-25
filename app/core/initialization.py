@@ -7,7 +7,7 @@ and components of the bot application.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -30,14 +30,15 @@ from app.services.bot_learning import BotLearningEngine
 
 if TYPE_CHECKING:
     from app.services.fact_extractors.base import FactExtractor
+    from redis.asyncio import Redis as RedisClient
+else:
+    FactExtractor = Any
+    RedisClient = Any
 
 try:
     import redis.asyncio as redis
-
-    RedisType = redis.Redis  # type: ignore
 except ImportError:
     redis = None  # type: ignore
-    RedisType = None  # type: ignore
 
 
 logger = logging.getLogger(__name__)
@@ -64,8 +65,8 @@ class ServiceContainer:
         episode_monitor: EpisodeMonitor,
         bot_profile: Optional[BotProfileStore],
         bot_learning: Optional[BotLearningEngine],
-        redis_client: Optional[RedisType],
-        image_gen_service: Optional[any],
+        redis_client: Optional[RedisClient],
+        image_gen_service: Optional[Any],
     ):
         self.bot = bot
         self.dispatcher = dispatcher
@@ -127,6 +128,9 @@ async def init_core_services(settings: Settings) -> tuple[
         settings.gemini_api_key,
         settings.gemini_model,
         settings.gemini_embed_model,
+        api_keys=settings.gemini_api_keys_list,
+        free_tier_mode=settings.free_tier_mode,
+        quota_block_seconds=settings.gemini_quota_block_seconds,
     )
 
     profile_store = UserProfileStoreAdapter(settings.db_path)
@@ -288,7 +292,7 @@ async def init_bot_learning(
     return bot_profile, bot_learning
 
 
-async def init_image_generation(settings: Settings) -> Optional[any]:
+async def init_image_generation(settings: Settings) -> Optional[Any]:
     """Initialize image generation service if enabled.
 
     Args:
@@ -326,7 +330,7 @@ async def init_image_generation(settings: Settings) -> Optional[any]:
     return image_gen_service
 
 
-async def init_redis_client(settings: Settings) -> Optional[RedisType]:
+async def init_redis_client(settings: Settings) -> Optional[RedisClient]:
     """Initialize Redis client if enabled and available.
 
     Args:

@@ -1,33 +1,37 @@
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 
 class RedisLike(Protocol):
-    async def zadd(self, key: str, mapping: dict[str, float]) -> Any: ...
+    async def zadd(
+        self, name: str, mapping: Mapping[Any, Any], *args: Any, **kwargs: Any
+    ) -> Any: ...
 
-    async def expire(self, key: str, seconds: int) -> Any: ...
+    async def expire(self, name: str, time: Any, *args: Any, **kwargs: Any) -> Any: ...
 
-    async def zremrangebyscore(self, key: str, min: float, max: float) -> Any: ...
+    async def zremrangebyscore(
+        self, name: str, min: Any, max: Any, *args: Any, **kwargs: Any
+    ) -> Any: ...
 
-    async def zcard(self, key: str) -> int: ...
+    async def zcard(self, name: str) -> int: ...
 
     async def zrange(
         self,
-        key: str,
+        name: str,
         start: int,
         end: int,
-        desc: bool = False,
-        withscores: bool = False,
+        *args: Any,
+        **kwargs: Any,
     ) -> list[Any]: ...
 
     async def scan(
         self,
         cursor: int = 0,
-        match: str | None = None,
-        count: int | None = None,
+        *args: Any,
+        **kwargs: Any,
     ) -> tuple[int, list[str]]: ...
 
-    async def delete(self, *keys: str) -> Any: ...
+    async def delete(self, *names: Any) -> Any: ...
 
     async def close(self) -> Any: ...

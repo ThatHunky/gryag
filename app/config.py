@@ -21,7 +21,12 @@ class Settings(BaseSettings):
     )
 
     telegram_token: str = Field(..., alias="TELEGRAM_TOKEN")
-    gemini_api_key: str = Field(..., alias="GEMINI_API_KEY")
+    gemini_api_key: str = Field("", alias="GEMINI_API_KEY")
+    gemini_api_keys: str = Field("", alias="GEMINI_API_KEYS")
+    free_tier_mode: bool = Field(False, alias="FREE_TIER_MODE")
+    gemini_quota_block_seconds: int = Field(
+        86400, alias="GEMINI_QUOTA_BLOCK_SECONDS", ge=0, le=604800
+    )
     gemini_model: str = Field("gemini-2.5-flash", alias="GEMINI_MODEL")
     gemini_embed_model: str = Field(
         "models/text-embedding-004", alias="GEMINI_EMBED_MODEL"
@@ -517,6 +522,21 @@ class Settings(BaseSettings):
         return [int(part) for part in parts if part]
 
     @property
+    def gemini_api_keys_list(self) -> list[str]:
+        """Return ordered, de-duplicated list of configured Gemini API keys."""
+        keys: list[str] = []
+        primary = (self.gemini_api_key or "").strip()
+        if primary:
+            keys.append(primary)
+
+        extras_raw = (self.gemini_api_keys or "").split(",")
+        for raw in extras_raw:
+            token = raw.strip()
+            if token and token not in keys:
+                keys.append(token)
+        return keys
+
+    @property
     def allowed_chat_ids_list(self) -> list[int]:
         """Parse allowed chat IDs from string to list."""
         if not self.allowed_chat_ids:
@@ -592,6 +612,17 @@ class Settings(BaseSettings):
             return str(value)
         raise ValueError("Invalid ADMIN_USER_IDS value")
 
+    @field_validator("gemini_api_keys", mode="before")
+    @classmethod
+    def _parse_gemini_keys(cls, value: object) -> str:
+        if value in (None, ""):
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (list, tuple, set)):
+            return ",".join(str(item) for item in value)
+        raise ValueError("Invalid GEMINI_API_KEYS value")
+
     @field_validator("bot_behavior_mode")
     @classmethod
     def _validate_behavior_mode(cls, v: str) -> str:
@@ -663,9 +694,24 @@ class Settings(BaseSettings):
                 "TELEGRAM_TOKEN is required. Get one from @BotFather on Telegram."
             )
 
-        if not self.gemini_api_key or self.gemini_api_key == "":
+        keys = self.gemini_api_keys_list
+        if not keys:
             raise ValueError(
-                "GEMINI_API_KEY is required. Get one from https://aistudio.google.com/app/apikey"
+                "At least one Gemini API key is required. Set GEMINI_API_KEY or provide a comma-separated GEMINI_API_KEYS list."
+            )
+
+        # Ensure primary gemini_api_key is populated for legacy callers
+        if not self.gemini_api_key and keys:
+            object.__setattr__(self, "gemini_api_key", keys[0])
+
+        if self.free_tier_mode and len(keys) < 2:
+            warnings.append(
+                "FREE_TIER_MODE is enabled but only one Gemini API key is configured. Provide multiple keys in GEMINI_API_KEYS for rotation."
+            )
+
+        if self.free_tier_mode and self.gemini_quota_block_seconds < 3600:
+            warnings.append(
+                "GEMINI_QUOTA_BLOCK_SECONDS is below 3600 seconds. Keys may churn rapidly; consider 86400 (24h) for stable rotation."
             )
 
         # Warn about potentially problematic configurations
@@ -727,4 +773,4 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Return cached settings instance."""
 
-    return Settings()
+    return Settings()  # type: ignore[call-arg]

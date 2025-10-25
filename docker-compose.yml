@@ -13,6 +13,26 @@ services:
       timeout: 10s
       retries: 3
 
+  warp:
+    build:
+      context: .
+      dockerfile: scripts/warp/Dockerfile
+    container_name: gryag-warp
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "0"
+      net.ipv6.conf.default.disable_ipv6: "0"
+    healthcheck:
+      test: ["CMD-SHELL", "warp-cli --accept-tos status | grep -q 'Connected'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
   bot:
     build:
       context: .
@@ -27,6 +47,9 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      warp:
+        condition: service_healthy
+    network_mode: "service:warp"
     environment:
       - USE_REDIS=true
       - REDIS_URL=redis://redis:6379/0

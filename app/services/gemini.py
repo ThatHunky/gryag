@@ -4,9 +4,10 @@ import base64
 import asyncio
 import inspect
 import json
-import time
-from typing import Any, Awaitable, Callable, Iterable
 import logging
+import random
+import time
+from typing import Any, Awaitable, Callable, Iterable, cast
 
 from google import genai
 from google.genai import types
@@ -14,6 +15,39 @@ from google.genai import types
 from app.services import telemetry
 from app.services.embedding_cache import EmbeddingCache
 from app.services.media import MAX_INLINE_SIZE
+
+
+class _KeyPool:
+    """Round-robin pool for rotating Gemini API keys with cooldowns."""
+
+    def __init__(
+        self, keys: list[str], cooldown_seconds: float, quota_block_seconds: float
+    ) -> None:
+        self._keys = list(keys)
+        self._cooldown_seconds = cooldown_seconds
+        self._quota_block_seconds = quota_block_seconds
+        self._cooldowns: dict[str, float] = {}
+        self._index = random.randrange(len(self._keys)) if self._keys else 0
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> str | None:
+        async with self._lock:
+            if not self._keys:
+                return None
+            now = time.time()
+            total = len(self._keys)
+            for _ in range(total):
+                key = self._keys[self._index % total]
+                self._index += 1
+                if self._cooldowns.get(key, 0.0) <= now:
+                    return key
+            return None
+
+    async def mark_quota(self, key: str, block_seconds: float | None = None) -> None:
+        async with self._lock:
+            base = block_seconds or self._quota_block_seconds or self._cooldown_seconds
+            jitter = random.uniform(0.05, 0.15) * base
+            self._cooldowns[key] = time.time() + base + jitter
 
 
 class GeminiError(Exception):
@@ -40,8 +74,34 @@ class GeminiClient:
         model: str,
         embed_model: str,
         embedding_cache: EmbeddingCache | None = None,
+        *,
+        api_keys: list[str] | None = None,
+        free_tier_mode: bool = False,
+        key_cooldown_seconds: float = 120.0,
+        quota_block_seconds: float = 86400.0,
     ) -> None:
-        self._client = genai.Client(api_key=api_key)
+        provided_keys = [k.strip() for k in (api_keys or []) if k and k.strip()]
+        if api_key:
+            primary = api_key.strip()
+            keys = [primary] + [k for k in provided_keys if k != primary]
+        else:
+            keys = provided_keys
+
+        if not keys:
+            raise ValueError("Gemini API key is required")
+
+        self._api_keys = keys
+        self._primary_key = keys[0]
+        self._free_tier_mode = free_tier_mode and len(keys) > 1
+        self._key_cooldown_seconds = key_cooldown_seconds
+        self._quota_block_seconds = quota_block_seconds
+        self._key_pool = (
+            _KeyPool(keys, key_cooldown_seconds, quota_block_seconds)
+            if self._free_tier_mode
+            else None
+        )
+        self._clients: dict[str, genai.Client] = {}
+        self._client = self._get_or_create_client(self._primary_key)
         self._model = None  # Not needed in new SDK - we call client.models.generate_content directly
         self._model_name = model
         self._embed_model = embed_model
@@ -69,22 +129,72 @@ class GeminiClient:
         # Safety settings for new SDK
         self._safety_settings = [
             types.SafetySetting(
-                category="HARM_CATEGORY_HARASSMENT",
-                threshold="BLOCK_NONE",
+                category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                threshold=types.HarmBlockThreshold.BLOCK_NONE,
             ),
             types.SafetySetting(
-                category="HARM_CATEGORY_HATE_SPEECH",
-                threshold="BLOCK_NONE",
+                category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                threshold=types.HarmBlockThreshold.BLOCK_NONE,
             ),
             types.SafetySetting(
-                category="HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                threshold="BLOCK_NONE",
+                category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                threshold=types.HarmBlockThreshold.BLOCK_NONE,
             ),
             types.SafetySetting(
-                category="HARM_CATEGORY_DANGEROUS_CONTENT",
-                threshold="BLOCK_NONE",
+                category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                threshold=types.HarmBlockThreshold.BLOCK_NONE,
             ),
         ]
+
+        if self._free_tier_mode:
+            self._logger.info(
+                "Gemini free-tier rotation enabled with %d API keys (%.1f h quota cooldown)",
+                len(self._api_keys),
+                self._quota_block_seconds / 3600 if self._quota_block_seconds else 0.0,
+            )
+
+    def _get_or_create_client(self, key: str) -> genai.Client:
+        client = self._clients.get(key)
+        if client is None:
+            client = genai.Client(api_key=key)
+            self._clients[key] = client
+        return client
+
+    async def _acquire_client(self) -> tuple[genai.Client, str]:
+        if not self._key_pool:
+            return self._client, self._primary_key
+
+        attempts = len(self._api_keys)
+        for _ in range(attempts):
+            key = await self._key_pool.acquire()
+            if key:
+                return self._get_or_create_client(key), key
+
+        await asyncio.sleep(1.0)
+        key = await self._key_pool.acquire()
+        if not key:
+            raise GeminiError("All Gemini API keys are cooling down due to quota hits")
+        return self._get_or_create_client(key), key
+
+    async def _mark_quota(self, key: str) -> None:
+        if self._key_pool:
+            await self._key_pool.mark_quota(key, self._quota_block_seconds)
+            cooldown = self._quota_block_seconds or self._key_cooldown_seconds
+            hours = cooldown / 3600 if cooldown else 0
+            self._logger.warning(
+                "Gemini key rotated off due to quota exhaustion; cooling for %.1f hours",
+                hours,
+            )
+
+    @staticmethod
+    def _is_quota_error(exc: Exception) -> bool:
+        message = f"{type(exc).__name__} {exc}".lower()
+        return (
+            "429" in message
+            or "quota" in message
+            or "rate limit" in message
+            or "resourceexhausted" in message
+        )
 
     @staticmethod
     def _detect_audio_support(model_name: str) -> bool:
@@ -250,19 +360,36 @@ class GeminiClient:
 
         config = types.GenerateContentConfig(**config_params)
 
-        try:
-            # New SDK uses client.models.generate_content (async by default)
-            response = await asyncio.wait_for(
-                self._client.aio.models.generate_content(
-                    model=self._model_name,
-                    contents=contents,
-                    config=config,
-                ),
-                timeout=self._generate_timeout,
-            )
-            return response
-        except asyncio.TimeoutError as exc:
-            raise GeminiError("Gemini request timed out") from exc
+        attempts = len(self._api_keys) if self._free_tier_mode else 1
+        last_quota_exc: Exception | None = None
+
+        for _ in range(max(1, attempts)):
+            client, key = await self._acquire_client()
+            try:
+                # New SDK uses client.models.generate_content (async by default)
+                payload = cast(types.ContentListUnionDict, contents)
+                response = await asyncio.wait_for(
+                    client.aio.models.generate_content(
+                        model=self._model_name,
+                        contents=payload,
+                        config=config,
+                    ),
+                    timeout=self._generate_timeout,
+                )
+                return response
+            except asyncio.TimeoutError as exc:
+                raise GeminiError("Gemini request timed out") from exc
+            except Exception as exc:
+                if self._is_quota_error(exc):
+                    await self._mark_quota(key)
+                    last_quota_exc = exc
+                    continue
+                raise
+
+        if last_quota_exc:
+            raise last_quota_exc
+
+        raise GeminiError("Gemini request failed after rotating API keys")
 
     def build_media_parts(
         self,
@@ -848,27 +975,48 @@ class GeminiClient:
                 return cached
 
         async with self._embed_semaphore:
-            try:
-                response = await self._client.aio.models.embed_content(
-                    model=self._embed_model,
-                    contents=text,
-                )
-                # Extract embedding from response
-                if hasattr(response, "embeddings") and response.embeddings:
-                    embedding = response.embeddings[0]
-                    if hasattr(embedding, "values"):
-                        result = list(embedding.values)
+            attempts = len(self._api_keys) if self._free_tier_mode else 1
+            last_quota_exc: Exception | None = None
 
-                        # Cache the result
-                        if self._embedding_cache and result:
-                            await self._embedding_cache.put(
-                                text, result, model=self._embed_model
-                            )
-                            telemetry.increment_counter("embedding_cache_stores")
+            for _ in range(max(1, attempts)):
+                key: str | None = None
+                try:
+                    client, key = await self._acquire_client()
+                    response = await client.aio.models.embed_content(
+                        model=self._embed_model,
+                        contents=text,
+                    )
+                    if hasattr(response, "embeddings") and response.embeddings:
+                        embedding = response.embeddings[0]
+                        if hasattr(embedding, "values"):
+                            values = getattr(embedding, "values", None)
+                            if values is not None:
+                                result = list(values)
 
-                        return result
-                return []
-            except Exception as exc:
-                self._logger.warning(f"Embedding failed: {exc}")
-                telemetry.increment_counter("embedding_cache_misses")
-                return []
+                                if self._embedding_cache and result:
+                                    await self._embedding_cache.put(
+                                        text, result, model=self._embed_model
+                                    )
+                                    telemetry.increment_counter(
+                                        "embedding_cache_stores"
+                                    )
+
+                                return result
+                    telemetry.increment_counter("embedding_cache_misses")
+                    return []
+                except Exception as exc:
+                    if key is not None and self._is_quota_error(exc):
+                        await self._mark_quota(key)
+                        last_quota_exc = exc
+                        continue
+                    self._logger.warning(f"Embedding failed: {exc}")
+                    telemetry.increment_counter("embedding_cache_misses")
+                    return []
+
+            if last_quota_exc:
+                raise GeminiError(
+                    "Embedding request failed due to quota limits"
+                ) from last_quota_exc
+
+            telemetry.increment_counter("embedding_cache_misses")
+            return []

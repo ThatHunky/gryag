@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Any, Optional, cast
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -54,14 +54,6 @@ from app.services.context.episode_monitor import EpisodeMonitor
 from app.services.context.episode_summarizer import EpisodeSummarizer
 from app.services.bot_profile import BotProfileStore
 from app.services.bot_learning import BotLearningEngine
-
-try:  # Optional dependency
-    import redis.asyncio as redis
-
-    RedisType = redis.Redis  # type: ignore
-except ImportError:  # pragma: no cover - redis optional.
-    redis = None  # type: ignore
-    RedisType = None  # type: ignore
 
 
 async def setup_bot_commands(bot: Bot) -> None:
@@ -133,6 +125,9 @@ async def main() -> None:
         settings.gemini_api_key,
         settings.gemini_model,
         settings.gemini_embed_model,
+        api_keys=settings.gemini_api_keys_list,
+        free_tier_mode=settings.free_tier_mode,
+        quota_block_seconds=settings.gemini_quota_block_seconds,
     )
 
     # Initialize user profiling system
@@ -163,7 +158,9 @@ async def main() -> None:
     )
 
     # Initialize profile summarization (Phase 2)
-    profile_summarizer = ProfileSummarizer(settings, profile_store, gemini_client)
+    profile_summarizer = ProfileSummarizer(
+        settings, cast(Any, profile_store), gemini_client
+    )
     await profile_summarizer.start()
 
     # Initialize donation reminder scheduler
@@ -240,7 +237,7 @@ async def main() -> None:
         settings=settings,
         context_store=store,
         gemini_client=gemini_client,
-        user_profile_store=profile_store,
+        user_profile_store=cast(Any, profile_store),
         chat_profile_store=chat_profile_store,
         fact_extractor=fact_extractor,
         enable_monitoring=settings.enable_continuous_monitoring,
@@ -351,16 +348,7 @@ async def main() -> None:
             )
         )
 
-    redis_client: Optional[RedisType] = None  # type: ignore
-    if settings.use_redis and redis is not None and settings.redis_url:
-        try:
-            redis_client = redis.from_url(
-                settings.redis_url,
-                encoding="utf-8",
-                decode_responses=False,
-            )
-        except Exception as exc:  # pragma: no cover - connection errors
-            logging.warning(f"Не вдалося під'єднати Redis: {exc}")
+    redis_client = await init_redis_client(settings)
 
     chat_meta_middleware = ChatMetaMiddleware(
         bot,

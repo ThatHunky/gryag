@@ -85,6 +85,8 @@ class PersonaLoader:
                         f"System prompt template not found: {data['system_prompt_template']}"
                     )
 
+            self._ensure_plain_system_prompt(system_prompt)
+
             return PersonaConfig(
                 name=data.get("name", "gryag"),
                 display_name=data.get("display_name", "гряг"),
@@ -104,6 +106,17 @@ class PersonaLoader:
         except Exception as e:
             LOGGER.error(f"Error loading persona from {yaml_path}: {e}")
             return self._get_default_persona()
+
+    @staticmethod
+    def _ensure_plain_system_prompt(prompt: str) -> None:
+        """Ensure the system prompt does not contain template placeholders."""
+        if not prompt:
+            return
+
+        if "{" in prompt or "}" in prompt:
+            raise ValueError(
+                "System prompt templates must not contain placeholders or braces."
+            )
 
     def _load_response_templates(self, json_path: str) -> dict[str, str]:
         """Load response templates from JSON file."""
@@ -147,6 +160,8 @@ class PersonaLoader:
         # Default trigger pattern (from current hardcoded triggers)
         default_triggers = [r"\b(?:гр[яи]г[аоуеєіїюяьґ]*|gr[yi]ag\w*)\b"]
 
+        self._ensure_plain_system_prompt(SYSTEM_PERSONA)
+
         return PersonaConfig(
             name="gryag",
             display_name="гряг",
@@ -180,24 +195,17 @@ class PersonaLoader:
         }
 
     def get_system_prompt(self, **kwargs: Any) -> str:
-        """Get system prompt with optional variable substitution.
+        """Return the configured system prompt.
 
-        Args:
-            **kwargs: Variables for template substitution (e.g., current_time, bot_name)
-
-        Returns:
-            System prompt string with variables substituted
+        Legacy callers may still pass keyword arguments. These are ignored to
+        prevent placeholder substitution and avoid leaking template variables.
         """
-        prompt = self.persona.system_prompt
-
-        # Simple variable substitution using format
-        try:
-            if kwargs:
-                prompt = prompt.format(**kwargs)
-        except KeyError as e:
-            LOGGER.warning(f"Missing variable in system prompt template: {e}")
-
-        return prompt
+        if kwargs:
+            LOGGER.debug(
+                "Ignoring system prompt kwargs %s because persona templates are plain text",
+                list(kwargs.keys()),
+            )
+        return self.persona.system_prompt
 
     def get_response(self, key: str, **kwargs: Any) -> str:
         """Get localized response with variable substitution.

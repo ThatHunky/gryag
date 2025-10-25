@@ -1,7 +1,7 @@
 """Integration tests for context store."""
 
 import pytest
-from app.services.context_store import ContextStore
+from app.services.context_store import ContextStore, TurnSender
 
 
 @pytest.mark.asyncio
@@ -38,10 +38,45 @@ async def test_add_and_retrieve_turn(context_store):
     # Check parts contain text
     parts = history[0]["parts"]
     assert len(parts) > 0
-    # Find text part
-    text_parts = [p for p in parts if "text" in p and "meta" not in p.get("text", "")]
-    assert len(text_parts) > 0
-    assert "Hello bot" in text_parts[0]["text"]
+    # Ensure speaker header is present and comes first
+    assert parts[0]["text"].startswith("[speaker ")
+    # Find text part containing original content
+    text_values = [p["text"] for p in parts if "text" in p]
+    assert any("Hello bot" in text for text in text_values)
+
+
+@pytest.mark.asyncio
+async def test_recent_includes_speaker_header(context_store):
+    sender = TurnSender(
+        role="assistant",
+        name="gryag",
+        username="gryag_bot",
+        is_bot=True,
+    )
+
+    await context_store.add_turn(
+        chat_id=555,
+        thread_id=None,
+        user_id=None,
+        role="model",
+        text="Відповідь від гряга",
+        media=None,
+        metadata={
+            "message_id": "100",
+            "name": "gryag",
+            "username": "gryag_bot",
+            "is_bot": True,
+        },
+        sender=sender,
+    )
+
+    history = await context_store.recent(chat_id=555, thread_id=None, max_turns=5)
+    assert history, "Expected at least one history item"
+    header_text = history[-1]["parts"][0]["text"]
+    assert header_text.startswith("[speaker ")
+    assert "role=assistant" in header_text
+    assert 'username="gryag_bot"' in header_text
+    assert "is_bot=1" in header_text
 
 
 @pytest.mark.asyncio

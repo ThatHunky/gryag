@@ -1,8 +1,13 @@
 # Changelog
+<!-- markdownlint-disable -->
 
 All notable changes to gryag's memory, context, and learning systems.
 
 ## [Unreleased]
+
+### 2025-10-31 — Speaker Headers for Context Separation
+
+- Added sender metadata storage and `[speaker …]` annotations so Gemini stops mixing user vs bot turns. Verification: `.venv/bin/pytest tests/integration/test_context_store.py tests/unit/test_external_ids.py`.
 
 ### 2025-01-24 — Donation Message Ignore List
 

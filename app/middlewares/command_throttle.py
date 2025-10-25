@@ -14,7 +14,7 @@ import logging
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware
-from aiogram.types import Message
+from aiogram.types import Message, TelegramObject
 
 from app.config import Settings
 from app.services.feature_rate_limiter import FeatureRateLimiter
@@ -74,8 +74,8 @@ class CommandThrottleMiddleware(BaseMiddleware):
 
     async def __call__(
         self,
-        handler: Callable[[Message, dict[str, Any]], Awaitable[Any]],
-        event: Message,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
         """
@@ -89,33 +89,45 @@ class CommandThrottleMiddleware(BaseMiddleware):
         Returns:
             Handler result or None if throttled
         """
-        # Skip if throttling is disabled
-        if not self.enabled:
+        if not isinstance(event, Message):
             return await handler(event, data)
 
-        # Only throttle commands (messages starting with /)
-        if not event.text or not event.text.startswith("/"):
-            return await handler(event, data)
+        message = event
 
-        # Skip if no user (shouldn't happen)
-        if not event.from_user:
-            return await handler(event, data)
+        is_command = bool(message.text and message.text.startswith("/"))
 
-        # Ignore commands from other bots
-        if getattr(event.from_user, "is_bot", False):
+        # Only process throttling logic for slash commands
+        if not is_command:
+            return await handler(message, data)
+
+        # Skip if no user (shouldn't happen, but stay defensive)
+        if not message.from_user:
+            return await handler(message, data)
+
+        # Ignore commands originating from any bot user (reply-to trickery included)
+        if getattr(message.from_user, "is_bot", False):
             logger.debug(
-                "Ignoring command from bot user",
+                "Dropping command from bot user",
                 extra={
-                    "user_id": getattr(event.from_user, "id", None),
-                    "username": getattr(event.from_user, "username", None),
-                    "command": event.text.split()[0] if event.text else "",
+                    "user_id": getattr(message.from_user, "id", None),
+                    "username": getattr(message.from_user, "username", None),
+                    "command": message.text.split()[0] if message.text else "",
+                    "reply_to_bot": bool(
+                        message.reply_to_message
+                        and message.reply_to_message.from_user
+                        and getattr(message.reply_to_message.from_user, "is_bot", False)
+                    ),
                 },
             )
-            return await handler(event, data)
+            return None
+
+        # Skip throttling logic entirely if feature disabled
+        if not self.enabled:
+            return await handler(message, data)
 
         # Extract command name (without @ mention if present)
-        command_with_args = event.text.split()[0] if event.text.split() else event.text
-        command_base = command_with_args.split("@")[0].lstrip("/").lower()
+        text = message.text or ""
+        command_with_args = text.split()[0] if text else ""
 
         # Throttle all slash commands regardless of registration status.
         # This prevents spam from unknown or deprecated commands as well.
@@ -135,19 +147,19 @@ class CommandThrottleMiddleware(BaseMiddleware):
                     logger.debug(
                         f"Command for different bot (@{mentioned_bot}), skipping throttle",
                         extra={
-                            "user_id": event.from_user.id,
+                            "user_id": message.from_user.id,
                             "command": command_with_args,
                             "mentioned_bot": mentioned_bot,
                             "our_bot": bot_username,
                         },
                     )
-                    return await handler(event, data)
+                    return await handler(message, data)
 
-        user_id = event.from_user.id
+        user_id = message.from_user.id
 
         # Admins bypass throttling
         if user_id in self.settings.admin_user_ids_list:
-            return await handler(event, data)
+            return await handler(message, data)
 
         # Check cooldown
         allowed, retry_after, should_show_error = (
@@ -177,12 +189,12 @@ class CommandThrottleMiddleware(BaseMiddleware):
                     f"Наступна команда через: <code>{time_msg}</code>"
                 )
 
-                await event.reply(throttle_msg, parse_mode="HTML")
+                await message.reply(throttle_msg, parse_mode="HTML")
                 logger.info(
                     f"Command throttled for user {user_id}, retry after {retry_after}s (error shown)",
                     extra={
                         "user_id": user_id,
-                        "command": event.text.split()[0] if event.text else "",
+                        "command": message.text.split()[0] if message.text else "",
                         "retry_after": retry_after,
                     },
                 )
@@ -192,11 +204,11 @@ class CommandThrottleMiddleware(BaseMiddleware):
                     f"Command throttled for user {user_id}, retry after {retry_after}s (error suppressed)",
                     extra={
                         "user_id": user_id,
-                        "command": event.text.split()[0] if event.text else "",
+                        "command": message.text.split()[0] if message.text else "",
                         "retry_after": retry_after,
                     },
                 )
             return None  # Stop processing
 
         # Allow command
-        return await handler(event, data)
+        return await handler(message, data)

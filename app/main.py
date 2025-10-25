@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Optional, cast
+import socket
+
+import aiohttp
+from typing import Any, cast
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -33,7 +36,6 @@ from app.services.context_store import ContextStore, run_retention_pruning_task
 from app.services.gemini import GeminiClient
 from app.services.user_profile_adapter import UserProfileStoreAdapter
 from app.repositories.chat_profile import ChatProfileRepository
-from app.services.fact_extractors import create_hybrid_extractor
 from app.services.profile_summarization import ProfileSummarizer
 from app.services.rate_limiter import RateLimiter
 from app.services.feature_rate_limiter import FeatureRateLimiter
@@ -47,13 +49,38 @@ from app.services.resource_optimizer import (
     get_resource_optimizer,
     periodic_optimization_check,
 )
-from app.services.monitoring.continuous_monitor import ContinuousMonitor
 from app.services.context import HybridSearchEngine, EpisodicMemoryStore
 from app.services.context.episode_boundary_detector import EpisodeBoundaryDetector
 from app.services.context.episode_monitor import EpisodeMonitor
 from app.services.context.episode_summarizer import EpisodeSummarizer
 from app.services.bot_profile import BotProfileStore
 from app.services.bot_learning import BotLearningEngine
+
+
+async def get_public_ip() -> str:
+    endpoints = (
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+    )
+    timeout = aiohttp.ClientTimeout(total=3)
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        for endpoint in endpoints:
+            try:
+                async with session.get(endpoint) as response:
+                    if response.status == 200:
+                        ip = (await response.text()).strip()
+                        if ip:
+                            return ip
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                continue
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            return sock.getsockname()[0]
+    except OSError:
+        return "unknown"
 
 
 async def setup_bot_commands(bot: Bot) -> None:
@@ -91,6 +118,9 @@ async def main() -> None:
     from app.core.logging_config import setup_logging
 
     setup_logging(settings)
+
+    public_ip = await get_public_ip()
+    logging.info(f"Bot starting on public IP {public_ip}")
 
     # Phase 2: Initialize trigger patterns from configuration
     from app.services.triggers import initialize_triggers
@@ -150,12 +180,6 @@ async def main() -> None:
         )
     else:
         logging.info("Chat public memory disabled (ENABLE_CHAT_MEMORY=false)")
-
-    # Create hybrid fact extractor (rule-based + optional Gemini fallback)
-    fact_extractor = await create_hybrid_extractor(
-        enable_gemini_fallback=settings.enable_gemini_fact_extraction,
-        gemini_client=gemini_client if settings.enable_gemini_fact_extraction else None,
-    )
 
     # Initialize profile summarization (Phase 2)
     profile_summarizer = ProfileSummarizer(
@@ -231,30 +255,6 @@ async def main() -> None:
         logging.info("Episode monitoring started")
     else:
         logging.info("Episode monitoring disabled (AUTO_CREATE_EPISODES=false)")
-
-    # Phase 1+: Initialize continuous monitoring system
-    continuous_monitor = ContinuousMonitor(
-        settings=settings,
-        context_store=store,
-        gemini_client=gemini_client,
-        user_profile_store=cast(Any, profile_store),
-        chat_profile_store=chat_profile_store,
-        fact_extractor=fact_extractor,
-        enable_monitoring=settings.enable_continuous_monitoring,
-        enable_filtering=settings.enable_message_filtering,
-        enable_async_processing=settings.enable_async_processing,
-    )
-
-    # Start async processing if enabled (Phase 3+)
-    await continuous_monitor.start()
-    logging.info(
-        "Continuous monitoring initialized",
-        extra={
-            "enabled": settings.enable_continuous_monitoring,
-            "filtering": settings.enable_message_filtering,
-            "async_processing": settings.enable_async_processing,
-        },
-    )
 
     # Initialize image generation service
     image_gen_service = None
@@ -356,12 +356,10 @@ async def main() -> None:
         store,
         gemini_client,
         profile_store,
-        fact_extractor,
         chat_profile_store=chat_profile_store,
         hybrid_search=hybrid_search,
         episodic_memory=episodic_memory,
         episode_monitor=episode_monitor,
-        continuous_monitor=continuous_monitor,
         bot_profile=bot_profile,
         bot_learning=bot_learning,
         prompt_manager=prompt_manager,
@@ -400,10 +398,6 @@ async def main() -> None:
         if settings.auto_create_episodes:
             await episode_monitor.stop()
             logging.info("Episode monitoring stopped")
-
-        # Cleanup: Stop continuous monitoring
-        await continuous_monitor.stop()
-        logging.info("Continuous monitoring stopped")
 
         # Cleanup phase 3: cancel resource monitoring task
         if monitor_task is not None:

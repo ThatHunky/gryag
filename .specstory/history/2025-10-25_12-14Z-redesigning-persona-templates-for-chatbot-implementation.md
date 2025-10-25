@@ -302,3 +302,15 @@ _**Assistant (copilot/gpt-5-codex)**_
 
 ---
 
+_**User (2025-10-25 12:34Z)**_
+
+let's clear the database completely, I want to test the bot's ability to remember stuff properly. In the screenshot it is shown to remember unrelated stuff. Go through the code and implement fixes.
+
+---
+
+_**Assistant (copilot/gpt-5-codex)**_
+
+
+
+---
+

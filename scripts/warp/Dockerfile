@@ -3,7 +3,7 @@ FROM debian:bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl gnupg iproute2 iptables procps tini \
+    ca-certificates curl dbus gnupg iproute2 iptables procps tini \
     && rm -rf /var/lib/apt/lists/*
 
 # Add Cloudflare WARP package repository

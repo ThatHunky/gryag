@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import time
 from collections import deque
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Any
-import logging
 
 from aiogram import Bot, Router
 from aiogram.enums import ParseMode
@@ -60,7 +60,6 @@ from app.services.media import collect_media_parts
 from app.services.redis_types import RedisLike
 from app.services.triggers import addressed_to_bot
 from app.services.user_profile import UserProfileStore
-from app.services.fact_extractors import FactExtractor
 from app.services import telemetry
 from app.services.context import (
     MultiLevelContextManager,
@@ -95,18 +94,7 @@ def _get_response(
     default: str,
     **kwargs: Any,
 ) -> str:
-    """Get response from PersonaLoader if available, otherwise use default.
-
-    Args:
-        key: Template key (e.g., 'error_fallback', 'banned_reply')
-        persona_loader: PersonaLoader instance (if enabled)
-        default: Fallback response if template not found
-        **kwargs: Variables for template substitution
-
-    Returns:
-        Response string with variables substituted
-    """
-    # If persona loader is available, inject bot-related variables (if present)
+    """Get response from PersonaLoader if available, otherwise use default."""
     if persona_loader is not None:
         try:
             persona = getattr(persona_loader, "persona", None)
@@ -114,7 +102,6 @@ def _get_response(
             bot_display = (
                 getattr(persona, "display_name", None) if persona is not None else None
             )
-            # Do not override variables explicitly provided by the caller
             if bot_name and "bot_name" not in kwargs:
                 kwargs["bot_name"] = bot_name
             if bot_display and "bot_display_name" not in kwargs:
@@ -126,7 +113,6 @@ def _get_response(
 
         return persona_loader.get_response(key, **kwargs)
 
-    # No persona loader: try to format the default template with kwargs if provided
     if kwargs:
         try:
             return default.format(**kwargs)
@@ -134,12 +120,17 @@ def _get_response(
             LOGGER.warning(
                 "Missing variable while formatting default response for key=%s", key
             )
-            # Fall through to return raw default
     return default
 
 
-_META_PREFIX_RE = re.compile(
-    r'^\s*\[meta\](?:\s+[\w.-]+=(?:"(?:\\.|[^"])*"|[^\s]+))*\s*'
+_RECENT_CONTEXT: dict[tuple[int, int | None], deque[dict[str, Any]]] = {}
+_CONTEXT_TTL_SECONDS = 120
+
+_META_PREFIX_RE = re.compile(r"^\s*\[meta(?:\s+[^\]]*)?\]\s*", re.IGNORECASE)
+_META_ANYWHERE_RE = re.compile(r"\[meta(?:\s+[^\]]*)?\]", re.IGNORECASE)
+_TECHNICAL_INFO_RE = re.compile(
+    r"\b(?:chat_id|user_id|message_id|thread_id|bot_id|conversation_id|request_id|turn_id)=[^\s\]]+",
+    re.IGNORECASE,
 )
 
 _IMAGE_ACTION_KEYWORDS = (
@@ -151,86 +142,69 @@ _IMAGE_ACTION_KEYWORDS = (
     "намалювати",
     "зроби",
     "create",
-    "generate",
+    "make",
     "draw",
     "paint",
-    "make",
     "render",
+    "generate",
 )
 
 _IMAGE_NOUN_KEYWORDS = (
-    "карт",  # matches "картинку", "картинка"
-    "зображ",
+    "картинку",
+    "картинка",
+    "зображення",
     "фото",
-    "малюн",
+    "фотку",
+    "малюнок",
+    "постер",
     "арт",
-    "picture",
-    "image",
-    "photo",
     "art",
-    "poster",
+    "image",
+    "picture",
+    "photo",
 )
 
 _IMAGE_EDIT_KEYWORDS = (
-    "відредаг",
-    "редаг",
-    "перероб",
+    "редагуй",
+    "відредагуй",
+    "перероби",
+    "перемалюй",
+    "виправ",
     "зміни",
-    "додай",
-    "прибери",
-    "дорисуй",
+    "обнови",
     "edit",
-    "change",
-    "modify",
+    "remix",
     "adjust",
+    "fix",
 )
-
-# Enhanced regex to catch metadata that might appear anywhere in the response
-_META_ANYWHERE_RE = re.compile(
-    r'\[meta\](?:\s+[\w.-]+=(?:"(?:\\.|[^"])*"|[^\s]+))*', re.MULTILINE
-)
-
-# Regex to catch technical IDs and system information
-_TECHNICAL_INFO_RE = re.compile(
-    r"\b(?:chat_id|user_id|thread_id|message_id)[:=]\s*\d+\b|"
-    r"\b(?:reply_to_message_id|reply_to_user_id)[:=]\s*\d+\b|"
-    r'"(?:name|username|reply_to_name|reply_to_username)"[:=]\s*"[^"]*"',
-    re.IGNORECASE,
-)
-
-_TELEGRAM_MARKDOWN_ESCAPE_RE = re.compile(r"([_*\[\]()`])")
-
-_RECENT_CONTEXT: dict[tuple[int, int | None], deque[dict[str, Any]]] = {}
-_CONTEXT_TTL_SECONDS = 300
 
 
 def _normalize_username(username: str | None) -> str | None:
     if not username:
         return None
-    return f"@{username.lstrip('@')}"
-
-
-def _looks_like_image_generation_request(text: str | None) -> bool:
-    if not text:
-        return False
-    lowered = text.lower()
-    if any(
-        phrase in lowered
-        for phrase in ("створи картинку", "згенеруй картинку", "намалюй мені")
-    ):
-        return True
-    action_hit = any(keyword in lowered for keyword in _IMAGE_ACTION_KEYWORDS)
-    noun_hit = any(keyword in lowered for keyword in _IMAGE_NOUN_KEYWORDS)
-    return action_hit and noun_hit
+    normalized = username.strip().lstrip("@")
+    return normalized.lower() if normalized else None
 
 
 def _looks_like_image_edit_request(text: str | None) -> bool:
     if not text:
         return False
     lowered = text.lower()
-    if any(phrase in lowered for phrase in ("відредагуй фото", "перероби зображення")):
+    if any(
+        phrase in lowered
+        for phrase in ("відредагуй фото", "перероби зображення", "edit photo")
+    ):
         return True
     action_hit = any(keyword in lowered for keyword in _IMAGE_EDIT_KEYWORDS)
+    noun_hit = any(keyword in lowered for keyword in _IMAGE_NOUN_KEYWORDS)
+    return action_hit and noun_hit
+
+
+def _looks_like_image_generation_request(text: str | None) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    action_hit = any(keyword in lowered for keyword in _IMAGE_ACTION_KEYWORDS)
     noun_hit = any(keyword in lowered for keyword in _IMAGE_NOUN_KEYWORDS)
     return action_hit and noun_hit
 
@@ -655,141 +629,40 @@ async def _enrich_with_user_profile(
 
 async def _update_user_profile_background(
     profile_store: UserProfileStore,
-    fact_extractor: FactExtractor,
     user_id: int,
     chat_id: int,
     thread_id: int | None,
-    user_message: str,
     display_name: str | None,
     username: str | None,
     settings: Settings,
-    history: list[dict[str, Any]],
 ) -> None:
-    """Background task to update user profile after message handling."""
+    """Background task to keep profile metadata fresh after each message."""
     try:
-        # Skip if profiling disabled
         if not settings.enable_user_profiling:
             return
 
-        # If memory is managed via Gemini tool calls, skip auto-extraction/storage.
-        # Gemini will decide what to remember using remember/update/forget tools.
-        if settings.enable_tool_based_memory:
-            LOGGER.debug(
-                "Tool-based memory enabled; skipping automatic fact extraction/storage"
-            )
-            # Still proceed with profile presence + counters to keep activity stats fresh
-            # but return before any extraction/storage below.
-            # Ensure profile exists and counters updated quickly, then exit.
-            profile = await profile_store.get_or_create_profile(
-                user_id=user_id,
-                chat_id=chat_id,
-                display_name=display_name,
-                username=username,
-            )
-            await profile_store.update_interaction_count(
-                user_id=user_id,
-                chat_id=chat_id,
-                thread_id=thread_id,
-            )
-            return
-
-        # Get or create profile
-        profile = await profile_store.get_or_create_profile(
+        await profile_store.get_or_create_profile(
             user_id=user_id,
             chat_id=chat_id,
             display_name=display_name,
             username=username,
         )
 
-        # Update interaction count
         await profile_store.update_interaction_count(
             user_id=user_id,
             chat_id=chat_id,
             thread_id=thread_id,
         )
 
-        # Refresh profile snapshot so gating logic sees the latest counters
-        refreshed_profile = await profile_store.get_profile(
-            user_id=user_id, chat_id=chat_id
-        )
-        if refreshed_profile:
-            profile = refreshed_profile
-        else:
-            # Fallback: assume counters incremented by one even if fetch fails
-            profile = {
-                **profile,
-                "interaction_count": profile.get("interaction_count", 0) + 1,
-                "message_count": profile.get("message_count", 0) + 1,
-            }
-
-        # Check if we should extract facts
-        if not settings.fact_extraction_enabled:
-            return
-
-        interaction_count = profile.get("interaction_count", 0)
-        if interaction_count < settings.min_messages_for_extraction:
-            return
-
-        # Check fact count limit
-        fact_count = await profile_store.get_fact_count(user_id, chat_id)
-        if fact_count >= settings.max_facts_per_user:
+        if settings.enable_tool_based_memory:
             LOGGER.debug(
-                f"User {user_id} has reached max facts limit ({settings.max_facts_per_user})"
+                "Tool-based memory enabled; relying on Gemini tool calls for fact storage"
             )
-            return
-
-        # Extract facts from message
-        if not user_message or len(user_message) < 10:
-            return
-
-        facts = await fact_extractor.extract_facts(
-            message=user_message,
-            user_id=user_id,
-            username=username,
-            context=history,
-            min_confidence=settings.fact_confidence_threshold,
+    except Exception:
+        LOGGER.exception(
+            "Failed to update user profile metadata",
+            extra={"user_id": user_id, "chat_id": chat_id},
         )
-
-        # Enforce personal-only memory policy (configurable)
-        if settings.enable_personal_only_memory:
-            allowed_fact_types = set(settings.personal_memory_allowed_types_list)
-            filtered_facts = [
-                f for f in facts if f.get("fact_type") in allowed_fact_types
-            ]
-        else:
-            filtered_facts = facts
-
-        # Store only allowed facts
-        for fact in filtered_facts:
-            await profile_store.add_fact(
-                user_id=user_id,
-                chat_id=chat_id,
-                fact_type=fact["fact_type"],
-                fact_key=fact["fact_key"],
-                fact_value=fact["fact_value"],
-                confidence=fact["confidence"],
-                evidence_text=fact.get("evidence_text"),
-            )
-
-        if filtered_facts:
-            LOGGER.info(
-                f"Extracted and stored {len(filtered_facts)} personal fact(s) for user {user_id}",
-                extra={"user_id": user_id, "fact_count": len(filtered_facts)},
-            )
-        elif facts and settings.enable_personal_only_memory:
-            pruned = len(facts)
-            LOGGER.info(
-                f"Filtered out {pruned} fact(s) due to personal-only policy for user {user_id}",
-                extra={"user_id": user_id, "filtered_count": pruned},
-            )
-
-    except Exception as e:
-        LOGGER.error(
-            f"Failed to update user profile for {user_id}: {e}",
-            extra={"user_id": user_id, "error": str(e)},
-            exc_info=True,
-        )
-        telemetry.increment_counter("profile_update_errors")
 
 
 def _format_for_telegram(text: str) -> str:
@@ -1099,13 +972,11 @@ async def handle_group_message(
     store: ContextStore,
     gemini_client: GeminiClient,
     profile_store: UserProfileStore,
-    fact_extractor: FactExtractor,
     bot_username: str,
     bot_id: int | None,
     hybrid_search: HybridSearchEngine | None = None,
     episodic_memory: EpisodicMemoryStore | None = None,
     episode_monitor: Any | None = None,
-    continuous_monitor: Any | None = None,
     bot_profile: BotProfileStore | None = None,
     bot_learning: BotLearningEngine | None = None,
     prompt_manager: SystemPromptManager | None = None,
@@ -1134,24 +1005,6 @@ async def handle_group_message(
 
     chat_id = message.chat.id
     thread_id = message.message_thread_id
-
-    # Phase 1+: Process message through continuous monitoring
-    # This runs for ALL messages (addressed and unaddressed)
-    if continuous_monitor is not None:
-        is_addressed = addressed_to_bot(message, bot_username, bot_id)
-        try:
-            monitor_result = await continuous_monitor.process_message(
-                message, is_addressed=is_addressed
-            )
-            LOGGER.debug(
-                "Continuous monitoring processed message", extra=monitor_result
-            )
-        except Exception as e:
-            LOGGER.error(
-                "Error in continuous monitoring",
-                exc_info=e,
-                extra={"chat_id": chat_id, "message_id": message.message_id},
-            )
 
     # Bot Self-Learning: Check if message is a reaction to bot's previous response
     # This runs BEFORE is_addressed check so we can learn from all user messages
@@ -2223,17 +2076,14 @@ async def handle_group_message(
             asyncio.create_task(
                 _update_user_profile_background(
                     profile_store=profile_store,
-                    fact_extractor=fact_extractor,
                     user_id=user_id,
                     chat_id=chat_id,
                     thread_id=thread_id,
-                    user_message=text_content,
                     display_name=(
                         message.from_user.full_name if message.from_user else None
                     ),
                     username=message.from_user.username if message.from_user else None,
                     settings=settings,
-                    history=history,
                 )
             )
         except GeminiContentBlockedError as exc:

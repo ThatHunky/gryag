@@ -18,8 +18,6 @@ if TYPE_CHECKING:
     ProfileStoreType = UserProfileStore | UserProfileStoreAdapter
 else:
     ProfileStoreType = Any
-from app.services.fact_extractors import FactExtractor
-from app.services.monitoring.continuous_monitor import ContinuousMonitor
 from app.services.context import (
     HybridSearchEngine,
     EpisodicMemoryStore,
@@ -43,12 +41,10 @@ class ChatMetaMiddleware(BaseMiddleware):
         store: ContextStore,
         gemini: GeminiClient,
         profile_store: ProfileStoreType,
-        fact_extractor: FactExtractor,
         chat_profile_store: Any | None = None,
         hybrid_search: HybridSearchEngine | None = None,
         episodic_memory: EpisodicMemoryStore | None = None,
         episode_monitor: EpisodeMonitor | None = None,
-        continuous_monitor: ContinuousMonitor | None = None,
         bot_profile: BotProfileStore | None = None,
         bot_learning: BotLearningEngine | None = None,
         prompt_manager: SystemPromptManager | None = None,
@@ -63,12 +59,10 @@ class ChatMetaMiddleware(BaseMiddleware):
         self._store = store
         self._gemini = gemini
         self._profile_store = profile_store
-        self._fact_extractor = fact_extractor
         self._chat_profile_store = chat_profile_store
         self._hybrid_search = hybrid_search
         self._episodic_memory = episodic_memory
         self._episode_monitor = episode_monitor
-        self._continuous_monitor = continuous_monitor
         self._bot_profile = bot_profile
         self._bot_learning = bot_learning
         self._prompt_manager = prompt_manager
@@ -98,11 +92,6 @@ class ChatMetaMiddleware(BaseMiddleware):
                 me = await self._bot.get_me()
                 self._bot_username = me.username or ""
                 self._bot_id = me.id
-                # Set bot ID in continuous monitor
-                if self._continuous_monitor and self._bot_id:
-                    self._continuous_monitor.set_bot_user_id(self._bot_id)
-                    # Phase 4: Set bot instance for proactive responses
-                    self._continuous_monitor.set_bot_instance(self._bot)
         return self._bot_username or "", self._bot_id
 
     async def __call__(self, handler, event: Message | CallbackQuery, data):  # type: ignore[override]
@@ -120,11 +109,9 @@ class ChatMetaMiddleware(BaseMiddleware):
         data["gemini_client"] = self._gemini
         data["profile_store"] = self._profile_store
         data["chat_profile_store"] = self._chat_profile_store
-        data["fact_extractor"] = self._fact_extractor
         data["hybrid_search"] = self._hybrid_search
         data["episodic_memory"] = self._episodic_memory
         data["episode_monitor"] = self._episode_monitor
-        data["continuous_monitor"] = self._continuous_monitor
         data["bot_profile"] = self._bot_profile
         data["bot_learning"] = self._bot_learning
         data["prompt_manager"] = self._prompt_manager

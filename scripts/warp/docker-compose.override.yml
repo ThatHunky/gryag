@@ -1,0 +1,4 @@
+services:
+  warp:
+    environment:
+      - WARP_DISABLE_POWER_NOTIFIER=1

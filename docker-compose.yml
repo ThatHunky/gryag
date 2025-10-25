@@ -18,6 +18,8 @@ services:
       context: .
       dockerfile: scripts/warp/Dockerfile
     container_name: gryag-warp
+    volumes:
+      - warp-state:/var/lib/cloudflare-warp
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -55,3 +57,6 @@ services:
       - REDIS_URL=redis://redis:6379/0
 # Note: Redis data and models are now stored in local folders (./redis-data and ./models)
 # This keeps all persistent data within the codebase directory for easier backup and management
+
+volumes:
+  warp-state:

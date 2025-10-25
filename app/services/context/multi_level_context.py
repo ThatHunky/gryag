@@ -844,19 +844,9 @@ class MultiLevelContextManager:
         if not text:
             return ""
 
-        # Redact emails
-        text = re.sub(
-            r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "[redacted_email]", text
-        )
-
-        # Redact phone numbers (but NOT user IDs in Username#123456 format)
-        # Match phone patterns but avoid matching:
-        # - Numbers after # (user IDs)
-        # - Numbers after word characters (part of identifiers)
-        # - Numbers followed by : or word chars (IDs, not phones)
-        text = re.sub(
-            r"(?<!#)(?<!\w)\+?\d[\d\-() ]{6,}\d(?![\w:])", "[redacted_phone]", text
-        )
+        # Previously we redacted phone-like numbers here, but this caused legitimate
+        # user IDs (especially numeric Telegram IDs) to be lost. We now preserve
+        # the original values so context and logs reflect the real identifiers.
 
         # Remove leading debug lines
         text = re.sub(r"(?im)^\s*(debug|internal|trace):.*$", "", text)

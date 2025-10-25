@@ -325,7 +325,12 @@ async def donate_command(
     success = await donation_scheduler.send_now(chat_id)
 
     if success:
-        LOGGER.info(f"Admin {message.from_user.id} triggered donation message in chat {chat_id}")
+        await message.reply("✅ Donation message sent successfully!")
+        LOGGER.info(
+            f"Admin {message.from_user.id} triggered donation message in chat {chat_id}"
+        )
     else:
-        await message.reply("Failed to send donation message. Check logs for details.")
+        await message.reply(
+            "❌ Failed to send donation message. This chat may be in the ignored list. Check logs for details."
+        )
         LOGGER.error(f"Failed to send donation message in chat {chat_id}")

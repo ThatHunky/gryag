@@ -44,6 +44,7 @@ This directory contains utility scripts for the gryag project, organized by purp
 
 - **Root scripts/** - Active utility scripts
   - `cleanup_logs.py` - Cleans old log files
+  - `reset_database.py` - Wipes the SQLite database and reapplies `db/schema.sql`
   - `remove_throttle_tables.py` - Removes throttle-related database tables
 
 ## Usage

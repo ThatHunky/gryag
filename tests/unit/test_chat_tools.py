@@ -95,11 +95,10 @@ async def test_build_tool_definitions_flags():
 
     # Flags
     assert "search_web" in names, "search_web should be included when enabled"
-    assert "remember_fact" in names, "memory tools should be included"
-    assert "recall_facts" in names
-    assert "update_fact" in names
-    assert "forget_fact" in names
-    assert "forget_all_facts" in names
+    assert "remember_memory" in names, "memory tools should be included"
+    assert "recall_memories" in names
+    assert "forget_memory" in names
+    assert "forget_all_memories" in names
     assert "set_pronouns" in names
     assert "generate_image" not in names
     assert "edit_image" not in names
@@ -116,7 +115,7 @@ async def test_build_tool_definitions_flags():
     assert "generate_image" in names2
     assert "edit_image" in names2
     assert "search_web" not in names2
-    assert "remember_fact" not in names2
+    assert "remember_memory" not in names2
 
 
 @pytest.mark.asyncio
@@ -129,6 +128,7 @@ async def test_search_messages_callback_tracks_usage_and_formats_output():
     store = _DummyStore()
     gemini = _DummyGemini()
     profile_store = _DummyProfileStore()
+    memory_repo = None  # Mock memory repo
     tools_used: list[str] = []
 
     callbacks = build_tool_callbacks(
@@ -136,6 +136,7 @@ async def test_search_messages_callback_tracks_usage_and_formats_output():
         store=store,
         gemini_client=gemini,
         profile_store=profile_store,
+        memory_repo=memory_repo,
         chat_id=123,
         thread_id=456,
         message_id=999,

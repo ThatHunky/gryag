@@ -55,6 +55,7 @@ from app.services.context.episode_monitor import EpisodeMonitor
 from app.services.context.episode_summarizer import EpisodeSummarizer
 from app.services.bot_profile import BotProfileStore
 from app.services.bot_learning import BotLearningEngine
+from app.repositories.memory_repository import MemoryRepository
 
 
 async def get_public_ip() -> str:
@@ -158,11 +159,17 @@ async def main() -> None:
         api_keys=settings.gemini_api_keys_list,
         free_tier_mode=settings.free_tier_mode,
         quota_block_seconds=settings.gemini_quota_block_seconds,
+        enable_thinking=settings.gemini_enable_thinking,
     )
 
     # Initialize user profiling system
     profile_store = UserProfileStoreAdapter(settings.db_path)
     await profile_store.init()
+
+    # Initialize the new memory repository
+    memory_repo = MemoryRepository(db_path=settings.db_path)
+    await memory_repo.init()
+    logging.info("MemoryRepository initialized for simple memory storage.")
 
     # Initialize chat profiling system (Phase 4: Chat Public Memory)
     chat_profile_store: ChatProfileRepository | None = None
@@ -283,6 +290,18 @@ async def main() -> None:
     else:
         logging.info("Image generation disabled (ENABLE_IMAGE_GENERATION=false)")
 
+    # Log web search configuration
+    if settings.enable_search_grounding:
+        using_separate_search_key = settings.web_search_api_key is not None
+        logging.info(
+            "Web search grounding enabled",
+            extra={
+                "separate_api_key": using_separate_search_key,
+            },
+        )
+    else:
+        logging.info("Web search grounding disabled (ENABLE_SEARCH_GROUNDING=false)")
+
     # Phase 5: Initialize bot self-learning system
     bot_profile: BotProfileStore | None = None
     bot_learning: BotLearningEngine | None = None
@@ -368,6 +387,7 @@ async def main() -> None:
         image_gen_service=image_gen_service,
         feature_limiter=feature_limiter,
         donation_scheduler=donation_scheduler,
+        memory_repo=memory_repo,
     )
 
     dispatcher.message.middleware(chat_meta_middleware)

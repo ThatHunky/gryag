@@ -29,6 +29,7 @@ from app.services.bot_learning import BotLearningEngine
 from app.services.system_prompt_manager import SystemPromptManager
 from app.services.rate_limiter import RateLimiter
 from app.services.persona import PersonaLoader
+from app.repositories.memory_repository import MemoryRepository
 
 
 class ChatMetaMiddleware(BaseMiddleware):
@@ -53,6 +54,7 @@ class ChatMetaMiddleware(BaseMiddleware):
         image_gen_service: Any | None = None,
         feature_limiter: Any | None = None,
         donation_scheduler: Any | None = None,
+        memory_repo: MemoryRepository | None = None,
     ) -> None:
         self._bot = bot
         self._settings = settings
@@ -71,6 +73,7 @@ class ChatMetaMiddleware(BaseMiddleware):
         self._image_gen_service = image_gen_service
         self._feature_limiter = feature_limiter
         self._donation_scheduler = donation_scheduler
+        self._memory_repo = memory_repo
         self._bot_username: str | None = None
         self._bot_id: int | None = None
         self._lock = asyncio.Lock()
@@ -144,4 +147,6 @@ class ChatMetaMiddleware(BaseMiddleware):
             data["image_gen_service"] = self._image_gen_service
         if self._donation_scheduler is not None:
             data["donation_scheduler"] = self._donation_scheduler
+        if self._memory_repo is not None:
+            data["memory_repo"] = self._memory_repo
         return await handler(event, data)

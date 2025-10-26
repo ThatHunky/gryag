@@ -70,6 +70,7 @@ async def test_generate_image_registry_callback(monkeypatch):
         store=types.SimpleNamespace(),  # not used by image tools
         gemini_client=_DummyGemini(),
         profile_store=profile_store,
+        memory_repo=None,
         chat_id=123,
         thread_id=7,
         message_id=999,
@@ -113,6 +114,7 @@ async def test_edit_image_registry_callback(monkeypatch):
         store=types.SimpleNamespace(),
         gemini_client=_DummyGemini(),
         profile_store=profile_store,
+        memory_repo=None,
         chat_id=456,
         thread_id=11,
         message_id=1001,

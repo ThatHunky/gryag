@@ -173,25 +173,20 @@ class CommandThrottleMiddleware(BaseMiddleware):
         if not allowed:
             # Only send error message if we haven't sent one recently (10 min cooldown)
             if should_show_error:
-                # User is throttled
+                # User is throttled - show warning message
                 minutes = retry_after // 60
                 seconds = retry_after % 60
 
-                if minutes > 0:
-                    time_msg = f"{minutes} хв {seconds} сек"
-                else:
-                    time_msg = f"{seconds} сек"
-
                 cooldown_minutes = self.cooldown_seconds // 60
                 throttle_msg = (
-                    f"⏱ <b>Зачекай трохи!</b>\n\n"
-                    f"Команди можна використовувати <b>раз на {cooldown_minutes} хвилин</b>.\n"
-                    f"Наступна команда через: <code>{time_msg}</code>"
+                    f"<b>Зачекай трохи!</b>\n\n"
+                    f"Команди можна використовувати раз на <b>{cooldown_minutes} хвилин</b>. "
+                    f"Наступна команда через: ⏱ <b>{minutes} хв {seconds} сек</b>"
                 )
 
                 await message.reply(throttle_msg, parse_mode="HTML")
                 logger.info(
-                    f"Command throttled for user {user_id}, retry after {retry_after}s (error shown)",
+                    f"Command throttled for user {user_id}, retry after {retry_after}s (warning shown)",
                     extra={
                         "user_id": user_id,
                         "command": message.text.split()[0] if message.text else "",
@@ -199,9 +194,9 @@ class CommandThrottleMiddleware(BaseMiddleware):
                     },
                 )
             else:
-                # Silently block (error already shown recently)
+                # Silently block (warning already shown recently - user is spamming)
                 logger.debug(
-                    f"Command throttled for user {user_id}, retry after {retry_after}s (error suppressed)",
+                    f"Command throttled for user {user_id}, retry after {retry_after}s (silently ignored)",
                     extra={
                         "user_id": user_id,
                         "command": message.text.split()[0] if message.text else "",

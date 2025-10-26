@@ -1,91 +1,51 @@
-"""Gemini tool definitions for memory management."""
+"""Gemini tool definitions for the simplified memory management system."""
 
-# Remember fact tool
-REMEMBER_FACT_DEFINITION = {
+# Remember a memory
+REMEMBER_MEMORY_DEFINITION = {
     "function_declarations": [
         {
-            "name": "remember_fact",
+            "name": "remember_memory",
             "description": (
-                "Store a new fact about a user. Use when you learn something important "
-                "about them (location, preferences, skills, etc.). Always call recall_facts "
-                "BEFORE using this to check for duplicates. Returns confirmation or error."
+                "Store a NEW piece of information about the user. The information should be a simple, self-contained statement. "
+                "Use this IMMEDIATELY when the user asks you to remember something (е.g., 'запам'ятай', 'remember', 'save'). "
+                "Do NOT call recall_memories before this if the user explicitly asks to remember - just store it directly. "
+                "Returns confirmation or an error."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "user_id": {
                         "type": "integer",
-                        "description": "Telegram user ID",
+                        "description": "The Telegram user ID.",
                     },
-                    "fact_type": {
+                    "memory_text": {
                         "type": "string",
-                        "enum": [
-                            "personal",
-                            "preference",
-                            "skill",
-                            "trait",
-                            "opinion",
-                            "relationship",
-                        ],
-                        "description": "Category of fact",
-                    },
-                    "fact_key": {
-                        "type": "string",
-                        "description": "Standardized key (e.g., 'location', 'programming_language', 'hobby')",
-                    },
-                    "fact_value": {
-                        "type": "string",
-                        "description": "The actual fact content",
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "description": "How confident you are (0.5-1.0). Use 0.9+ for certain, 0.7-0.8 for probable, 0.5-0.6 for uncertain.",
-                    },
-                    "source_excerpt": {
-                        "type": "string",
-                        "description": "Quote from message that supports this fact (optional)",
+                        "description": "The single piece of information to remember (e.g., 'User lives in Kyiv', 'User prefers concise answers').",
                     },
                 },
-                "required": [
-                    "user_id",
-                    "fact_type",
-                    "fact_key",
-                    "fact_value",
-                    "confidence",
-                ],
+                "required": ["user_id", "memory_text"],
             },
         }
     ]
 }
 
-# Recall facts tool
-RECALL_FACTS_DEFINITION = {
+# Recall all memories
+RECALL_MEMORIES_DEFINITION = {
     "function_declarations": [
         {
-            "name": "recall_facts",
+            "name": "recall_memories",
             "description": (
-                "Search for existing facts about a user. Use BEFORE storing new facts "
-                "to check for duplicates or contradictions. Returns list of known facts."
+                "Retrieve all stored memories for a user. Use this when you need to CHECK what you already know, "
+                "or when the user asks what you remember about them. "
+                "Do NOT use this before remember_memory - just remember directly. "
+                "Returns a list of all known information, each with an ID."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "user_id": {
                         "type": "integer",
-                        "description": "Telegram user ID",
-                    },
-                    "fact_types": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Filter by fact types (optional, e.g., ['personal', 'skill'])",
-                    },
-                    "search_query": {
-                        "type": "string",
-                        "description": "Semantic search query (optional, e.g., 'programming')",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Max results to return (default 10, max 50)",
+                        "description": "The Telegram user ID.",
                     },
                 },
                 "required": ["user_id"],
@@ -94,159 +54,58 @@ RECALL_FACTS_DEFINITION = {
     ]
 }
 
-# Update fact tool
-UPDATE_FACT_DEFINITION = {
+# Forget a specific memory by ID
+FORGET_MEMORY_DEFINITION = {
     "function_declarations": [
         {
-            "name": "update_fact",
+            "name": "forget_memory",
             "description": (
-                "Update an existing fact when you learn new or corrected information. "
-                "Use when user corrects something or provides more details. "
-                "Returns updated fact or error if not found."
+                "Forget a specific piece of information about the user, identified by its unique ID. "
+                "To get the ID, you must call `recall_memories` first. Returns confirmation or an error."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "user_id": {
                         "type": "integer",
-                        "description": "Telegram user ID",
+                        "description": "The Telegram user ID.",
                     },
-                    "fact_type": {
-                        "type": "string",
-                        "enum": [
-                            "personal",
-                            "preference",
-                            "skill",
-                            "trait",
-                            "opinion",
-                            "relationship",
-                        ],
-                        "description": "Category of fact to update",
-                    },
-                    "fact_key": {
-                        "type": "string",
-                        "description": "Which fact to update (e.g., 'location', 'job')",
-                    },
-                    "new_value": {
-                        "type": "string",
-                        "description": "New or corrected value",
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "description": "Confidence in the new value (0.5-1.0)",
-                    },
-                    "change_reason": {
-                        "type": "string",
-                        "enum": ["correction", "update", "refinement", "contradiction"],
-                        "description": "Why is this being changed?",
-                    },
-                    "source_excerpt": {
-                        "type": "string",
-                        "description": "Quote from message supporting this update (optional)",
+                    "memory_id": {
+                        "type": "integer",
+                        "description": "The unique ID of the memory to forget.",
                     },
                 },
-                "required": [
-                    "user_id",
-                    "fact_type",
-                    "fact_key",
-                    "new_value",
-                    "confidence",
-                    "change_reason",
-                ],
+                "required": ["user_id", "memory_id"],
             },
         }
     ]
 }
 
-# Forget fact tool
-FORGET_FACT_DEFINITION = {
+# Forget all memories for a user
+FORGET_ALL_MEMORIES_DEFINITION = {
     "function_declarations": [
         {
-            "name": "forget_fact",
+            "name": "forget_all_memories",
             "description": (
-                "Mark a specific fact as outdated or incorrect. The fact is archived (not deleted) "
-                "for audit trail. Use when user asks to forget something specific, or when info "
-                "becomes obsolete. Returns confirmation or error."
+                "Permanently delete ALL stored memories for a user. This is a destructive action. "
+                "Use only when the user explicitly asks to 'forget everything'. Returns a count of forgotten memories."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "user_id": {
                         "type": "integer",
-                        "description": "Telegram user ID",
-                    },
-                    "fact_type": {
-                        "type": "string",
-                        "enum": [
-                            "personal",
-                            "preference",
-                            "skill",
-                            "trait",
-                            "opinion",
-                            "relationship",
-                        ],
-                        "description": "Category of fact to forget",
-                    },
-                    "fact_key": {
-                        "type": "string",
-                        "description": "Which fact to forget (e.g., 'phone_number', 'location')",
-                    },
-                    "reason": {
-                        "type": "string",
-                        "enum": [
-                            "outdated",
-                            "incorrect",
-                            "superseded",
-                            "user_requested",
-                        ],
-                        "description": "Why forget this fact?",
-                    },
-                    "replacement_fact_id": {
-                        "type": "integer",
-                        "description": "If superseded, ID of the new fact that replaces this one (optional)",
+                        "description": "The Telegram user ID.",
                     },
                 },
-                "required": ["user_id", "fact_type", "fact_key", "reason"],
-            },
-        }
-    ]
-}
-
-# Forget all facts tool (bulk delete)
-FORGET_ALL_FACTS_DEFINITION = {
-    "function_declarations": [
-        {
-            "name": "forget_all_facts",
-            "description": (
-                "Archive ALL facts about a user in one operation. Use when user explicitly "
-                "asks to 'forget everything' about them. This is more efficient than calling "
-                "forget_fact multiple times. Facts are archived (not deleted) for audit trail. "
-                "Returns count of facts forgotten."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "user_id": {
-                        "type": "integer",
-                        "description": "Telegram user ID",
-                    },
-                    "reason": {
-                        "type": "string",
-                        "enum": [
-                            "user_requested",
-                            "privacy_request",
-                            "data_reset",
-                        ],
-                        "description": "Why forget all facts? Usually 'user_requested'",
-                    },
-                },
-                "required": ["user_id", "reason"],
+                "required": ["user_id"],
             },
         }
     ]
 }
 
 
+# This tool is separate from the memory system and modifies the user's profile directly.
 SET_PRONOUNS_DEFINITION = {
     "function_declarations": [
         {

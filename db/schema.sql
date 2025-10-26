@@ -119,89 +119,41 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     PRIMARY KEY (user_id, chat_id)
 );
 
--- Unified fact storage shared by user and chat memories
-CREATE TABLE IF NOT EXISTS facts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- Simplified Memory System - October 22, 2025
+-- Replaces the complex fact graph with a simple list of text memories per user.
+-- ═══════════════════════════════════════════════════════════════════════════════
 
-    -- Entity identification
-    entity_type TEXT NOT NULL CHECK(entity_type IN ('user', 'chat')),
-    entity_id INTEGER NOT NULL,  -- user_id or chat_id
-    chat_context INTEGER,  -- chat_id where this was learned (for user facts only)
-
-    -- Fact taxonomy (unified categories)
-    fact_category TEXT NOT NULL CHECK(fact_category IN (
-        -- User-level categories
-        'personal', 'preference', 'skill', 'trait', 'opinion', 'relationship',
-        -- Chat-level categories
-        'tradition', 'rule', 'norm', 'topic', 'culture', 'event', 'shared_knowledge'
-    )),
-
-    -- Fact content
-    fact_key TEXT NOT NULL,
-    fact_value TEXT NOT NULL,
-    fact_description TEXT,
-
-    -- Confidence and evidence
-    confidence REAL DEFAULT 0.7 CHECK(confidence >= 0 AND confidence <= 1),
-    evidence_count INTEGER DEFAULT 1,
-    evidence_text TEXT,
-    source_message_id INTEGER,
-
-    -- Consensus (for chat facts)
-    participant_consensus REAL,
-    participant_ids TEXT,  -- JSON array
-
-    -- Lifecycle
-    first_observed INTEGER NOT NULL,
-    last_reinforced INTEGER NOT NULL,
-    is_active INTEGER DEFAULT 1,
-    decay_rate REAL DEFAULT 0.0,
-
-    -- Metadata
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-
-    -- Embedding for semantic search
-    embedding TEXT,
-
-    -- Composite unique constraint
-    UNIQUE(entity_type, entity_id, chat_context, fact_category, fact_key)
-);
-
-CREATE INDEX IF NOT EXISTS idx_facts_entity
-    ON facts(entity_type, entity_id);
-
-CREATE INDEX IF NOT EXISTS idx_facts_chat_context
-    ON facts(chat_context) WHERE entity_type = 'user';
-
-CREATE INDEX IF NOT EXISTS idx_facts_category
-    ON facts(fact_category);
-
-CREATE INDEX IF NOT EXISTS idx_facts_active
-    ON facts(is_active) WHERE is_active = 1;
-
-CREATE INDEX IF NOT EXISTS idx_facts_confidence
-    ON facts(confidence);
-
-CREATE INDEX IF NOT EXISTS idx_facts_last_reinforced
-    ON facts(last_reinforced);
-
-CREATE TABLE IF NOT EXISTS user_facts (
+-- Simplified user memory storage (like ChatGPT Custom Instructions)
+CREATE TABLE IF NOT EXISTS user_memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     chat_id INTEGER NOT NULL,
-    fact_type TEXT NOT NULL CHECK(fact_type IN ('personal', 'preference', 'trait', 'relationship', 'skill', 'opinion')),
-    fact_key TEXT NOT NULL,
-    fact_value TEXT NOT NULL,
-    confidence REAL DEFAULT 1.0,
-    source_message_id INTEGER,
-    evidence_text TEXT,
-    is_active INTEGER DEFAULT 1,
+    memory_text TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    last_mentioned INTEGER,
-    FOREIGN KEY (user_id, chat_id) REFERENCES user_profiles(user_id, chat_id) ON DELETE CASCADE
+    UNIQUE(user_id, chat_id, memory_text)
 );
+
+-- Trigger to enforce a limit of 15 memories per user per chat
+CREATE TRIGGER IF NOT EXISTS enforce_user_memory_limit
+BEFORE INSERT ON user_memories
+WHEN (SELECT COUNT(*) FROM user_memories WHERE user_id = NEW.user_id AND chat_id = NEW.chat_id) >= 15
+BEGIN
+    SELECT RAISE(FAIL, 'User has reached the maximum of 15 memories in this chat.');
+END;
+
+CREATE INDEX IF NOT EXISTS idx_user_memories_user_chat
+    ON user_memories(user_id, chat_id);
+
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- DEPRECATED - Complex Fact Graph System (Replaced by user_memories)
+-- The tables below are no longer in active use but are kept for potential data migration.
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- DEPRECATED: Complex fact graph system tables have been removed.
+-- User memories are now stored in the simpler user_memories table above.
+
 
 CREATE TABLE IF NOT EXISTS user_relationships (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -229,20 +181,8 @@ CREATE INDEX IF NOT EXISTS idx_user_profiles_chat
 CREATE INDEX IF NOT EXISTS idx_user_profiles_last_seen
     ON user_profiles(last_seen);
 
-CREATE INDEX IF NOT EXISTS idx_user_facts_user_chat
-    ON user_facts(user_id, chat_id);
+-- [Deprecated SQL removed]
 
-CREATE INDEX IF NOT EXISTS idx_user_facts_type
-    ON user_facts(fact_type);
-
-CREATE INDEX IF NOT EXISTS idx_user_facts_key
-    ON user_facts(fact_key);
-
-CREATE INDEX IF NOT EXISTS idx_user_facts_active
-    ON user_facts(is_active);
-
-CREATE INDEX IF NOT EXISTS idx_user_facts_confidence
-    ON user_facts(confidence);
 
 CREATE INDEX IF NOT EXISTS idx_user_relationships_user
     ON user_relationships(user_id, chat_id);
@@ -292,19 +232,8 @@ CREATE TABLE IF NOT EXISTS conversation_windows (
     facts_extracted INTEGER DEFAULT 0
 );
 
--- Fact quality metrics for tracking deduplication and conflicts
-CREATE TABLE IF NOT EXISTS fact_quality_metrics (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    chat_id INTEGER NOT NULL,
-    fact_id INTEGER NOT NULL, -- References user_facts.id
-    duplicate_of INTEGER, -- References another fact_id if deduplicated
-    conflict_with INTEGER, -- References another fact_id if conflicting
-    similarity_score REAL, -- Semantic similarity score
-    resolution_method TEXT, -- How conflict was resolved: recency, confidence, merge
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (fact_id) REFERENCES user_facts(id) ON DELETE CASCADE
-);
+-- [Deprecated SQL removed]
+
 
 -- Proactive response events and user reactions
 CREATE TABLE IF NOT EXISTS proactive_events (
@@ -352,14 +281,8 @@ CREATE INDEX IF NOT EXISTS idx_conversation_windows_closed
 CREATE INDEX IF NOT EXISTS idx_conversation_windows_processed
     ON conversation_windows(processed);
 
-CREATE INDEX IF NOT EXISTS idx_fact_quality_metrics_fact
-    ON fact_quality_metrics(fact_id);
+-- [Deprecated SQL removed]
 
-CREATE INDEX IF NOT EXISTS idx_fact_quality_metrics_duplicate
-    ON fact_quality_metrics(duplicate_of);
-
-CREATE INDEX IF NOT EXISTS idx_fact_quality_metrics_conflict
-    ON fact_quality_metrics(conflict_with);
 
 CREATE INDEX IF NOT EXISTS idx_proactive_events_chat
     ON proactive_events(chat_id, thread_id);
@@ -451,64 +374,8 @@ CREATE TABLE IF NOT EXISTS episode_accesses (
 
 CREATE INDEX IF NOT EXISTS idx_episode_accesses ON episode_accesses(episode_id, accessed_at DESC);
 
--- Fact relationships for knowledge graph construction
-CREATE TABLE IF NOT EXISTS fact_relationships (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    fact1_id INTEGER NOT NULL,
-    fact2_id INTEGER NOT NULL,
-    relationship_type TEXT NOT NULL,
-    weight REAL DEFAULT 0.5,
-    inferred INTEGER DEFAULT 1,  -- 0 = explicit, 1 = inferred
-    evidence TEXT,  -- JSON metadata
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    FOREIGN KEY (fact1_id) REFERENCES user_facts(id) ON DELETE CASCADE,
-    FOREIGN KEY (fact2_id) REFERENCES user_facts(id) ON DELETE CASCADE,
-    UNIQUE (fact1_id, fact2_id, relationship_type)
-);
+-- [Deprecated SQL removed]
 
-CREATE INDEX IF NOT EXISTS idx_fact_relationships_fact1 
-    ON fact_relationships(fact1_id, weight DESC);
-CREATE INDEX IF NOT EXISTS idx_fact_relationships_fact2 
-    ON fact_relationships(fact2_id, weight DESC);
-CREATE INDEX IF NOT EXISTS idx_fact_relationships_type
-    ON fact_relationships(relationship_type);
-
--- Fact versions for temporal tracking
-CREATE TABLE IF NOT EXISTS fact_versions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    fact_id INTEGER NOT NULL,
-    previous_version_id INTEGER,
-    version_number INTEGER NOT NULL,
-    change_type TEXT CHECK(change_type IN ('creation', 'reinforcement', 'evolution', 'correction', 'contradiction')),
-    confidence_delta REAL,
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (fact_id) REFERENCES user_facts(id) ON DELETE CASCADE,
-    FOREIGN KEY (previous_version_id) REFERENCES user_facts(id) ON DELETE SET NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_fact_versions_fact 
-    ON fact_versions(fact_id, version_number);
-CREATE INDEX IF NOT EXISTS idx_fact_versions_previous 
-    ON fact_versions(previous_version_id);
-
--- Fact clusters for topic-based organization
-CREATE TABLE IF NOT EXISTS fact_clusters (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    chat_id INTEGER NOT NULL,
-    cluster_name TEXT NOT NULL,
-    fact_ids TEXT NOT NULL,  -- JSON array
-    centroid_embedding TEXT,  -- JSON array
-    coherence_score REAL,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_fact_clusters_user 
-    ON fact_clusters(user_id, chat_id);
-CREATE INDEX IF NOT EXISTS idx_fact_clusters_coherence
-    ON fact_clusters(coherence_score DESC);
 
 -- Additional indexes for performance optimization
 CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts DESC);
@@ -755,64 +622,8 @@ CREATE TABLE IF NOT EXISTS chat_profiles (
     updated_at INTEGER NOT NULL
 );
 
--- Chat-level facts (group preferences, traditions, norms)
-CREATE TABLE IF NOT EXISTS chat_facts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id INTEGER NOT NULL,
-    fact_category TEXT NOT NULL CHECK(fact_category IN (
-        'preference',    -- "prefers dark humor", "likes technical discussions"
-        'tradition',     -- "Friday recap", "Monday memes"
-        'rule',          -- "no politics", "Ukrainian only"
-        'norm',          -- "emoji reactions common", "voice messages rare"
-        'topic',         -- "frequently discusses AI", "crypto enthusiasts"
-        'culture',       -- "sarcastic", "supportive", "competitive"
-        'event',         -- "monthly meetups", "annual party planning"
-        'shared_knowledge'  -- "discussed movie X", "planning trip to Y"
-    )),
-    fact_key TEXT NOT NULL,      -- e.g., "humor_style", "weekly_tradition"
-    fact_value TEXT NOT NULL,    -- e.g., "dark_sarcastic", "friday_recap"
-    fact_description TEXT,       -- Human-readable: "Group prefers dark humor"
-    confidence REAL DEFAULT 0.7,
-    evidence_count INTEGER DEFAULT 1,  -- How many times reinforced
-    first_observed INTEGER NOT NULL,
-    last_reinforced INTEGER NOT NULL,
-    participant_consensus REAL,  -- 0-1: what % of users agree
-    is_active INTEGER DEFAULT 1,
-    decay_rate REAL DEFAULT 0.0,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    FOREIGN KEY (chat_id) REFERENCES chat_profiles(chat_id) ON DELETE CASCADE
-);
+-- [Deprecated SQL removed]
 
--- Chat fact versions (track changes over time)
-CREATE TABLE IF NOT EXISTS chat_fact_versions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    fact_id INTEGER NOT NULL,
-    previous_version_id INTEGER,
-    version_number INTEGER NOT NULL,
-    change_type TEXT CHECK(change_type IN (
-        'creation', 'reinforcement', 'evolution', 'correction', 'deprecation'
-    )),
-    confidence_delta REAL,
-    change_evidence TEXT,  -- What triggered the change
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (fact_id) REFERENCES chat_facts(id) ON DELETE CASCADE,
-    FOREIGN KEY (previous_version_id) REFERENCES chat_facts(id) ON DELETE SET NULL
-);
-
--- Chat fact quality metrics (deduplication, conflicts)
-CREATE TABLE IF NOT EXISTS chat_fact_quality_metrics (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id INTEGER NOT NULL,
-    fact_id INTEGER NOT NULL,
-    duplicate_of INTEGER,  -- References another chat_fact id
-    conflict_with INTEGER,
-    similarity_score REAL,
-    resolution_method TEXT,
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (fact_id) REFERENCES chat_facts(id) ON DELETE CASCADE,
-    FOREIGN KEY (chat_id) REFERENCES chat_profiles(chat_id) ON DELETE CASCADE
-);
 
 -- Indexes for chat public memory
 CREATE INDEX IF NOT EXISTS idx_chat_profiles_type 
@@ -820,26 +631,26 @@ CREATE INDEX IF NOT EXISTS idx_chat_profiles_type
 CREATE INDEX IF NOT EXISTS idx_chat_profiles_active 
     ON chat_profiles(last_active DESC);
 
-CREATE INDEX IF NOT EXISTS idx_chat_facts_chat 
-    ON chat_facts(chat_id, is_active);
-CREATE INDEX IF NOT EXISTS idx_chat_facts_category 
-    ON chat_facts(fact_category);
-CREATE INDEX IF NOT EXISTS idx_chat_facts_confidence 
-    ON chat_facts(confidence DESC);
-CREATE INDEX IF NOT EXISTS idx_chat_facts_reinforced 
-    ON chat_facts(last_reinforced DESC);
-CREATE INDEX IF NOT EXISTS idx_chat_facts_key 
-    ON chat_facts(chat_id, fact_key);
+-- CREATE INDEX IF NOT EXISTS idx_chat_facts_chat 
+--     ON chat_facts(chat_id, is_active);
+-- CREATE INDEX IF NOT EXISTS idx_chat_facts_category 
+--     ON chat_facts(fact_category);
+-- CREATE INDEX IF NOT EXISTS idx_chat_facts_confidence 
+--     ON chat_facts(confidence DESC);
+-- CREATE INDEX IF NOT EXISTS idx_chat_facts_reinforced 
+--     ON chat_facts(last_reinforced DESC);
+-- CREATE INDEX IF NOT EXISTS idx_chat_facts_key 
+--     ON chat_facts(chat_id, fact_key);
 
-CREATE INDEX IF NOT EXISTS idx_chat_fact_versions_fact 
-    ON chat_fact_versions(fact_id, version_number);
-CREATE INDEX IF NOT EXISTS idx_chat_fact_versions_previous 
-    ON chat_fact_versions(previous_version_id);
+-- CREATE INDEX IF NOT EXISTS idx_chat_fact_versions_fact 
+--     ON chat_fact_versions(fact_id, version_number);
+-- CREATE INDEX IF NOT EXISTS idx_chat_fact_versions_previous 
+--     ON chat_fact_versions(previous_version_id);
 
-CREATE INDEX IF NOT EXISTS idx_chat_fact_quality_chat 
-    ON chat_fact_quality_metrics(chat_id);
-CREATE INDEX IF NOT EXISTS idx_chat_fact_quality_fact 
-    ON chat_fact_quality_metrics(fact_id);
+-- CREATE INDEX IF NOT EXISTS idx_chat_fact_quality_chat 
+--     ON chat_fact_quality_metrics(chat_id);
+-- CREATE INDEX IF NOT EXISTS idx_chat_fact_quality_fact 
+--     ON chat_fact_quality_metrics(fact_id);
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- Image Generation Quotas - Daily limits for image generation per user

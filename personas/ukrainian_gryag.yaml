@@ -16,8 +16,3 @@ trigger_patterns:
 
 # Response templates file
 response_templates: "response_templates/ukrainian.json"
-
-# Behavior settings
-allow_profanity: true
-sarcasm_level: "high"
-humor_style: "dark"

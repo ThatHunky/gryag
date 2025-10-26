@@ -55,10 +55,10 @@ class FeatureRateLimiter:
         "currency": 20,
         "web_search": 5,
         "polls": 5,  # per day (special case)
-        "remember_fact": 30,
-        "recall_facts": 30,
-        "update_fact": 20,
-        "forget_fact": 10,
+        "remember_memory": 30,
+        "recall_memories": 30,
+        "forget_memory": 10,
+        "forget_all_memories": 5,
         "image_generation": 3,  # per day (special case)
         "edit_image": 3,  # per day (special case)
     }
@@ -73,7 +73,9 @@ class FeatureRateLimiter:
         "polls": 300,  # 5 minutes between poll creations
     }
 
-    def __init__(self, db_path: str | Path, admin_user_ids: list[int] | None = None) -> None:
+    def __init__(
+        self, db_path: str | Path, admin_user_ids: list[int] | None = None
+    ) -> None:
         """
         Initialize the feature rate limiter.
 
@@ -295,7 +297,9 @@ class FeatureRateLimiter:
 
                     if time_since_last < stored_cooldown:
                         # Check if we should show error message (once per 10 min)
-                        should_show_error = self.should_send_error_message(user_id, feature)
+                        should_show_error = self.should_send_error_message(
+                            user_id, feature
+                        )
 
                         telemetry.increment_counter(
                             "feature_rate_limiter.cooldown_blocked",

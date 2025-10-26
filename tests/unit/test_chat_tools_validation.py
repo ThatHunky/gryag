@@ -14,6 +14,9 @@ from app.handlers.chat_tools import build_tool_definitions, build_tool_callbacks
 
 class _DummySettings:
     def __init__(self, **kwargs):
+        # Set defaults for required attributes
+        self.web_search_api_key = kwargs.pop("web_search_api_key", None)
+        self.gemini_api_key = kwargs.pop("gemini_api_key", "dummy_key")
         self.__dict__.update(kwargs)
 
 
@@ -72,9 +75,13 @@ async def test_tool_definitions_unique_and_have_parameters():
         for f in d.get("function_declarations", []):
             params = f.get("parameters")
             assert isinstance(params, dict), f"Missing parameters for {f.get('name')}"
-            assert params.get("type") == "object", f"parameters.type must be object for {f.get('name')}"
+            assert (
+                params.get("type") == "object"
+            ), f"parameters.type must be object for {f.get('name')}"
             props = params.get("properties")
-            assert isinstance(props, dict), f"parameters.properties must be object for {f.get('name')}"
+            assert isinstance(
+                props, dict
+            ), f"parameters.properties must be object for {f.get('name')}"
 
 
 @pytest.mark.asyncio
@@ -94,6 +101,7 @@ async def test_registry_callbacks_include_defined_tools_when_enabled(monkeypatch
         store=types.SimpleNamespace(),
         gemini_client=_DummyGemini(),
         profile_store=_DummyProfileStore(),
+        memory_repo=None,
         chat_id=111,
         thread_id=222,
         message_id=333,
@@ -107,4 +115,3 @@ async def test_registry_callbacks_include_defined_tools_when_enabled(monkeypatch
     # Ensure every defined tool name has a callback
     missing = names.difference(set(callbacks.keys()))
     assert not missing, f"Missing callbacks for: {sorted(missing)}"
-

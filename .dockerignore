@@ -47,3 +47,12 @@ test_*.py
 check_*.py
 diagnose.py
 verify_*.py
+
+# Coverage and logs
+htmlcov/
+logs/
+coverage.xml
+
+# Scripts directory (except warp setup needed for Docker)
+scripts/
+!scripts/warp/

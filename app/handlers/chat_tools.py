@@ -11,7 +11,7 @@ Tools include:
 - weather: Weather information
 - currency: Currency conversion
 - polls: Poll creation and voting
-- Memory tools: remember_fact, recall_facts, update_fact, forget_fact, etc.
+- Memory tools: remember_memory, recall_memories, forget_memory, forget_all_memories, set_pronouns
 """
 
 from __future__ import annotations
@@ -32,22 +32,21 @@ from app.services.image_generation import (
     ImageGenerationError,
 )
 from app.services.tools import (
-    REMEMBER_FACT_DEFINITION,
-    RECALL_FACTS_DEFINITION,
-    UPDATE_FACT_DEFINITION,
-    FORGET_FACT_DEFINITION,
-    FORGET_ALL_FACTS_DEFINITION,
+    REMEMBER_MEMORY_DEFINITION,
+    RECALL_MEMORIES_DEFINITION,
+    FORGET_MEMORY_DEFINITION,
+    FORGET_ALL_MEMORIES_DEFINITION,
     SET_PRONOUNS_DEFINITION,
-    remember_fact_tool,
-    recall_facts_tool,
-    update_fact_tool,
-    forget_fact_tool,
-    forget_all_facts_tool,
+    remember_memory_tool,
+    recall_memories_tool,
+    forget_memory_tool,
+    forget_all_memories_tool,
     set_pronouns_tool,
 )
 from app.services.context_store import ContextStore, format_metadata
 from app.services.gemini import GeminiClient
 from app.services.user_profile import UserProfileStore
+from app.repositories.memory_repository import MemoryRepository
 from app.config import Settings
 from app.services.media import collect_media_parts
 from aiogram.exceptions import TelegramBadRequest
@@ -185,13 +184,12 @@ def build_tool_definitions(settings: Settings) -> list[dict[str, Any]]:
         tool_definitions.append(GENERATE_IMAGE_TOOL_DEFINITION)
         tool_definitions.append(EDIT_IMAGE_TOOL_DEFINITION)
 
-    # Memory tools (Phase 5.1)
+    # Memory tools
     if settings.enable_tool_based_memory:
-        tool_definitions.append(REMEMBER_FACT_DEFINITION)
-        tool_definitions.append(RECALL_FACTS_DEFINITION)
-        tool_definitions.append(UPDATE_FACT_DEFINITION)
-        tool_definitions.append(FORGET_FACT_DEFINITION)
-        tool_definitions.append(FORGET_ALL_FACTS_DEFINITION)
+        tool_definitions.append(REMEMBER_MEMORY_DEFINITION)
+        tool_definitions.append(RECALL_MEMORIES_DEFINITION)
+        tool_definitions.append(FORGET_MEMORY_DEFINITION)
+        tool_definitions.append(FORGET_ALL_MEMORIES_DEFINITION)
         tool_definitions.append(SET_PRONOUNS_DEFINITION)
 
     # Media analysis helpers (always available; use reply/current message media)
@@ -251,6 +249,7 @@ def build_tool_callbacks(
     store: ContextStore,
     gemini_client: GeminiClient,
     profile_store: UserProfileStore,
+    memory_repo: MemoryRepository,
     chat_id: int,
     thread_id: int | None,
     message_id: int,
@@ -326,64 +325,57 @@ def build_tool_callbacks(
 
     # Web search (if enabled)
     if settings.enable_search_grounding:
+        # Use separate API key if provided, otherwise fall back to main key
+        search_api_key = settings.web_search_api_key or settings.gemini_api_key
         callbacks["search_web"] = make_tracked_callback(
             "search_web",
-            lambda params: search_web_tool(params, gemini_client),
+            lambda params: search_web_tool(
+                params, gemini_client, api_key=search_api_key
+            ),
         )
 
     # Memory tools (if enabled)
     if settings.enable_tool_based_memory:
-        callbacks["remember_fact"] = make_tracked_callback(
-            "remember_fact",
-            lambda params: remember_fact_tool(
-                **params,
+        # Helper to filter out internal underscore-prefixed params
+        def _filter_internal_params(params: dict[str, Any]) -> dict[str, Any]:
+            return {k: v for k, v in params.items() if not k.startswith("_")}
+
+        callbacks["remember_memory"] = make_tracked_callback(
+            "remember_memory",
+            lambda params: remember_memory_tool(
+                **_filter_internal_params(params),
                 chat_id=chat_id,
-                message_id=message_id,
-                profile_store=profile_store,
+                memory_repo=memory_repo,
             ),
         )
-        callbacks["recall_facts"] = make_tracked_callback(
-            "recall_facts",
-            lambda params: recall_facts_tool(
-                **params,
+        callbacks["recall_memories"] = make_tracked_callback(
+            "recall_memories",
+            lambda params: recall_memories_tool(
+                **_filter_internal_params(params),
                 chat_id=chat_id,
-                profile_store=profile_store,
-                gemini_client=gemini_client,
+                memory_repo=memory_repo,
             ),
         )
-        callbacks["update_fact"] = make_tracked_callback(
-            "update_fact",
-            lambda params: update_fact_tool(
-                **params,
+        callbacks["forget_memory"] = make_tracked_callback(
+            "forget_memory",
+            lambda params: forget_memory_tool(
+                **_filter_internal_params(params),
                 chat_id=chat_id,
-                message_id=message_id,
-                profile_store=profile_store,
+                memory_repo=memory_repo,
             ),
         )
-        callbacks["forget_fact"] = make_tracked_callback(
-            "forget_fact",
-            lambda params: forget_fact_tool(
-                **params,
+        callbacks["forget_all_memories"] = make_tracked_callback(
+            "forget_all_memories",
+            lambda params: forget_all_memories_tool(
+                **_filter_internal_params(params),
                 chat_id=chat_id,
-                message_id=message_id,
-                profile_store=profile_store,
-                context_store=store,
-            ),
-        )
-        callbacks["forget_all_facts"] = make_tracked_callback(
-            "forget_all_facts",
-            lambda params: forget_all_facts_tool(
-                **params,
-                chat_id=chat_id,
-                message_id=message_id,
-                profile_store=profile_store,
-                context_store=store,
+                memory_repo=memory_repo,
             ),
         )
         callbacks["set_pronouns"] = make_tracked_callback(
             "set_pronouns",
             lambda params: set_pronouns_tool(
-                **params,
+                **_filter_internal_params(params),
                 chat_id=chat_id,
                 profile_store=profile_store,
             ),

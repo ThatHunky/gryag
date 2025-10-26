@@ -76,6 +76,7 @@ uploads/
 files/
 temp/
 tmp/
+specstory/
 
 # Redis data (local storage)
 redis-data/

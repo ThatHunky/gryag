@@ -1,26 +1,35 @@
-# Command Throttling System - October 21, 2025
+# Command Throttling System - Updated October 26, 2025
 
 ## Overview
 
-Implemented comprehensive command throttling to prevent spam and abuse. **All bot commands** are now limited to **1 per 5 minutes** per user (configurable). Admins bypass all restrictions.
+Smart command throttling system that prevents spam while maintaining good UX. **Only bot commands** (slash commands) are throttled - regular messages are never throttled.
 
-This addresses the user's request: "add throttling to all features" with specific focus on commands.
+**Key Behavior:**
+- First violation: Shows warning message with time remaining
+- Continued spam: Silently ignores commands (no notification spam)
+- Commands to other bots: Completely ignored (not processed)
+- Admin bypass: Admin users bypass all throttling
 
 ---
 
 ## Features
 
-### 1. Universal Command Cooldown
+### 1. Smart Warning System
+- **First throttle violation**: User sees warning with countdown
+- **Subsequent violations**: Silently ignored (no spam)
+- **Warning cooldown**: Max one warning per 10 minutes
+- **User experience**: Clear feedback without notification spam
+
+### 2. Universal Command Cooldown
 - **All commands** starting with `/` are throttled
 - Default: **5 minutes** cooldown between commands
 - Configurable: 1 minute to 1 hour via `COMMAND_COOLDOWN_SECONDS`
 - **Admins exempt**: Users in `ADMIN_USER_IDS` bypass throttling
 
-### 2. Intelligent Blocking
-- Only blocks **after** a command is used
-- First command always goes through
-- Subsequent commands within cooldown period are blocked
-- Clear, friendly error message showing exact wait time
+### 3. Other Bot Command Filtering
+- Commands with `@other_bot` mention are completely ignored
+- Commands with `@gryag_bot` or no mention are processed
+- Bot-to-bot protection: Commands from bot users are dropped
 
 ### 3. Per-User Tracking
 - Each user has independent cooldown timer
@@ -38,32 +47,52 @@ User sends command (/gryagfacts)
          ↓
 Is user an admin? → YES → Allow immediately ✅
          ↓ NO
+### Flow Diagram
+
+```text
+User sends command (/gryagfacts)
+         ↓
+Is command for other bot (@other_bot)? → YES → Ignore completely ✅
+         ↓ NO
+Is user from bot account? → YES → Drop completely ✅
+         ↓ NO
+Is user an admin? → YES → Allow immediately ✅
+         ↓ NO
 Check last command time
          ↓
-< 5 minutes ago? → YES → Block with message ⏱
-         ↓ NO
-Allow command ✅
-Update last_used timestamp
+< 5 minutes ago? → YES → Check warning cooldown
+         ↓                        ↓
+         NO                  > 10 min since warning? → YES → Show warning ⚠️
+         ↓                        ↓                            ↓
+Allow command ✅                NO                    Silently ignore 🤫
+Update last_used                     ↓
+                          Silently ignore 🤫
 ```
 
 ### Example Timeline
 
-```
-00:00 - User: /gryagfacts        → ✅ Allowed (first command)
-00:02 - User: /gryagprofile      → ❌ Blocked (wait 4m 58s)
-00:05 - User: /gryagban          → ✅ Allowed (cooldown expired)
-00:07 - User: /gryagfacts        → ❌ Blocked (wait 2m 58s)
+```text
+00:00 - User: /gryagfacts@gryag_bot           → ✅ Allowed (first command)
+00:02 - User: /gryagprofile@gryag_bot         → ⚠️ Warning shown (wait 4m 58s)
+00:03 - User: /gryagfacts@gryag_bot           → 🤫 Silent ignore (warning shown recently)
+00:04 - User: /gryagban@gryag_bot             → 🤫 Silent ignore (warning shown recently)
+00:05 - User: /gryagfacts@gryag_bot           → ✅ Allowed (cooldown expired)
+00:06 - User: /gryagprofile@gryag_bot         → ⚠️ Warning shown (wait 4m 59s)
+00:07 - User: /start@other_bot                → ✅ Ignored (not our command)
+00:16 - User: /gryagfacts@gryag_bot           → ⚠️ Warning shown again (10 min passed since first warning)
 ```
 
 ### Throttle Message
 
-When blocked, user sees:
-```
-⏱ Зачекай трохи!
+When blocked (first time or after 10 min cooldown), user sees:
 
-Команди можна використовувати раз на 5 хвилин.
-Наступна команда через: 3 хв 45 сек
+```text
+Зачекай трохи!
+
+Команди можна використовувати раз на 5 хвилин. Наступна команда через: ⏱ 4 хв 30 сек
 ```
+
+**Note**: The message format matches Telegram's natural style (no extra formatting like `<b>` or `<code>` in display).
 
 ---
 

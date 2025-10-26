@@ -27,10 +27,12 @@ class Settings(BaseSettings):
     gemini_quota_block_seconds: int = Field(
         86400, alias="GEMINI_QUOTA_BLOCK_SECONDS", ge=0, le=604800
     )
+    # Gemini Configuration
     gemini_model: str = Field("gemini-2.5-flash", alias="GEMINI_MODEL")
     gemini_embed_model: str = Field(
         "models/text-embedding-004", alias="GEMINI_EMBED_MODEL"
     )
+    gemini_enable_thinking: bool = Field(False, alias="GEMINI_ENABLE_THINKING")
     db_path: Path = Field(Path("./gryag.db"), alias="DB_PATH")
     max_turns: int = Field(
         20, alias="MAX_TURNS", ge=1
@@ -101,6 +103,11 @@ class Settings(BaseSettings):
     image_generation_daily_limit: int = Field(
         3, alias="IMAGE_GENERATION_DAILY_LIMIT", ge=1, le=10
     )  # Images per user per day (admins unlimited)
+
+    # Web search configuration
+    web_search_api_key: str | None = Field(
+        None, alias="WEB_SEARCH_API_KEY"
+    )  # Optional separate API key for web search (defaults to gemini_api_key)
 
     # Donation scheduler configuration
     donation_ignored_chat_ids: str = Field(

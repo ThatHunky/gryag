@@ -5,6 +5,84 @@ All notable changes to gryag's memory, context, and learning systems.
 
 ## [Unreleased]
 
+### 2025-10-26 — Improved Command Throttle UX
+
+**Summary**: Enhanced command throttling to use smart warning system instead of always showing error messages. First violation shows warning, subsequent spam is silently ignored.
+
+**Changes**:
+- Updated throttle error message format to match screenshot (cleaner, single-line)
+- First throttle violation: Shows warning with countdown timer
+- Subsequent violations (within 10 min): Silently ignored (no notification spam)
+- Verified other bot command filtering works correctly (commands to `@other_bot` are ignored)
+- Verified bot-to-bot protection (commands from bot users are dropped)
+
+**User Experience**:
+```
+00:00 - /gryagfacts@gryag_bot      → ✅ Works
+00:01 - /gryagprofile@gryag_bot    → ⚠️ Warning: "Зачекай трохи! ... 4 хв 30 сек"
+00:02 - /gryagfacts@gryag_bot      → 🤫 Silent ignore (no message)
+00:11 - /gryagprofile@gryag_bot    → ⚠️ Warning shown again (10 min passed)
+```
+
+**Benefits**:
+- No notification spam from repeated command attempts
+- Clear feedback on first violation
+- Protects system while improving UX
+
+**Files Changed**:
+- `app/middlewares/command_throttle.py` - Updated error message and log messages
+- `docs/features/COMMAND_THROTTLING.md` - Updated documentation with new behavior
+- `docs/fixes/command_throttle_improvement_2025_10_26.md` - Detailed implementation notes
+
+### 2025-10-26 — Separate API Key for Web Search
+
+**Summary**: Added support for using a separate Google Gemini API key specifically for web search grounding operations.
+
+**Changes**:
+- Added `WEB_SEARCH_API_KEY` environment variable to `.env.example`
+- Added `web_search_api_key` field to `Settings` class in `app/config.py`
+- Updated `search_web_tool()` to accept optional `api_key` parameter
+- Tool creates temporary client with separate key if provided, falls back to main key otherwise
+- Added startup logging to indicate when separate search key is in use
+- Fully backward compatible - falls back to `GEMINI_API_KEY` if not set
+
+**Benefits**: 
+- Independent billing and quota management for search operations
+- Isolate search costs from text/image generation
+- Use different API tiers for different features (e.g., free tier for search, paid for generation)
+
+**Files Changed**:
+- `app/config.py` - Added `web_search_api_key` field
+- `app/services/search_tool.py` - Added `api_key` parameter, client creation logic
+- `app/handlers/chat_tools.py` - Pass separate key to search tool callback
+- `app/main.py` - Added startup logging for search configuration
+- `.env.example` - Documented new `WEB_SEARCH_API_KEY` setting
+- `docs/features/SEPARATE_WEB_SEARCH_API_KEY.md` - Full documentation
+
+**Usage**:
+```bash
+WEB_SEARCH_API_KEY=your_search_key_here  # Optional, defaults to GEMINI_API_KEY
+```
+
+**Verification**: Check startup logs for `"Web search grounding enabled - separate_api_key: true"` or grep for `"web_search_api_key"` in `app/config.py`.
+
+### 2025-10-26 — Disabled Code Formatting Functions
+
+**Summary**: Disabled automatic markdown-to-HTML formatting in message responses to rely solely on system prompt for plain text output.
+
+**Changes**:
+- Commented out `_format_for_telegram()` calls in chat handler (2 locations)
+- Bot now sends raw text from Gemini without markdown conversion
+- System prompt alone controls formatting (no automatic bold/italic/spoiler processing)
+- `ParseMode.HTML` still used but without pre-processing
+
+**Rationale**: Simplifies message flow by removing code-based formatting layer. System prompt instructs bot to produce plain text, making formatter unnecessary.
+
+**Files Changed**:
+- `app/handlers/chat.py` - Disabled `_format_for_telegram()` in main reply handler and poll vote handler
+
+**Verification**: Run bot and verify messages are sent as plain text without automatic markdown formatting.
+
 ### 2025-10-31 — Speaker Headers for Context Separation
 
 - Added sender metadata storage and `[speaker …]` annotations so Gemini stops mixing user vs bot turns. Verification: `.venv/bin/pytest tests/integration/test_context_store.py tests/unit/test_external_ids.py`.
@@ -3358,3 +3436,89 @@ Notes:
 
 - Relative links inside moved files may need updating; run a link-checker or `grep -R "(.md)" docs` to find internal references.
 - If you prefer `git mv` for some files that were moved outside of git, follow up with `git mv <src> <dest>` to preserve history; most files were moved with `git mv` in this change.
+
+## 2025-10-26 - Memory Tools Fixed (Tool Name Mismatch)
+
+**Issue**: Memory tools weren't working - Gemini couldn't find `remember_fact`, `recall_facts`, etc.
+
+**Root Cause**: Tool names in `persona.py` didn't match actual tool definitions:
+- Persona referenced OLD names: `remember_fact`, `recall_facts`, `update_fact`, `forget_fact`
+- Actual tools: `remember_memory`, `recall_memories`, `forget_memory`, `forget_all_memories`
+
+**Changes**:
+1. **`app/persona.py`**:
+   - Updated all tool references to use correct names
+   - Simplified memory guidelines (removed confidence scores, fact types - not applicable to simple memory system)
+   - Updated examples to match new API
+
+2. **`app/handlers/chat.py`**:
+   - Fixed fallback messages for memory tools (lines ~2252-2260)
+   - Removed `update_fact` (not in simplified memory system)
+
+3. **`app/services/feature_rate_limiter.py`**:
+   - Updated feature limits to use correct tool names
+   - Removed `update_fact`, added `forget_all_memories`
+
+**Verification**:
+```bash
+# Check tool definitions match persona
+grep "remember_memory\|recall_memories" app/services/tools/memory_definitions.py
+grep "remember_memory\|recall_memories" app/persona.py
+
+# Verify no old names remain
+grep -r "remember_fact\|recall_facts" app/ --include="*.py" | grep -v "docs/"
+```
+
+**Impact**: Memory tools should now work correctly. Gemini can:
+- `recall_memories(user_id)` - see stored memories
+- `remember_memory(user_id, memory_text)` - store new memory
+- `forget_memory(user_id, memory_id)` - remove specific memory
+- `forget_all_memories(user_id)` - clear all memories
+- `set_pronouns(user_id, pronouns)` - set/clear pronouns
+
+
+## 2025-10-26 (Update) - Fixed Correct Persona Template
+
+**Additional Fix**: Updated `personas/templates/ukrainian_gryag.txt` (the actual persona file in use) with correct tool names. The previous fix updated `app/persona.py` which is the fallback/default but not actively used.
+
+**Changes to `personas/templates/ukrainian_gryag.txt`**:
+- Updated all memory tool names to match actual implementations
+- Removed non-existent `query` parameter from `recall_memories` examples
+- Added note about 15 memory limit (hard cap, NOT auto-deletion)
+- Clarified that `recall_memories` returns ALL memories with IDs
+- Updated examples to be accurate
+
+**Important**: Memory system does NOT automatically delete old memories when limit is reached. When the 15-memory limit is hit, the bot will get an error and should:
+1. Ask user what to forget, OR
+2. Suggest using `forget_all_memories` to clear everything
+
+No FIFO/LRU auto-deletion is implemented.
+
+## 2025-10-26 (Update 2) - Automatic Memory FIFO Deletion
+
+**New Behavior**: Memory system now automatically deletes the oldest memory when the 15-memory limit is reached (FIFO queue).
+
+**Changes**:
+1. **`app/repositories/memory_repository.py`**:
+   - Modified `add_memory()` to auto-delete oldest memory (by `created_at`) when limit reached
+   - Removed `DatabaseError` exception for memory limit
+   - Seamless FIFO behavior: oldest in, first out
+
+2. **`personas/templates/ukrainian_gryag.txt`**:
+   - Updated documentation to reflect auto-deletion behavior
+   - Removed instructions about asking user what to forget
+
+**Behavior**:
+- When user has 15 memories and a new one is added:
+  - System finds oldest memory (earliest `created_at`)
+  - Deletes it automatically
+  - Inserts new memory
+- No error messages, no user intervention needed
+- FIFO queue: keeps most recent 15 memories
+
+**Example Flow**:
+1. User has 15 memories (IDs 1-15)
+2. Bot calls `remember_memory(user_id=123, memory_text="New fact")`
+3. System deletes memory ID 1 (oldest)
+4. Inserts new memory as ID 16
+5. User now has memories 2-16

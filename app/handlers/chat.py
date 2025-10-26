@@ -31,17 +31,15 @@ from app.services.image_generation import (
 )
 from app.services.system_prompt_manager import SystemPromptManager
 from app.services.tools import (
-    remember_fact_tool,
-    recall_facts_tool,
-    update_fact_tool,
-    forget_fact_tool,
-    forget_all_facts_tool,
+    remember_memory_tool,
+    recall_memories_tool,
+    forget_memory_tool,
+    forget_all_memories_tool,
     set_pronouns_tool,
-    REMEMBER_FACT_DEFINITION,
-    RECALL_FACTS_DEFINITION,
-    UPDATE_FACT_DEFINITION,
-    FORGET_FACT_DEFINITION,
-    FORGET_ALL_FACTS_DEFINITION,
+    REMEMBER_MEMORY_DEFINITION,
+    RECALL_MEMORIES_DEFINITION,
+    FORGET_MEMORY_DEFINITION,
+    FORGET_ALL_MEMORIES_DEFINITION,
     SET_PRONOUNS_DEFINITION,
 )
 from app.handlers.chat_tools import (
@@ -60,6 +58,7 @@ from app.services.media import collect_media_parts
 from app.services.redis_types import RedisLike
 from app.services.triggers import addressed_to_bot
 from app.services.user_profile import UserProfileStore
+from app.repositories.memory_repository import MemoryRepository
 from app.services import telemetry
 from app.services.context import (
     MultiLevelContextManager,
@@ -986,6 +985,7 @@ async def handle_group_message(
     persona_loader: Any | None = None,
     image_gen_service: ImageGenerationService | None = None,
     feature_limiter: Any | None = None,
+    memory_repo: MemoryRepository | None = None,
 ):
     if message.from_user is None or message.from_user.is_bot:
         LOGGER.debug("Ignoring message: no from_user or is_bot")
@@ -1262,9 +1262,9 @@ async def handle_group_message(
         raw_text, chat_id, thread_id, user_id
     )
     if poll_vote_result:
-        # Format for Telegram HTML mode for consistent formatting
-        poll_formatted = _format_for_telegram(poll_vote_result)
-        await message.reply(poll_formatted, parse_mode=ParseMode.HTML)
+        # FORMATTING DISABLED: Sending plain text, relying on system prompt
+        # poll_formatted = _format_for_telegram(poll_vote_result)
+        await message.reply(poll_vote_result, parse_mode=ParseMode.HTML)
         return
 
     reply_context = None
@@ -1476,6 +1476,7 @@ async def handle_group_message(
     )
 
     # Centralized tool definitions (registry)
+    # Note: Memory tools are already included in build_tool_definitions_registry
     tool_definitions: list[dict[str, Any]] = build_tool_definitions_registry(settings)
 
     # Enrich with user profile context
@@ -1967,21 +1968,33 @@ async def handle_group_message(
     tools_used_in_request: list[str] = []
 
     # Centralized callbacks (registry) with tracking
-    tracked_tool_callbacks = build_tool_callbacks_registry(
-        settings=settings,
-        store=store,
-        gemini_client=gemini_client,
-        profile_store=profile_store,
-        chat_id=chat_id,
-        thread_id=thread_id,
-        message_id=message.message_id,
-        tools_used_tracker=tools_used_in_request,
-        user_id=user_id,
-        bot=bot,
-        message=message,
-        image_gen_service=image_gen_service,
-        feature_limiter=feature_limiter,
-    )
+    if memory_repo:
+        tracked_tool_callbacks = build_tool_callbacks_registry(
+            settings=settings,
+            store=store,
+            gemini_client=gemini_client,
+            profile_store=profile_store,
+            memory_repo=memory_repo,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            message_id=message.message_id,
+            tools_used_tracker=tools_used_in_request,
+            user_id=user_id,
+            bot=bot,
+            message=message,
+            image_gen_service=image_gen_service,
+            feature_limiter=feature_limiter,
+        )
+    else:
+        # Handle the case where memory_repo is None, perhaps by excluding memory tools
+        # For now, we'll log a warning and proceed without memory tools.
+        LOGGER.warning(
+            "MemoryRepository is not available. Memory tools will be disabled."
+        )
+        # You might want to have a version of build_tool_callbacks_registry that doesn't require memory_repo
+        # Or, ensure memory_repo is always initialized. Based on the error, we'll ensure it's not None.
+        # This 'else' block is a safeguard.
+        tracked_tool_callbacks = {}
     # Web search, image tools, and memory tool callbacks are provided by registry
 
     # Extract specific tool callbacks for fallback usage
@@ -1990,6 +2003,138 @@ async def handle_group_message(
 
     # Bot Self-Learning: Track generation timing
     response_time_ms = 0  # Initialize in case of error
+
+    # NOTE: Deterministic memory capture DISABLED per user request (2025-10-26)
+    # Previously intercepted "запам'ятай/remember" patterns
+    # Now delegating all memory operations to LLM tool calling
+    if False:  # DISABLED: Deterministic memory capture
+        # Deterministic memory capture: handle explicit "remember" commands without LLM
+        # This avoids tool-call loops where the model recalls instead of storing.
+        try:
+            if settings.enable_tool_based_memory and memory_repo is not None:
+                text_for_intent = (raw_text or "").strip()
+                if text_for_intent:
+                    # Remove bot mention and leading slash commands
+                    if bot_username:
+                        text_for_intent = re.sub(
+                            rf"@{re.escape(bot_username)}\\b",
+                            "",
+                            text_for_intent,
+                            flags=re.IGNORECASE,
+                        ).strip()
+                    if text_for_intent.startswith("/"):
+                        text_for_intent = text_for_intent[1:].strip()
+
+                    # Match explicit remember intents (UA + EN)
+                    # Supports different apostrophes: ' and ’
+                    remember_patterns = [
+                        r"^(?:запам['’]?ятай|пам['’]?ятай|запиши)\b\s*(?:що|шо)?\s*[:\-]?\s*(.+)",
+                        r"^remember\b\s*(?:that)?\s*[:\-]?\s*(.+)",
+                    ]
+
+                    memory_text: str | None = None
+                    for pat in remember_patterns:
+                        m = re.search(pat, text_for_intent, flags=re.IGNORECASE)
+                        if m:
+                            candidate = (m.group(1) or "").strip()
+                            # Avoid capturing empty or trivial strings
+                            if len(candidate) >= 3:
+                                memory_text = candidate
+                                break
+
+                    # If we didn't match the capturing group but the message starts with the intent
+                    # fall back to using the rest of the message after the trigger word(s)
+                    if memory_text is None:
+                        starts_with_triggers = [
+                            r"^(?:запам['’]?ятай|пам['’]?ятай|запиши)\b",
+                            r"^remember\b",
+                        ]
+                        for trig in starts_with_triggers:
+                            mt = re.sub(
+                                trig, "", text_for_intent, flags=re.IGNORECASE
+                            ).strip()
+                            if mt and len(mt) >= 3:
+                                memory_text = mt
+                                break
+
+                    if memory_text:
+                        remember_cb = tracked_tool_callbacks.get("remember_memory")
+                        if remember_cb is not None:
+                            LOGGER.info(
+                                "Rule-based memory intercept: storing memory without LLM",
+                                extra={
+                                    "chat_id": chat_id,
+                                    "user_id": user_id,
+                                    "len": len(memory_text),
+                                },
+                            )
+                            try:
+                                raw = await remember_cb(
+                                    {"user_id": user_id, "memory_text": memory_text}
+                                )
+                                payload = json.loads(raw)
+                            except Exception:
+                                LOGGER.exception("remember_memory intercept failed")
+                                payload = {
+                                    "status": "error",
+                                    "message": "Не вийшло запам'ятати.",
+                                }
+
+                            # Compose immediate confirmation and persist bot turn, then return
+                            if payload.get("status") == "success":
+                                reply_confirm = "Запам’ятав."
+                                tools_used_in_request.append("remember_memory")
+                            else:
+                                reply_confirm = (
+                                    payload.get("message") or "Не вийшло запам'ятати."
+                                )
+
+                            # Send reply now and store like normal
+                            response_message = await message.reply(
+                                reply_confirm,
+                                parse_mode=ParseMode.HTML,
+                                disable_web_page_preview=True,
+                            )
+
+                            model_meta = _build_model_metadata(
+                                response=response_message,
+                                chat_id=chat_id,
+                                thread_id=thread_id,
+                                bot_username=bot_username,
+                                original=message,
+                                original_text=text_for_intent,
+                            )
+                            bot_display_name = model_meta.get("name") or "gryag"
+
+                            model_embedding = await gemini_client.embed_text(
+                                reply_confirm
+                            )
+
+                            await store.add_turn(
+                                chat_id=chat_id,
+                                thread_id=thread_id,
+                                user_id=None,
+                                role="model",
+                                text=reply_confirm,
+                                media=None,
+                                metadata=model_meta,
+                                embedding=model_embedding,
+                                retention_days=settings.retention_days,
+                                sender=TurnSender(
+                                    role="assistant",
+                                    name=bot_display_name,
+                                    username=_normalize_username(bot_username),
+                                    is_bot=True,
+                                ),
+                            )
+
+                            # Short-circuit the rest of the handler
+                            return
+        except Exception:
+            # Non-fatal: fall back to normal flow if the interceptor fails
+            LOGGER.exception(
+                "Memory intercept path error; continuing with normal generation"
+            )
 
     async with typing_indicator(bot, chat_id):
         generation_start_time = time.time()
@@ -2226,13 +2371,13 @@ async def handle_group_message(
 
         # Memory-tool specific fallback: if Gemini returned nothing but a memory tool was used, confirm action
         if (not reply_text or reply_text.isspace()) and tools_used_in_request:
-            if "forget_all_facts" in tools_used_in_request:
+            if "forget_all_memories" in tools_used_in_request:
                 reply_text = "Готово. Я забув усе про тебе в цьому чаті."
-            elif "remember_fact" in tools_used_in_request:
+            elif "remember_memory" in tools_used_in_request:
                 reply_text = "Запам’ятав."
-            elif "update_fact" in tools_used_in_request:
+            elif "update_memory" in tools_used_in_request:
                 reply_text = "Оновив."
-            elif "forget_fact" in tools_used_in_request:
+            elif "forget_memory" in tools_used_in_request:
                 reply_text = "Видалив."
 
         if not reply_text or reply_text.isspace():
@@ -2241,10 +2386,10 @@ async def handle_group_message(
             )
 
         reply_trimmed = reply_text[:4096]
-        # Format for Telegram HTML mode (handles spoilers, escapes HTML)
-        reply_formatted = _format_for_telegram(reply_trimmed)
+        # FORMATTING DISABLED: Sending plain text, relying on system prompt
+        # reply_formatted = _format_for_telegram(reply_trimmed)
         response_message = await message.reply(
-            reply_formatted,
+            reply_trimmed,
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )

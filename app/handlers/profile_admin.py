@@ -25,6 +25,7 @@ from app.services.context_store import ContextStore
 from app.services import telemetry
 from app.services.bot_profile import BotProfileStore
 from app.services.bot_learning import BotLearningEngine
+from app.repositories.memory_repository import MemoryRepository
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -356,9 +357,14 @@ async def get_user_facts_command(
     settings: Settings,
     profile_store: UserProfileStore,
     store: ContextStore,
+    memory_repo: MemoryRepository | None = None,
 ) -> None:
     """
     List facts for a user (compact paginated format with inline buttons).
+
+    Now shows BOTH:
+    - Old user_facts (structured facts from profiling)
+    - New user_memories (simple text memories from tool-based memory)
 
     Usage:
         /gryagfacts - Show your own facts (page 1, max 5 per page)
@@ -405,8 +411,21 @@ async def get_user_facts_command(
         await message.reply("❌ Ти можеш дивитись тільки свої факти.")
         return
 
-    # Get total count first for pagination
-    total_count = await profile_store.get_fact_count(user_id, chat_id)
+    # Get facts from OLD system (user_facts table)
+    old_facts_count = await profile_store.get_fact_count(user_id, chat_id)
+
+    # Get memories from NEW system (user_memories table)
+    memories = []
+    memories_count = 0
+    if memory_repo:
+        try:
+            memories = await memory_repo.get_memories_for_user(user_id, chat_id)
+            memories_count = len(memories)
+        except Exception as e:
+            logger.error(f"Failed to get memories: {e}", exc_info=True)
+
+    # Calculate total count (old facts + new memories)
+    total_count = old_facts_count + memories_count
 
     if total_count == 0:
         filter_msg = f" типу '{fact_type_filter}'" if fact_type_filter else ""
@@ -426,9 +445,40 @@ async def get_user_facts_command(
         user_id=user_id,
         chat_id=chat_id,
         fact_type=fact_type_filter,
-        limit=total_count,  # Get all
+        limit=old_facts_count,  # Get all
     )
-    facts = all_facts[offset : offset + FACTS_PER_PAGE]
+
+    # Combine old facts and new memories into a unified list
+    # Format memories to look like facts for consistency
+    all_items = []
+
+    # Add old facts first
+    for fact in all_facts:
+        all_items.append(
+            {
+                "type": "fact",
+                "id": fact.get("id", "?"),
+                "fact_key": fact.get("fact_key", ""),
+                "fact_value": fact.get("fact_value", ""),
+                "confidence": fact.get("confidence", 0.0),
+                "fact_type": fact.get("fact_type", "unknown"),
+                "evidence_text": fact.get("evidence_text", ""),
+            }
+        )
+
+    # Add new memories
+    for memory in memories:
+        all_items.append(
+            {
+                "type": "memory",
+                "id": f"M{memory.id}",
+                "text": memory.memory_text,
+                "created_at": memory.created_at,
+            }
+        )
+
+    # Paginate the combined list
+    items = all_items[offset : offset + FACTS_PER_PAGE]
 
     if not verbose_mode:
         # Compact format (DEFAULT, like ChatGPT Memories)
@@ -439,15 +489,22 @@ async def get_user_facts_command(
         header += f"\n<i>Сторінка {page}/{total_pages} • Всього: {total_count}</i>\n\n"
 
         lines = [header]
-        for fact in facts:
-            fact_id = fact.get("id", "?")
-            fact_key = fact.get("fact_key", "")
-            fact_value = fact.get("fact_value", "")
-            confidence = fact.get("confidence", 0.0)
+        for item in items:
+            if item["type"] == "fact":
+                fact_id = item.get("id", "?")
+                fact_key = item.get("fact_key", "")
+                fact_value = item.get("fact_value", "")
+                confidence = item.get("confidence", 0.0)
 
-            # One-liner format: [ID] key: value (confidence%)
-            line = f"<code>[{fact_id}]</code> <b>{fact_key}</b>: {fact_value} ({confidence:.0%})"
-            lines.append(line)
+                # One-liner format: [ID] key: value (confidence%)
+                line = f"<code>[{fact_id}]</code> <b>{fact_key}</b>: {fact_value} ({confidence:.0%})"
+                lines.append(line)
+            elif item["type"] == "memory":
+                # New memory format: [MID] 💭 memory text
+                memory_id = item.get("id", "?")
+                memory_text = item.get("text", "")
+                line = f"<code>[{memory_id}]</code> 💭 {memory_text}"
+                lines.append(line)
 
         response = "\n".join(lines)
 
@@ -482,21 +539,43 @@ async def get_user_facts_command(
         header += f"\n<i>Сторінка {page}/{total_pages} • Всього: {total_count}</i>\n\n"
 
         lines = [header]
-        for fact in facts:
-            fact_id = fact.get("id", "?")
-            fact_type = fact.get("fact_type", "unknown")
-            fact_key = fact.get("fact_key", "")
-            fact_value = fact.get("fact_value", "")
-            confidence = fact.get("confidence", 0.0)
-            evidence = fact.get("evidence_text", "")
+        for item in items:
+            line = ""
+            if item["type"] == "fact":
+                fact_id = item.get("id", "?")
+                fact_type = item.get("fact_type", "unknown")
+                fact_key = item.get("fact_key", "")
+                fact_value = item.get("fact_value", "")
+                confidence = item.get("confidence", 0.0)
+                evidence = item.get("evidence_text", "")
 
-            line = f"{_format_fact_type(fact_type)} <code>[{fact_id}]</code> <b>{fact_key}</b>: {fact_value}\n"
-            line += f"   ├ Впевненість: {confidence:.0%}\n"
+                line = f"{_format_fact_type(fact_type)} <code>[{fact_id}]</code> <b>{fact_key}</b>: {fact_value}\n"
+                line += f"   ├ Впевненість: {confidence:.0%}\n"
 
-            if evidence and len(evidence) > 50:
-                line += f"   └ «{evidence[:50]}...»\n"
-            elif evidence:
-                line += f"   └ «{evidence}»\n"
+                if evidence and len(evidence) > 50:
+                    line += f"   └ «{evidence[:50]}...»\n"
+                elif evidence:
+                    line += f"   └ «{evidence}»\n"
+            elif item["type"] == "memory":
+                # Memory format in verbose mode
+                memory_id = item.get("id", "?")
+                memory_text = item.get("text", "")
+                created_at = item.get("created_at", 0)
+
+                # Format timestamp
+                try:
+                    from datetime import datetime
+
+                    dt = datetime.fromtimestamp(created_at)
+                    time_str = dt.strftime("%Y-%m-%d %H:%M")
+                except:
+                    time_str = "?"
+
+                line = f"💭 <code>[{memory_id}]</code> {memory_text}\n"
+                line += f"   └ Створено: {time_str}\n"
+
+            if line:
+                lines.append(line)
 
             lines.append(line)
 

@@ -79,6 +79,7 @@ class GeminiClient:
         free_tier_mode: bool = False,
         key_cooldown_seconds: float = 120.0,
         quota_block_seconds: float = 86400.0,
+        enable_thinking: bool = False,
     ) -> None:
         provided_keys = [k.strip() for k in (api_keys or []) if k and k.strip()]
         if api_key:
@@ -95,6 +96,7 @@ class GeminiClient:
         self._free_tier_mode = free_tier_mode and len(keys) > 1
         self._key_cooldown_seconds = key_cooldown_seconds
         self._quota_block_seconds = quota_block_seconds
+        self._enable_thinking = enable_thinking
         self._key_pool = (
             _KeyPool(keys, key_cooldown_seconds, quota_block_seconds)
             if self._free_tier_mode
@@ -342,6 +344,11 @@ class GeminiClient:
         config_params: dict[str, Any] = {
             "safety_settings": self._safety_settings,
         }
+
+        if self._enable_thinking:
+            config_params["thinking_config"] = types.ThinkingConfig(
+                include_thoughts=True
+            )
 
         if system_instruction and self._system_instruction_supported:
             config_params["system_instruction"] = system_instruction
@@ -688,6 +695,11 @@ class GeminiClient:
                 continue
             text_fragments: list[str] = []
             for part in parts:
+                # Skip thinking parts (when thinking mode is enabled)
+                is_thought = getattr(part, "thought", False)
+                if is_thought:
+                    continue
+
                 text_value = getattr(part, "text", None)
                 if isinstance(text_value, str) and text_value:
                     text_fragments.append(text_value)
@@ -780,8 +792,9 @@ class GeminiClient:
                         hasattr(part, "function_call")
                         and part.function_call is not None
                     )
+                    is_thought = getattr(part, "thought", False)
                     self._logger.debug(
-                        f"Part {idx}: has_text={has_text}, has_function_call={has_function_call}"
+                        f"Part {idx}: has_text={has_text}, has_function_call={has_function_call}, is_thought={is_thought}"
                     )
 
                 for part in content.parts:
@@ -809,7 +822,14 @@ class GeminiClient:
                             }
                         )
                     elif getattr(part, "text", None) is not None:
-                        parts_payload.append({"text": part.text})
+                        # Skip thinking parts (when thinking mode is enabled)
+                        is_thought = getattr(part, "thought", False)
+                        if is_thought:
+                            self._logger.info(
+                                f"Filtered thinking text part (length: {len(part.text)})"
+                            )
+                        else:
+                            parts_payload.append({"text": part.text})
                 if not tool_calls:
                     self._logger.info("No tool_calls found in this candidate's parts")
                     continue

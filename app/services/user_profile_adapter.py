@@ -222,7 +222,9 @@ class UserProfileStoreAdapter:
         await self.init()
         now = int(time.time())
 
-        async with aiosqlite.connect(self._db_path) as db:
+        from app.infrastructure.db_utils import get_db_connection
+
+        async with get_db_connection(self._db_path) as db:
             db.row_factory = aiosqlite.Row
 
             # Try to get existing profile

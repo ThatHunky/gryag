@@ -205,7 +205,25 @@ def _looks_like_image_generation_request(text: str | None) -> bool:
     lowered = text.lower()
     action_hit = any(keyword in lowered for keyword in _IMAGE_ACTION_KEYWORDS)
     noun_hit = any(keyword in lowered for keyword in _IMAGE_NOUN_KEYWORDS)
-    return action_hit and noun_hit
+
+    # Allow action-only if it's a strong generation verb (not just "create" or "make")
+    strong_generation_keywords = (
+        "згенеруй",
+        "генеруй",
+        "намалюй",
+        "намалю",
+        "намалювати",
+        "generate",
+        "draw",
+        "paint",
+        "render",
+    )
+    strong_action_hit = any(
+        keyword in lowered for keyword in strong_generation_keywords
+    )
+
+    # Match if: (action + noun) OR (strong action alone)
+    return (action_hit and noun_hit) or strong_action_hit
 
 
 def _extract_text(message: Message | None) -> str | None:

@@ -822,17 +822,32 @@ class GeminiClient:
                             }
                         )
                     elif getattr(part, "text", None) is not None:
-                        # Skip thinking parts (when thinking mode is enabled)
+                        # Keep thinking parts in conversation history (sent to Gemini)
+                        # but mark them so we can filter from final user response
                         is_thought = getattr(part, "thought", False)
                         if is_thought:
                             self._logger.info(
                                 f"Filtered thinking text part (length: {len(part.text)})"
                             )
+                            # Still add thinking to parts_payload for Gemini's conversation history
+                            parts_payload.append({"text": part.text, "thought": True})
                         else:
                             parts_payload.append({"text": part.text})
+
+                # If no tool calls found, this might be the final response (with or without thinking)
                 if not tool_calls:
                     self._logger.info("No tool_calls found in this candidate's parts")
-                    continue
+                    # If we have any parts (thinking or text), this is still valid - don't skip
+                    if parts_payload:
+                        # Add to conversation history and break - this is the final response
+                        contents.append(
+                            {
+                                "role": getattr(content, "role", "model"),
+                                "parts": parts_payload,
+                            }
+                        )
+                    # Exit the loop - no more tool calls to process
+                    break
 
                 self._logger.info(
                     f"Found {len(tool_calls)} tool calls: {[name for name, _ in tool_calls]}"

@@ -245,12 +245,21 @@ class ImageGenerationService:
                 f"aspect_ratio={aspect_ratio}"
             )
 
-            # Generate image
-            response = await self.client.aio.models.generate_content(
-                model=self.model,
-                contents=contents,
-                config=config,
-            )
+            # Generate image with timeout (90 seconds max)
+            try:
+                response = await asyncio.wait_for(
+                    self.client.aio.models.generate_content(
+                        model=self.model,
+                        contents=contents,
+                        config=config,
+                    ),
+                    timeout=90.0,
+                )
+            except asyncio.TimeoutError:
+                self.logger.error("Image generation timed out after 90 seconds")
+                raise ImageGenerationError(
+                    "Генерація зображення зайняла забагато часу. Спробуй ще раз або спрости запит."
+                )
 
             # Extract image from response safely
             image_bytes = None

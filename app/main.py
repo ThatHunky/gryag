@@ -141,6 +141,11 @@ async def main() -> None:
     )
     dispatcher = Dispatcher()
 
+    # Initialize database with WAL mode for better concurrency
+    from app.infrastructure.db_utils import init_database
+
+    await init_database(settings.db_path)
+
     store = ContextStore(settings.db_path)
     await store.init()
 

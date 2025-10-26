@@ -389,7 +389,10 @@ class ContextStore:
             sender_username = sender.username
             if sender.is_bot is not None:
                 sender_is_bot = 1 if sender.is_bot else 0
-        async with aiosqlite.connect(self._db_path) as db:
+
+        from app.infrastructure.db_utils import get_db_connection
+
+        async with get_db_connection(self._db_path) as db:
             await db.execute(
                 """
                 INSERT INTO messages (

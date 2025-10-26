@@ -822,32 +822,32 @@ class GeminiClient:
                             }
                         )
                     elif getattr(part, "text", None) is not None:
-                        # Keep thinking parts in conversation history (sent to Gemini)
-                        # but mark them so we can filter from final user response
+                        # Skip thinking parts from parts_payload
+                        # Thinking is for Gemini's internal reasoning, not for conversation history
                         is_thought = getattr(part, "thought", False)
                         if is_thought:
                             self._logger.info(
                                 f"Filtered thinking text part (length: {len(part.text)})"
                             )
-                            # Still add thinking to parts_payload for Gemini's conversation history
-                            parts_payload.append({"text": part.text, "thought": True})
+                            # Don't add thinking to parts_payload
                         else:
                             parts_payload.append({"text": part.text})
 
-                # If no tool calls found, this might be the final response (with or without thinking)
+                # If no tool calls found, check if we have actual content
                 if not tool_calls:
                     self._logger.info("No tool_calls found in this candidate's parts")
-                    # If we have any parts (thinking or text), this is still valid - don't skip
+                    # If we have non-thinking text, this is a valid final response
                     if parts_payload:
-                        # Add to conversation history and break - this is the final response
-                        contents.append(
-                            {
-                                "role": getattr(content, "role", "model"),
-                                "parts": parts_payload,
-                            }
+                        self._logger.info(
+                            "Found non-thinking content, breaking tool loop"
                         )
-                    # Exit the loop - no more tool calls to process
-                    break
+                        # Don't add to contents here - response will be processed normally
+                        break
+                    # If only thinking (empty parts_payload), skip this candidate
+                    self._logger.info(
+                        "Only thinking parts, no actual content - continuing"
+                    )
+                    continue
 
                 self._logger.info(
                     f"Found {len(tool_calls)} tool calls: {[name for name, _ in tool_calls]}"

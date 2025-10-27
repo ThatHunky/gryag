@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 import time
 from collections import deque
@@ -74,6 +75,7 @@ from app.handlers.bot_learning_integration import (
     estimate_token_count,
 )
 from app.services.typing import typing_indicator
+from app.services.conversation_formatter import sanitize_placeholder_text
 
 router = Router()
 
@@ -273,6 +275,291 @@ def _summarize_media(media_items: list[dict[str, Any]] | None) -> str | None:
         return None
 
     return "Прикріплення: " + ", ".join(parts)
+
+
+def _media_marker_from_media(
+    raw_media: list[dict[str, Any]] | None,
+    gemini_media: list[dict[str, Any]] | None,
+) -> str | None:
+    """Return simple media placeholders like [Image], [Video] with counts."""
+
+    def _consume(kind_counts: dict[str, int], kind: str) -> None:
+        kind_counts[kind] = kind_counts.get(kind, 0) + 1
+
+    if not raw_media and not gemini_media:
+        return None
+
+    counts: dict[str, int] = {}
+
+    if raw_media:
+        for item in raw_media:
+            kind = (item.get("kind") or "").lower()
+            mime = (item.get("mime") or "").lower()
+            if "youtube" in (item.get("file_uri") or "").lower():
+                _consume(counts, "youtube")
+            elif kind:
+                if kind in {"image", "photo"}:
+                    _consume(counts, "image")
+                elif kind in {"video"}:
+                    _consume(counts, "video")
+                elif kind in {"audio", "voice"}:
+                    _consume(counts, "audio")
+                elif kind in {"document"}:
+                    _consume(counts, "document")
+                else:
+                    _consume(counts, "other")
+            elif mime:
+                if "image" in mime:
+                    _consume(counts, "image")
+                elif "video" in mime:
+                    _consume(counts, "video")
+                elif "audio" in mime:
+                    _consume(counts, "audio")
+                else:
+                    _consume(counts, "other")
+
+    if gemini_media:
+        for item in gemini_media:
+            if "file_uri" in item.get("file_data", {}):
+                uri = item["file_data"].get("file_uri", "")
+                if "youtube" in uri.lower():
+                    _consume(counts, "youtube")
+                else:
+                    _consume(counts, "document")
+            elif "inline_data" in item:
+                mime = item["inline_data"].get("mime_type", "").lower()
+                if "image" in mime:
+                    _consume(counts, "image")
+                elif "video" in mime:
+                    _consume(counts, "video")
+                elif "audio" in mime:
+                    _consume(counts, "audio")
+                else:
+                    _consume(counts, "other")
+
+    if not counts:
+        return None
+
+    markers: list[str] = []
+    for key in ("image", "video", "audio", "youtube", "document", "other"):
+        count = counts.get(key, 0)
+        if count <= 0:
+            continue
+        label = {
+            "image": "Image",
+            "video": "Video",
+            "audio": "Audio",
+            "youtube": "YouTube",
+            "document": "Document",
+            "other": "Attachment",
+        }[key]
+        if count > 1:
+            markers.append(f"[{label} x{count}]")
+        else:
+            markers.append(f"[{label}]")
+
+    return " ".join(markers) if markers else None
+
+
+def _extract_meta_value(meta_text: str, key: str) -> str | None:
+    pattern = rf"{key}=\"([^\"]+)\"|{key}=([^ \]]+)"
+    match = re.search(pattern, meta_text)
+    if not match:
+        return None
+    return match.group(1) or match.group(2)
+
+
+def _extract_meta_and_text(parts: list[dict[str, Any]]) -> tuple[str | None, str | None]:
+    meta_text: str | None = None
+    text_fragments: list[str] = []
+
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        text = part.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        stripped = text.strip()
+        if stripped.startswith("[meta"):
+            if meta_text is None:
+                meta_text = stripped
+            continue
+        if stripped.startswith("[speaker"):
+            continue
+        text_fragments.append(stripped)
+
+    combined = " ".join(text_fragments).strip()
+    if combined:
+        combined = sanitize_placeholder_text(combined)
+        combined = " ".join(combined.split())
+    return meta_text, combined or None
+
+
+def _format_role_label(role: str | None) -> str:
+    normalized = (role or "user").lower()
+    if normalized in {"assistant", "model"}:
+        return "bot"
+    if normalized == "tool":
+        return "tool"
+    if normalized == "system":
+        return "system"
+    return "user"
+
+
+def _build_system_context_block(
+    *,
+    settings: Settings,
+    history_messages: list[dict[str, Any]],
+    trigger_meta: dict[str, Any],
+    trigger_text: str | None,
+    trigger_raw_media: list[dict[str, Any]] | None,
+    trigger_media_parts: list[dict[str, Any]] | None,
+    reply_context: dict[str, Any] | None,
+    reply_raw_media: list[dict[str, Any]] | None,
+    reply_media_parts: list[dict[str, Any]] | None,
+    chat_id: int,
+    thread_id: int | None,
+) -> str | None:
+    if not settings.enable_system_context_block:
+        return None
+
+    max_messages = max(1, settings.system_context_block_max_messages)
+    include_meta = settings.system_context_block_include_meta
+
+    reply_message_id: str | None = None
+    reply_media_marker: str | None = None
+    reply_text: str | None = None
+    reply_user_id: int | None = None
+    reply_name: str | None = None
+    reply_username: str | None = None
+    reply_is_bot: bool | None = None
+
+    if reply_context:
+        reply_message_id = (
+            str(reply_context.get("message_id")) if reply_context.get("message_id") else None
+        )
+        reply_media_marker = _media_marker_from_media(reply_raw_media, reply_media_parts)
+        reply_text = reply_context.get("text") or reply_context.get("excerpt")
+        reply_user_id = reply_context.get("user_id")
+        reply_name = reply_context.get("name")
+        reply_username = reply_context.get("username")
+        reply_is_bot = reply_context.get("is_bot")
+
+    history_entries: list[tuple[str, str | None, str, str | None]] = []
+    reply_in_history = False
+
+    for message in history_messages:
+        role = message.get("role")
+        if role == "tool":
+            continue
+        parts = message.get("parts")
+        if not isinstance(parts, list):
+            continue
+        meta_text, text_content = _extract_meta_and_text(parts)
+        if include_meta and not meta_text:
+            continue
+        if not include_meta:
+            meta_text = None
+
+        display_text = text_content or ""
+        message_id = _extract_meta_value(meta_text or "", "message_id") if meta_text else None
+        if message_id and reply_message_id and message_id == reply_message_id:
+            reply_in_history = True
+            if reply_media_marker:
+                display_text = (display_text + " " + reply_media_marker).strip()
+
+        history_entries.append(
+            (
+                _format_role_label(role),
+                meta_text,
+                display_text,
+                message_id,
+            )
+        )
+
+    trigger_media_marker = _media_marker_from_media(trigger_raw_media, trigger_media_parts)
+    trigger_text = trigger_text or ""
+    trigger_text = sanitize_placeholder_text(trigger_text)
+    trigger_text = " ".join(trigger_text.split())
+    if trigger_media_marker:
+        trigger_text = (trigger_text + " " + trigger_media_marker).strip()
+    if not trigger_text:
+        trigger_text = "(no content)"
+    trigger_text = trigger_text + " [REPLY TO THIS]"
+
+    trigger_meta_text = format_metadata(trigger_meta) if include_meta else None
+
+    reply_line: tuple[str, str | None, str, str | None] | None = None
+    if reply_context and not reply_in_history and reply_message_id:
+        reply_display = reply_text or ""
+        reply_display = sanitize_placeholder_text(reply_display)
+        reply_display = " ".join(reply_display.split())
+        if reply_media_marker:
+            reply_display = (reply_display + " " + reply_media_marker).strip()
+        if not reply_display:
+            reply_display = "(no content)"
+
+        reply_meta_dict = {
+            "chat_id": str(chat_id),
+            "thread_id": str(thread_id) if thread_id is not None else None,
+            "message_id": reply_message_id,
+            "user_id": str(reply_user_id) if reply_user_id is not None else None,
+            "name": reply_name,
+            "username": reply_username,
+            "is_bot": reply_is_bot,
+        }
+        reply_meta_text = (
+            format_metadata(reply_meta_dict) if include_meta else None
+        )
+        reply_line = (
+            "user" if not reply_is_bot else "bot",
+            reply_meta_text,
+            reply_display,
+            reply_message_id,
+        )
+
+    extra_lines = 1 + (1 if reply_line is not None else 0)
+    max_history_lines = max(0, max_messages - extra_lines)
+    if len(history_entries) > max_history_lines:
+        history_entries = history_entries[-max_history_lines:]
+
+    lines: list[str] = []
+    for role_label, meta_text, display_text, _ in history_entries:
+        display = display_text or "(no content)"
+        if include_meta and meta_text:
+            lines.append(f"{role_label} {meta_text}: {display}")
+        else:
+            lines.append(f"{role_label}: {display}")
+
+    if reply_line is not None:
+        while len(lines) + 1 + 1 > max_messages:  # ensure capacity for reply + trigger
+            if lines:
+                lines.pop(0)
+            else:
+                break
+        role_label, meta_text, display_text, _ = reply_line
+        if include_meta and meta_text:
+            lines.append(f"{role_label} {meta_text}: {display_text}")
+        else:
+            lines.append(f"{role_label}: {display_text}")
+
+    while len(lines) + 1 > max_messages:  # ensure trigger fits
+        if lines:
+            lines.pop(0)
+        else:
+            break
+
+    if include_meta and trigger_meta_text:
+        lines.append(f"user {trigger_meta_text}: {trigger_text}")
+    else:
+        lines.append(f"user: {trigger_text}")
+
+    header = (
+        "Here’s the current conversation context (last up to "
+        f"{max_messages} messages):"
+    )
+    block_body = "\n".join(lines)
+    return f"{header}\n\n```\n{block_body}\n```\n\n[RESPOND]"
 
 
 def _get_recent_context(chat_id: int, thread_id: int | None) -> dict[str, Any] | None:
@@ -1207,8 +1494,14 @@ async def handle_group_message(
         # Multi-level context will be formatted later
         history = []
 
-    # Track reply context for later injection
+    # Track reply context for later injection and system context block
     reply_context_for_history: dict[str, Any] | None = None
+    reply_context_for_block: dict[str, Any] | None = None
+    reply_media_raw_for_block: list[dict[str, Any]] | None = None
+    reply_media_parts_for_block: list[dict[str, Any]] | None = None
+
+    history_messages_for_block: list[dict[str, Any]] = []
+    use_system_context_block = settings.enable_system_context_block
 
     # Collect media from message (photos, videos, audio, etc.)
     media_raw = await collect_media_parts(bot, message)
@@ -1286,6 +1579,7 @@ async def handle_group_message(
         return
 
     reply_context = None
+    reply_media_parts: list[dict[str, Any]] | None = None
     if message.reply_to_message:
         reply = message.reply_to_message
         key = (reply.chat.id, reply.message_thread_id)
@@ -1294,6 +1588,8 @@ async def handle_group_message(
             for item in reversed(stored_queue):
                 if item.get("message_id") == reply.message_id:
                     reply_context = item
+                    if item.get("media_parts"):
+                        reply_media_parts_for_block = item.get("media_parts")
                     break
 
         # If we have a reply but no cached context, or cached context has no media,
@@ -1302,10 +1598,12 @@ async def handle_group_message(
             try:
                 reply_media_raw = await collect_media_parts(bot, reply)
                 if reply_media_raw:
+                    reply_media_raw_for_block = reply_media_raw
                     reply_media_parts = gemini_client.build_media_parts(
                         reply_media_raw, logger=LOGGER
                     )
                     if reply_media_parts:
+                        reply_media_parts_for_block = reply_media_parts
                         # Create or update reply_context with media
                         if not reply_context:
                             reply_text = _extract_text(reply)
@@ -1365,9 +1663,29 @@ async def handle_group_message(
                     "excerpt": (reply_text or "")[:200] if reply_text else None,
                 }
 
+        if reply_context:
+            reply_context_for_block = dict(reply_context)
+
     # Always store reply context for history injection if enabled and present
     if reply_context and settings.include_reply_excerpt:
         reply_context_for_history = reply_context
+
+    if use_system_context_block:
+        target_thread_for_block = (
+            thread_id if (settings.system_context_block_thread_only and thread_id is not None) else None
+        )
+        max_turns_for_block = max(
+            1, math.ceil(settings.system_context_block_max_messages / 2)
+        )
+        try:
+            history_messages_for_block = await store.recent(
+                chat_id=chat_id,
+                thread_id=target_thread_for_block,
+                max_turns=max_turns_for_block,
+            )
+        except Exception:
+            LOGGER.exception("Failed to load history for system context block")
+            history_messages_for_block = []
 
     fallback_context = reply_context or _get_recent_context(chat_id, thread_id)
     fallback_text = fallback_context.get("text") if fallback_context else None
@@ -1555,7 +1873,7 @@ async def handle_group_message(
     # Format context for Gemini
     if use_multi_level and context_manager and context_assembly:
         # Check if compact format is enabled
-        if settings.enable_compact_conversation_format:
+        if settings.enable_compact_conversation_format and not use_system_context_block:
             # Use compact plain text format (70-80% token savings)
             formatted_context = context_manager.format_for_gemini_compact(
                 context_assembly
@@ -1712,7 +2030,11 @@ async def handle_group_message(
 
             # Priority 3: Historical media from context (limited to max_historical)
             historical_media = formatted_context.get("historical_media", [])
-            if historical_media and max_historical > 0:
+            if (
+                not use_system_context_block
+                and historical_media
+                and max_historical > 0
+            ):
                 remaining_slots = min(
                     max_media_total - len(all_media),  # Don't exceed total limit
                     max_historical,  # Don't exceed historical limit
@@ -1761,7 +2083,11 @@ async def handle_group_message(
                     telemetry.increment_counter(
                         "context.historical_media_dropped", len(historical_media)
                     )
-            elif historical_media and max_historical == 0:
+            elif (
+                not use_system_context_block
+                and historical_media
+                and max_historical == 0
+            ):
                 # Historical media disabled via config
                 telemetry.increment_counter(
                     "context.historical_media_dropped", len(historical_media)
@@ -1981,6 +2307,32 @@ async def handle_group_message(
                     )
         except Exception:
             LOGGER.exception("Failed to attach reply media to user_parts in JSON mode")
+
+    system_context_block_text = None
+    if use_system_context_block:
+        trigger_text_source = raw_text or fallback_text or ""
+        if not trigger_text_source and media_summary:
+            trigger_text_source = media_summary
+
+        system_context_block_text = _build_system_context_block(
+            settings=settings,
+            history_messages=history_messages_for_block,
+            trigger_meta=user_meta,
+            trigger_text=trigger_text_source,
+            trigger_raw_media=media_raw,
+            trigger_media_parts=media_parts,
+            reply_context=reply_context_for_block,
+            reply_raw_media=reply_media_raw_for_block,
+            reply_media_parts=reply_media_parts_for_block,
+            chat_id=chat_id,
+            thread_id=thread_id,
+        )
+
+        if system_context_block_text:
+            system_prompt_with_profile = (
+                system_prompt_with_profile + "\n\n" + system_context_block_text
+            )
+            history = []
 
     # Track which tools were used in this request
     tools_used_in_request: list[str] = []

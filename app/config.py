@@ -352,6 +352,23 @@ class Settings(BaseSettings):
         200, alias="REPLY_EXCERPT_MAX_CHARS", ge=50, le=500
     )  # Maximum characters for reply excerpts
 
+    # System context block (monospace history inside system instructions)
+    enable_system_context_block: bool = Field(
+        False, alias="ENABLE_SYSTEM_CONTEXT_BLOCK"
+    )
+    system_context_block_max_messages: int = Field(
+        60, alias="SYSTEM_CONTEXT_BLOCK_MAX_MESSAGES", ge=10, le=200
+    )
+    system_context_block_include_meta: bool = Field(
+        True, alias="SYSTEM_CONTEXT_BLOCK_INCLUDE_META"
+    )
+    system_context_block_thread_only: bool = Field(
+        True, alias="SYSTEM_CONTEXT_BLOCK_THREAD_ONLY"
+    )
+    system_context_block_media_scope: str = Field(
+        "trigger_and_reply", alias="SYSTEM_CONTEXT_BLOCK_MEDIA_SCOPE"
+    )
+
     # Performance & Caching
     enable_result_caching: bool = Field(True, alias="ENABLE_RESULT_CACHING")
     cache_ttl_seconds: int = Field(3600, alias="CACHE_TTL_SECONDS", ge=60, le=86400)
@@ -667,6 +684,16 @@ class Settings(BaseSettings):
         if not 0.0 <= v <= 1.0:
             raise ValueError(f"{info.field_name} must be between 0.0 and 1.0, got {v}")
         return v
+
+    @field_validator("system_context_block_media_scope")
+    @classmethod
+    def _validate_system_context_block_media_scope(cls, value: str) -> str:
+        allowed = {"trigger_and_reply"}
+        if value not in allowed:
+            raise ValueError(
+                f"SYSTEM_CONTEXT_BLOCK_MEDIA_SCOPE must be one of {allowed}, got '{value}'"
+            )
+        return value
 
     def model_post_init(self, __context) -> None:
         """Validate interdependent fields after initialization."""

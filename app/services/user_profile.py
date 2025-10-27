@@ -729,65 +729,112 @@ class UserProfileStore:
         """
         Get facts for a user.
 
-        Can filter by fact_type and minimum confidence.
-        Returns list of fact dicts sorted by confidence (descending).
+        DEPRECATED: user_facts table has been replaced with user_memories.
+        This method now returns an empty list for compatibility.
+        Use get_memories() for the new memory system.
         """
         await self.init()
 
-        query = "SELECT * FROM user_facts WHERE user_id = ? AND chat_id = ?"
-        params: list[Any] = [user_id, chat_id]
-
-        if fact_type:
-            query += " AND fact_type = ?"
-            params.append(fact_type)
-
-        if active_only:
-            query += " AND is_active = 1"
-
-        if min_confidence > 0:
-            query += " AND confidence >= ?"
-            params.append(min_confidence)
-
-        query += " ORDER BY confidence DESC, updated_at DESC LIMIT ?"
-        params.append(limit)
-
+        # Check if user_facts table exists (for backward compatibility)
         async with aiosqlite.connect(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(query, params) as cursor:
-                rows = await cursor.fetchall()
-                return [dict(row) for row in rows]
+            try:
+                async with db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='user_facts'"
+                ) as cursor:
+                    table_exists = await cursor.fetchone()
+
+                if not table_exists:
+                    # Table doesn't exist, return empty list
+                    return []
+
+                # Table exists, proceed with original query
+                query = "SELECT * FROM user_facts WHERE user_id = ? AND chat_id = ?"
+                params: list[Any] = [user_id, chat_id]
+
+                if fact_type:
+                    query += " AND fact_type = ?"
+                    params.append(fact_type)
+
+                if active_only:
+                    query += " AND is_active = 1"
+
+                if min_confidence > 0:
+                    query += " AND confidence >= ?"
+                    params.append(min_confidence)
+
+                query += " ORDER BY confidence DESC, updated_at DESC LIMIT ?"
+                params.append(limit)
+
+                db.row_factory = aiosqlite.Row
+                async with db.execute(query, params) as cursor:
+                    rows = await cursor.fetchall()
+                    return [dict(row) for row in rows]
+            except Exception as e:
+                LOGGER.warning(f"Error fetching facts (deprecated): {e}")
+                return []
 
     async def deactivate_fact(self, fact_id: int) -> None:
-        """Mark a fact as inactive (soft delete)."""
+        """Mark a fact as inactive (soft delete).
+
+        DEPRECATED: user_facts table has been replaced with user_memories.
+        """
         await self.init()
 
         async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(
-                "UPDATE user_facts SET is_active = 0, updated_at = ? WHERE id = ?",
-                (int(time.time()), fact_id),
-            )
-            await db.commit()
+            try:
+                # Check if table exists
+                async with db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='user_facts'"
+                ) as cursor:
+                    table_exists = await cursor.fetchone()
 
-        LOGGER.info(f"Deactivated fact {fact_id}")
+                if not table_exists:
+                    LOGGER.warning(f"Cannot deactivate fact {fact_id}: user_facts table doesn't exist (deprecated)")
+                    return
+
+                await db.execute(
+                    "UPDATE user_facts SET is_active = 0, updated_at = ? WHERE id = ?",
+                    (int(time.time()), fact_id),
+                )
+                await db.commit()
+                LOGGER.info(f"Deactivated fact {fact_id}")
+            except Exception as e:
+                LOGGER.warning(f"Error deactivating fact {fact_id}: {e}")
 
     async def delete_fact(self, fact_id: int) -> bool:
         """
         Permanently delete a fact.
+
+        DEPRECATED: user_facts table has been replaced with user_memories.
 
         Returns True if fact was deleted, False if not found.
         """
         await self.init()
 
         async with aiosqlite.connect(self._db_path) as db:
-            cursor = await db.execute("DELETE FROM user_facts WHERE id = ?", (fact_id,))
-            deleted = cursor.rowcount or 0
-            await db.commit()
+            try:
+                # Check if table exists
+                async with db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='user_facts'"
+                ) as cursor:
+                    table_exists = await cursor.fetchone()
 
-        if deleted > 0:
-            LOGGER.info(f"Deleted fact {fact_id}")
-            return True
+                if not table_exists:
+                    LOGGER.warning(f"Cannot delete fact {fact_id}: user_facts table doesn't exist (deprecated)")
+                    return False
 
-        return False
+                cursor = await db.execute("DELETE FROM user_facts WHERE id = ?", (fact_id,))
+                deleted = cursor.rowcount or 0
+                await db.commit()
+
+                if deleted > 0:
+                    LOGGER.info(f"Deleted fact {fact_id}")
+                    return True
+
+                return False
+            except Exception as e:
+                LOGGER.warning(f"Error deleting fact {fact_id}: {e}")
+                return False
 
     async def record_relationship(
         self,

@@ -22,12 +22,14 @@ class MockCandidate:
             function_call_part.function_call.name = "recall_facts"
             function_call_part.function_call.args = {"user_id": 123456}
             function_call_part.text = None
+            function_call_part.thought = False
             parts.append(function_call_part)
 
         if text:
             text_part = MagicMock()
             text_part.text = text
             text_part.function_call = None
+            text_part.thought = False
             parts.append(text_part)
 
         self.content.parts = parts
@@ -175,6 +177,7 @@ async def test_extract_text_with_mixed_parts():
     text_part = MagicMock()
     text_part.text = "Here is my response"
     text_part.function_call = None
+    text_part.thought = False
     candidate.content.parts.append(text_part)
 
     response = MockResponse([candidate])

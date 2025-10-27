@@ -77,6 +77,14 @@ The `parts` array contains ordered content:
 ### System Instruction
 The system prompt (persona) is sent separately via the `system_instruction` parameter (if supported by model) or prepended as a `"user"` role message in the conversation.
 
+#### System Context Block (optional)
+- Enabled with `ENABLE_SYSTEM_CONTEXT_BLOCK=true`.
+- Adds a fenced monospace block to the system instruction containing the last `SYSTEM_CONTEXT_BLOCK_MAX_MESSAGES` messages (chronological order).
+- Only the trigger message (current user turn) and its reply target display media markers such as `[Image]`, `[Video]`, `[Audio]`, `[YouTube]`, `[Document]`; all other lines remain text-only.
+- The trigger line ends with `[REPLY TO THIS]`, and the block concludes with `[RESPOND]` to cue Gemini.
+- When active, the payload’s `history` array is cleared—context is provided by the block plus the current `user_parts` (which still carry trigger/reply attachments).
+- Metadata within the block mirrors `format_metadata()` output unless `SYSTEM_CONTEXT_BLOCK_INCLUDE_META=false`.
+
 ---
 
 ## Code References

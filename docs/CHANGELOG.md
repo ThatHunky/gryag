@@ -5,6 +5,20 @@ All notable changes to gryag's memory, context, and learning systems.
 
 ## [Unreleased]
 
+### 2025-10-27 — Google Search Grounding Restored
+
+**Summary**: Reverted the experimental Brave Search integration and restored the original Google Search grounding flow with optional separate API key support.
+
+**Changes**:
+- Removed Brave-specific services, settings, dependencies, and tests
+- Reinstated the previous `search_web_tool()` implementation that delegates to Google Search grounding
+- Simplified `.env.example` to only document `WEB_SEARCH_API_KEY`
+
+**Verification**:
+```
+grep -n "search_web_tool" app/services/search_tool.py
+```
+
 ### 2025-10-26 — Improved Command Throttle UX
 
 **Summary**: Enhanced command throttling to use smart warning system instead of always showing error messages. First violation shows warning, subsequent spam is silently ignored.

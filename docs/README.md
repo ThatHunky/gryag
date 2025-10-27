@@ -16,6 +16,8 @@ Structure recommended:
 
 ## Recent Changes
 
+**October 27, 2025**: **🔄 Google Search Grounding** — Reaffirmed Google Search grounding with support for a separate `WEB_SEARCH_API_KEY`. Brave Search experiment disabled; no additional configuration required beyond the optional key.
+
 **October 27, 2025**: Context Pipeline Doc — Added a complete, end-to-end overview of how the model context is assembled and sent to Gemini, including `[speaker]`/`[meta]` blocks, attachments, compact mode, tool calls, and response cleanup. See `docs/overview/MODEL_CONTEXT_PIPELINE.md`. Also shipped the optional monospace “system context block” (toggle with `ENABLE_SYSTEM_CONTEXT_BLOCK`) that inlines the last N chat messages inside the system prompt while keeping media limited to the trigger/reply turns. Verification: enable DEBUG logs, turn the flag on, trigger a message, and confirm `history_length=0` with an increased `system_prompt_length` in `app/handlers/chat.py:2184`; check `system_prompt` snippet in logs for the fenced block.
 
 **October 26, 2025**: **🔑 Separate API Key for Web Search** - Added support for using a separate Google Gemini API key specifically for web search grounding operations. Set `WEB_SEARCH_API_KEY` in `.env` to use a different account/billing for search vs text/image generation. Falls back to `GEMINI_API_KEY` if not set (fully backward compatible). Benefits: independent billing, isolated API quotas for search operations, better cost control. Similar to image generation API key feature. See `docs/features/SEPARATE_WEB_SEARCH_API_KEY.md`. Verification: `grep "web_search_api_key" app/config.py` and check logs for `"Web search grounding enabled - separate_api_key: true"`

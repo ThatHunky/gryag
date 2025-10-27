@@ -44,6 +44,9 @@ async def handle_chat_member_update(
     new_status = member.status
     now = int(time.time())
 
+    # Handle both enum and string status values
+    status_value = new_status.value if hasattr(new_status, 'value') else new_status
+
     if new_status in _ACTIVE_STATUSES:
         await profile_store.get_or_create_profile(
             user_id=user_id,
@@ -54,7 +57,7 @@ async def handle_chat_member_update(
         await profile_store.update_profile(
             user_id=user_id,
             chat_id=chat_id,
-            membership_status=new_status.value,
+            membership_status=status_value,
             display_name=user.full_name,
             username=user.username,
             last_seen=now,
@@ -63,6 +66,6 @@ async def handle_chat_member_update(
         await profile_store.update_profile(
             user_id=user_id,
             chat_id=chat_id,
-            membership_status=new_status.value,
+            membership_status=status_value,
             last_seen=now,
         )

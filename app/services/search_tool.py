@@ -33,8 +33,8 @@ async def search_web_tool(
         return json.dumps({"error": "Empty query", "results": []})
 
     try:
-        # Use provided API key or fall back to gemini_client's key
-        effective_api_key = api_key or gemini_client._api_key
+        # Use provided API key or fall back to gemini_client's primary key
+        effective_api_key = api_key or gemini_client._primary_key
 
         # Create a simple request with just the search grounding tool
         config = types.GenerateContentConfig(
@@ -42,7 +42,7 @@ async def search_web_tool(
         )
 
         # Create a temporary client with the effective API key if different
-        if api_key and api_key != gemini_client._api_key:
+        if api_key and api_key != gemini_client._primary_key:
             # Use a separate client instance for this search
             search_client = genai.Client(api_key=effective_api_key)
             response = await search_client.aio.models.generate_content(

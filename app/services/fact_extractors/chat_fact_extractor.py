@@ -405,12 +405,13 @@ Return empty array if no group-level facts detected.
 """
 
         try:
-            response = await self.gemini_client.generate(
+            response_data = await self.gemini_client.generate(
                 system_prompt="You are an expert at analyzing group chat dynamics. Output valid JSON only.",
                 history=[],
                 user_parts=[{"text": prompt}],
             )
 
+            response = response_data.get("text", "")
             if not response:
                 return []
 

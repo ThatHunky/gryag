@@ -5,6 +5,21 @@ All notable changes to gryag's memory, context, and learning systems.
 
 ## [Unreleased]
 
+### 2025-10-28 — Safer Thinking Display Controls
+
+**Summary**: Guarded Gemini’s chain-of-thought output behind configuration, sanitized Telegram replies, and retried generations when only reasoning was returned.
+
+**Changes**:
+- Added `SHOW_THINKING_TO_USERS` setting to suppress public reasoning messages while still collecting thoughts server-side.
+- Escaped thinking/final replies and reused the existing “🤔 Думаю…” message for the final answer to avoid HTML injection and duplicate sends.
+- Forced a retry without thinking when Gemini responds with reasoning only, and skipped `thinking_config` on models that lack thought support.
+- Introduced `THINKING_BUDGET_TOKENS` (default 1024) so deployments can tune Gemini’s internal reasoning budget without touching code.
+
+**Verification**:
+```
+.venv/bin/pytest tests/unit/test_gemini_empty_tool_response.py
+```
+
 ### 2025-10-27 — Google Search Grounding Restored
 
 **Summary**: Reverted the experimental Brave Search integration and restored the original Google Search grounding flow with optional separate API key support.

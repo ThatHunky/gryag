@@ -118,7 +118,8 @@ async def test_generate_rotates_on_quota(patched_gemini):
     if client._key_pool:  # type: ignore[attr-defined]
         client._key_pool._index = 0  # type: ignore[attr-defined]
 
-    result = await client.generate("", [], [{"text": "Привіт"}])
+    result_data = await client.generate("", [], [{"text": "Привіт"}])
+    result = result_data.get("text", "")
 
     assert "працює" in result.lower()
     assert call_order[0] == ("generate", "key1")

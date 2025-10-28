@@ -683,13 +683,14 @@ def build_tool_callbacks(
             prompt = "Опиши зображення лаконічно (1-2 речення). Якщо на ньому є текст — процитуй головне."
             user_parts = [{"text": prompt}] + parts
             try:
-                text = await gemini_client.generate(
+                response_data = await gemini_client.generate(
                     system_prompt="Ти візуальний асистент, який стисло описує зображення.",
                     history=[],
                     user_parts=user_parts,
                     tools=None,
                     tool_callbacks=None,
                 )
+                text = response_data.get("text", "")
                 return json.dumps({"success": True, "description": text.strip()})
             except Exception:
                 logger.exception("describe_media generation failed")
@@ -735,13 +736,14 @@ def build_tool_callbacks(
             prompt = "Розшифруй аудіо українською максимально точно."
             user_parts = [{"text": prompt}] + parts
             try:
-                text = await gemini_client.generate(
+                response_data = await gemini_client.generate(
                     system_prompt="Ти асистент-транскриптор українською.",
                     history=[],
                     user_parts=user_parts,
                     tools=None,
                     tool_callbacks=None,
                 )
+                text = response_data.get("text", "")
                 return json.dumps({"success": True, "transcript": text.strip()})
             except Exception:
                 logger.exception("transcribe_audio generation failed")
@@ -821,13 +823,14 @@ def build_tool_callbacks(
 
             try:
                 # Generate response using Gemini
-                text = await gemini_client.generate(
+                response_data = await gemini_client.generate(
                     system_prompt="Ти експерт з аналізу фотографій. Дай цікаву, творчу відповідь щодо профіль-фото.",
                     history=[],
                     user_parts=user_parts,
                     tools=None,
                     tool_callbacks=None,
                 )
+                text = response_data.get("text", "")
                 return json.dumps({"success": True, "analysis": text.strip()})
             except Exception:
                 logger.exception("analyze_profile_photo generation failed")

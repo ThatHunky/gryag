@@ -33,6 +33,10 @@ class Settings(BaseSettings):
         "models/text-embedding-004", alias="GEMINI_EMBED_MODEL"
     )
     gemini_enable_thinking: bool = Field(False, alias="GEMINI_ENABLE_THINKING")
+    show_thinking_to_users: bool = Field(False, alias="SHOW_THINKING_TO_USERS")
+    thinking_budget_tokens: int = Field(
+        1024, alias="THINKING_BUDGET_TOKENS", ge=64, le=4096
+    )
     db_path: Path = Field(Path("./gryag.db"), alias="DB_PATH")
     max_turns: int = Field(
         20, alias="MAX_TURNS", ge=1

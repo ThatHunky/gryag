@@ -61,12 +61,13 @@ class EpisodeSummarizer:
         )
 
         try:
-            response = await self.gemini.generate(
+            response_data = await self.gemini.generate(
                 system_prompt=self._get_system_instruction(),
                 history=[],
                 user_parts=[{"text": prompt}],
             )
 
+            response = self._extract_text(response_data)
             # Parse Gemini response
             summary_data = self._parse_summary_response(response)
 
@@ -148,6 +149,20 @@ Guidelines:
 Your task is to analyze conversations and provide structured summaries that help users quickly understand what was discussed, the main points, and the overall tone.
 
 Be concise, accurate, and objective. Focus on the content and themes rather than individual message details."""
+
+    @staticmethod
+    def _extract_text(response_data: Any) -> str:
+        """Normalize Gemini response payloads to plain text."""
+        if isinstance(response_data, dict):
+            text = response_data.get("text")
+            if isinstance(text, str):
+                return text
+            # Some callers may still populate the top-level key
+            if isinstance(response_data.get("content"), str):
+                return str(response_data["content"])
+        elif isinstance(response_data, str):
+            return response_data
+        return ""
 
     def _parse_summary_response(self, response: str) -> dict[str, Any]:
         """Parse Gemini's structured response into summary dict."""
@@ -276,12 +291,13 @@ CONVERSATION:
 Respond with ONLY the topic title, nothing else."""
 
         try:
-            response = await self.gemini.generate(
+            response_data = await self.gemini.generate(
                 system_prompt="You are a conversation topic analyzer. Provide only the topic title requested.",
                 history=[],
                 user_parts=[{"text": prompt}],
             )
 
+            response = self._extract_text(response_data)
             topic = response.strip()[:100]
             if not topic:
                 topic = messages[0].get("text", "Conversation")[:50]
@@ -318,12 +334,13 @@ Respond with ONLY ONE WORD from these options:
 Respond with only the single word, nothing else."""
 
         try:
-            response = await self.gemini.generate(
+            response_data = await self.gemini.generate(
                 system_prompt="You are an emotion analyzer. Respond with only one word: positive, negative, neutral, or mixed.",
                 history=[],
                 user_parts=[{"text": prompt}],
             )
 
+            response = self._extract_text(response_data)
             valence = response.strip().lower()
             if valence not in ["positive", "negative", "neutral", "mixed"]:
                 valence = "neutral"

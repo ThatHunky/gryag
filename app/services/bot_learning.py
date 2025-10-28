@@ -390,8 +390,8 @@ Return JSON:
                 user_parts=[{"text": prompt}],
             )
 
-            # Parse JSON response (generate() returns string directly)
-            response_text = response.strip()
+            # Parse JSON response (generate() returns dict with text and thinking)
+            response_text = response.get("text", "").strip()
             # Extract JSON from markdown code blocks if present
             if "```json" in response_text:
                 json_match = re.search(

@@ -392,12 +392,13 @@ Your response should:
 
 Response:"""
 
-            response_text = await self.gemini_client.generate(
+            response = await self.gemini_client.generate(
                 system_prompt="You are a helpful bot joining a conversation proactively. Be brief, natural, and valuable.",
                 history=[],
                 user_parts=[{"text": prompt}],
             )
 
+            response_text = response.get("text", "")
             if not response_text:
                 LOGGER.warning("Empty proactive response from Gemini")
                 return

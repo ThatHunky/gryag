@@ -209,12 +209,13 @@ class ProfileSummarizer:
         system_instruction = "You are a concise profile summarizer. Generate a brief, factual summary of the user based on their facts. Keep it under 200 words."
 
         try:
-            summary = await self.gemini_client.generate(
+            response = await self.gemini_client.generate(
                 system_prompt=system_instruction,
                 history=None,
                 user_parts=[{"text": prompt}],
             )
 
+            summary = response.get("text", "")
             if not summary:
                 raise ValueError("Empty summary generated")
 

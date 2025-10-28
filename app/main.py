@@ -165,6 +165,7 @@ async def main() -> None:
         free_tier_mode=settings.free_tier_mode,
         quota_block_seconds=settings.gemini_quota_block_seconds,
         enable_thinking=settings.gemini_enable_thinking,
+        thinking_budget_tokens=settings.thinking_budget_tokens,
     )
 
     # Initialize user profiling system

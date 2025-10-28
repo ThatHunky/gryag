@@ -11,7 +11,12 @@ from app.services.gemini import GeminiClient
 class MockCandidate:
     """Mock Gemini candidate response."""
 
-    def __init__(self, has_function_call: bool = False, text: str | None = None):
+    def __init__(
+        self,
+        has_function_call: bool = False,
+        text: str | None = None,
+        thinking: str | None = None,
+    ):
         self.finish_reason = "STOP"
         self.content = MagicMock()
         parts = []
@@ -24,6 +29,13 @@ class MockCandidate:
             function_call_part.text = None
             function_call_part.thought = False
             parts.append(function_call_part)
+
+        if thinking:
+            thinking_part = MagicMock()
+            thinking_part.text = thinking
+            thinking_part.function_call = None
+            thinking_part.thought = True
+            parts.append(thinking_part)
 
         if text:
             text_part = MagicMock()
@@ -88,6 +100,7 @@ async def test_empty_tool_response_forces_retry():
             tools=[{"function_declarations": [{"name": "recall_facts"}]}],
             callbacks=callbacks,
             system_instruction="Test system instruction",
+            include_thinking=False,
         )
 
         # Should have been called 3 times:
@@ -136,6 +149,7 @@ async def test_normal_tool_response_no_retry():
             tools=[{"function_declarations": [{"name": "recall_facts"}]}],
             callbacks=callbacks,
             system_instruction="Test system instruction",
+            include_thinking=False,
         )
 
         # Should have been called only once (normal tool execution)
@@ -184,3 +198,83 @@ async def test_extract_text_with_mixed_parts():
 
     extracted = client._extract_text(response)
     assert extracted == "Here is my response"
+
+
+@pytest.mark.asyncio
+async def test_extract_thinking_only():
+    """Test _extract_thinking correctly extracts thinking parts."""
+    client = GeminiClient(
+        api_key="test_key",
+        model="gemini-2.0-flash-exp",
+        embed_model="text-embedding-004",
+    )
+
+    # Response with only thinking, no text
+    response = MockResponse(
+        [MockCandidate(thinking="Блять, що робити? Треба подумати...")]
+    )
+
+    extracted_thinking = client._extract_thinking(response)
+    assert extracted_thinking == "Блять, що робити? Треба подумати..."
+
+    # Text should be empty since only thinking parts exist
+    extracted_text = client._extract_text(response)
+    assert extracted_text == ""
+
+
+@pytest.mark.asyncio
+async def test_extract_thinking_with_text():
+    """Test _extract_thinking when response has both thinking and text."""
+    client = GeminiClient(
+        api_key="test_key",
+        model="gemini-2.0-flash-exp",
+        embed_model="text-embedding-004",
+    )
+
+    # Response with both thinking and text
+    response = MockResponse(
+        [
+            MockCandidate(
+                thinking="Гм, це складно. Треба перевірити факти.",
+                text="Ось моя відповідь.",
+            )
+        ]
+    )
+
+    extracted_thinking = client._extract_thinking(response)
+    assert extracted_thinking == "Гм, це складно. Треба перевірити факти."
+
+    extracted_text = client._extract_text(response)
+    assert extracted_text == "Ось моя відповідь."
+
+
+@pytest.mark.asyncio
+async def test_extract_multiple_thinking_parts():
+    """Test _extract_thinking with multiple thinking parts."""
+    client = GeminiClient(
+        api_key="test_key",
+        model="gemini-2.0-flash-exp",
+        embed_model="text-embedding-004",
+    )
+
+    # Create a candidate with multiple thinking parts
+    candidate = MockCandidate()
+    thinking_part_1 = MagicMock()
+    thinking_part_1.text = "Перша думка про проблему."
+    thinking_part_1.function_call = None
+    thinking_part_1.thought = True
+    candidate.content.parts.append(thinking_part_1)
+
+    thinking_part_2 = MagicMock()
+    thinking_part_2.text = "Друга думка, більш детальна."
+    thinking_part_2.function_call = None
+    thinking_part_2.thought = True
+    candidate.content.parts.append(thinking_part_2)
+
+    response = MockResponse([candidate])
+
+    extracted_thinking = client._extract_thinking(response)
+    # Multiple thinking parts should be joined with double newlines
+    assert "Перша думка про проблему." in extracted_thinking
+    assert "Друга думка, більш детальна." in extracted_thinking
+    assert "\n\n" in extracted_thinking

@@ -131,6 +131,8 @@ async def init_core_services(settings: Settings) -> tuple[
         api_keys=settings.gemini_api_keys_list,
         free_tier_mode=settings.free_tier_mode,
         quota_block_seconds=settings.gemini_quota_block_seconds,
+        enable_thinking=settings.gemini_enable_thinking,
+        thinking_budget_tokens=settings.thinking_budget_tokens,
     )
 
     profile_store = UserProfileStoreAdapter(settings.db_path)

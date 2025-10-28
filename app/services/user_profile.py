@@ -132,12 +132,13 @@ class FactExtractor:
                 )
 
                 # Call Gemini
-                response = await self._gemini.generate(
+                response_data = await self._gemini.generate(
                     history=[],
                     user_parts=[{"text": prompt}],
                     system_prompt="You are a fact extraction system. Return only valid JSON.",
                 )
 
+                response = response_data.get("text", "")
                 if not response:
                     return []
 

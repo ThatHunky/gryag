@@ -80,6 +80,7 @@ class GeminiClient:
         key_cooldown_seconds: float = 120.0,
         quota_block_seconds: float = 86400.0,
         enable_thinking: bool = False,
+        thinking_budget_tokens: int = 1024,
     ) -> None:
         provided_keys = [k.strip() for k in (api_keys or []) if k and k.strip()]
         if api_key:
@@ -97,6 +98,7 @@ class GeminiClient:
         self._key_cooldown_seconds = key_cooldown_seconds
         self._quota_block_seconds = quota_block_seconds
         self._enable_thinking = enable_thinking
+        self._thinking_budget = max(1, thinking_budget_tokens)
         self._key_pool = (
             _KeyPool(keys, key_cooldown_seconds, quota_block_seconds)
             if self._free_tier_mode
@@ -115,6 +117,14 @@ class GeminiClient:
         self._audio_supported = self._detect_audio_support(model)
         self._video_supported = self._detect_video_support(model)
         self._tools_supported = self._detect_tools_support(model)
+        self._thinking_requested = enable_thinking
+        self._thinking_supported = self._detect_thinking_support(model)
+        if enable_thinking and not self._thinking_supported:
+            self._logger.warning(
+                "GEMINI_ENABLE_THINKING is enabled but model '%s' does not appear to support thinking output; disabling thinking_config",
+                model,
+            )
+        self._enable_thinking = enable_thinking and self._thinking_supported
 
         # New SDK supports system_instruction by default
         self._system_instruction_supported = True
@@ -253,6 +263,35 @@ class GeminiClient:
         # Default to True for unknown models (safer to try and fallback)
         return True
 
+    @staticmethod
+    def _detect_thinking_support(model_name: str) -> bool:
+        """
+        Detect if the model supports returning thinking/thought parts.
+
+        Only dedicated reasoning/thinking models surface these parts; default
+        flash/pro models ignore the flag.
+        """
+        model_lower = model_name.lower()
+        keywords = ("thinking", "reasoning", "pro", "exp")
+        return any(keyword in model_lower for keyword in keywords)
+
+    def _resolve_thinking(self, override: bool | None) -> bool:
+        """
+        Determine whether thinking output should be requested for this call.
+
+        Respects per-request override while ensuring the underlying model
+        supports the feature.
+        """
+        if override is not None:
+            if override and not self._thinking_supported:
+                self._logger.debug(
+                    "Thinking override requested but model '%s' lacks support; omitting thinking_config",
+                    self._model_name,
+                )
+                return False
+            return override and self._thinking_supported
+        return self._enable_thinking
+
     def _filter_tools(
         self, tools: list[dict[str, Any]] | None
     ) -> list[dict[str, Any]] | None:
@@ -338,6 +377,8 @@ class GeminiClient:
         contents: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
         system_instruction: str | None,
+        *,
+        include_thinking: bool | None = None,
     ) -> Any:
         # Build config with all parameters at once
         # The new SDK requires tools to be wrapped in types.Tool objects
@@ -345,9 +386,11 @@ class GeminiClient:
             "safety_settings": self._safety_settings,
         }
 
-        if self._enable_thinking:
+        thinking_enabled = self._resolve_thinking(include_thinking)
+        if thinking_enabled:
             config_params["thinking_config"] = types.ThinkingConfig(
-                include_thoughts=True
+                include_thoughts=True,
+                thinking_budget=self._thinking_budget,
             )
 
         if system_instruction and self._system_instruction_supported:
@@ -519,7 +562,8 @@ class GeminiClient:
         tool_callbacks: (
             dict[str, Callable[[dict[str, Any]], Awaitable[str]]] | None
         ) = None,
-    ) -> str:
+        include_thinking: bool | None = None,
+    ) -> dict[str, str]:
         self._ensure_circuit()
 
         def assemble(include_prompt: bool) -> list[dict[str, Any]]:
@@ -542,12 +586,14 @@ class GeminiClient:
 
         # Reset fallback flag at start of new request
         self._tools_fallback_disabled = False
+        thinking_enabled = self._resolve_thinking(include_thinking)
 
         try:
             response = await self._invoke_model(
                 call_contents,
                 filtered_tools,
                 system_instruction,
+                include_thinking=thinking_enabled,
             )
         except TypeError as exc:
             if system_instruction and "system_instruction" in str(exc):
@@ -557,7 +603,12 @@ class GeminiClient:
                 system_instruction = None
                 contents = assemble(True)
                 call_contents = contents
-                response = await self._invoke_model(call_contents, filtered_tools, None)
+                response = await self._invoke_model(
+                    call_contents,
+                    filtered_tools,
+                    None,
+                    include_thinking=thinking_enabled,
+                )
             else:
                 self._record_failure()
                 raise
@@ -631,6 +682,7 @@ class GeminiClient:
                     call_contents,
                     filtered_tools,
                     system_instruction,
+                    include_thinking=thinking_enabled,
                 )
                 retried = True
             except Exception as fallback_exc:
@@ -640,6 +692,7 @@ class GeminiClient:
                             call_contents,
                             None,
                             system_instruction,
+                            include_thinking=thinking_enabled,
                         )
                         self._tools_fallback_disabled = (
                             True  # Mark tools as temporarily disabled
@@ -663,6 +716,7 @@ class GeminiClient:
                     tools=tools,
                     callbacks=tool_callbacks,
                     system_instruction=system_instruction,
+                    include_thinking=thinking_enabled,
                 )
                 self._logger.debug("Tool handling completed successfully")
             except GeminiError:
@@ -677,11 +731,15 @@ class GeminiClient:
 
         # Log final response structure
         extracted_text = self._extract_text(response)
+        extracted_thinking = (
+            self._extract_thinking(response) if thinking_enabled else ""
+        )
         self._logger.info(
-            f"Extracted text length: {len(extracted_text)}, is_empty: {not extracted_text or extracted_text.isspace()}"
+            f"Extracted text length: {len(extracted_text)}, is_empty: {not extracted_text or extracted_text.isspace()}, "
+            f"thinking enabled: {thinking_enabled}, thinking length: {len(extracted_thinking)}"
         )
 
-        return extracted_text
+        return {"text": extracted_text, "thinking": extracted_thinking}
 
     @staticmethod
     def _extract_text(response: Any) -> str:
@@ -719,6 +777,29 @@ class GeminiClient:
         text = getattr(response, "text", None)
         return text.strip() if isinstance(text, str) else ""
 
+    @staticmethod
+    def _extract_thinking(response: Any) -> str:
+        """Extract thinking/reasoning parts from the response."""
+        candidates = getattr(response, "candidates", None) or []
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            if not content:
+                continue
+            parts = getattr(content, "parts", None)
+            if not parts:
+                continue
+            thinking_fragments: list[str] = []
+            for part in parts:
+                # Only collect thinking parts
+                is_thought = getattr(part, "thought", False)
+                if is_thought:
+                    text_value = getattr(part, "text", None)
+                    if isinstance(text_value, str) and text_value:
+                        thinking_fragments.append(text_value)
+            if thinking_fragments:
+                return "\n\n".join(thinking_fragments).strip()
+        return ""
+
     async def _handle_tools(
         self,
         initial_contents: list[dict[str, Any]],
@@ -726,6 +807,7 @@ class GeminiClient:
         tools: list[dict[str, Any]] | None,
         callbacks: dict[str, Callable[[dict[str, Any]], Awaitable[str]]],
         system_instruction: str | None,
+        include_thinking: bool,
     ) -> Any:
         self._logger.info(f"_handle_tools called with {len(callbacks)} callbacks")
         contents = list(initial_contents)
@@ -919,6 +1001,7 @@ class GeminiClient:
                     contents,
                     filtered_tools,
                     system_instruction,
+                    include_thinking=include_thinking,
                 )
             except Exception as exc:  # pragma: no cover
                 err_text = str(exc)
@@ -933,6 +1016,7 @@ class GeminiClient:
                                 contents,
                                 filtered_tools,
                                 system_instruction,
+                                include_thinking=include_thinking,
                             )
                             continue
                         except Exception:
@@ -944,6 +1028,7 @@ class GeminiClient:
                         contents,
                         None,
                         system_instruction,
+                        include_thinking=include_thinking,
                     )
                 except Exception as fallback_exc:  # pragma: no cover
                     self._logger.exception("Gemini fallback follow-up failed")

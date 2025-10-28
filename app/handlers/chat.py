@@ -15,6 +15,7 @@ from aiogram import Bot, Router
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message
+from html import escape
 
 from app.config import Settings
 from app.persona import SYSTEM_PERSONA
@@ -87,6 +88,40 @@ THROTTLED_REPLY = "Занадто багато повідомлень. Поче�
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _safe_html_payload(
+    text: str,
+    *,
+    wrap: tuple[str, str] | None = None,
+    limit: int = 4096,
+    ellipsis: bool = False,
+) -> str:
+    """
+    Escape text for Telegram HTML mode while respecting the length limit.
+
+    Optionally wraps the escaped text and appends an ellipsis when truncation
+    is required.
+    """
+    prefix, suffix = wrap or ("", "")
+    available = max(limit - len(prefix) - len(suffix), 0)
+    truncated = text[:available]
+    ellipsis_needed = ellipsis and len(text) > len(truncated)
+    ellipsis_str = "..." if ellipsis_needed and available >= 3 else ""
+    if ellipsis_str and len(truncated) >= len(ellipsis_str):
+        truncated = truncated[: len(truncated) - len(ellipsis_str)]
+
+    while True:
+        escaped = escape(truncated)
+        candidate_body = escaped + ellipsis_str
+        candidate = f"{prefix}{candidate_body}{suffix}"
+        if len(candidate) <= limit:
+            return candidate
+        if not truncated:
+            fallback_body = ellipsis_str if ellipsis_str else ""
+            fallback = f"{prefix}{fallback_body}{suffix}"
+            return fallback[:limit]
+        truncated = truncated[:-1]
 
 
 def _get_response(
@@ -1366,6 +1401,9 @@ async def handle_group_message(
         allowed, remaining, retry_after = await rate_limiter.check_and_increment(
             user_id=message.from_user.id
         )
+        LOGGER.info(
+            f"Rate limit check: user_id={user_id}, allowed={allowed}, remaining={remaining}, retry_after={retry_after}"
+        )
         if not allowed:
             # Only send error message if we haven't sent one recently (10 min cooldown)
             should_show_error = rate_limiter.should_send_error_message(
@@ -2532,14 +2570,92 @@ async def handle_group_message(
             if media_count > 0:
                 LOGGER.info(f"Sending {media_count} media items to Gemini")
 
+        thinking_message_sent = False
+        thinking_placeholder_sent = False
+        thinking_msg: Message | None = None
+
+        if settings.show_thinking_to_users:
+            LOGGER.info("Thinking placeholder enabled; sending immediate reply")
+            try:
+                thinking_msg = await message.reply("🤔 Думаю...")
+            except Exception as exc:
+                LOGGER.warning(f"Failed to send thinking placeholder: {exc}")
+                thinking_msg = None
+            else:
+                thinking_placeholder_sent = True
+                thinking_message_sent = True
+
         try:
-            reply_text = await gemini_client.generate(
+            response_data = await gemini_client.generate(
                 system_prompt=system_prompt_with_profile,
                 history=history,
                 user_parts=user_parts,
                 tools=tool_definitions,
                 tool_callbacks=tracked_tool_callbacks,  # type: ignore[arg-type]
             )
+            reply_text = response_data.get("text", "")
+            thinking_text = (response_data.get("thinking", "") or "").strip()
+
+            # If Gemini returned only thinking content, retry without thinking enabled
+            if (not reply_text or reply_text.isspace()) and thinking_text:
+                LOGGER.info(
+                    "Gemini returned reasoning without final text; retrying without thinking output"
+                )
+                response_data = await gemini_client.generate(
+                    system_prompt=system_prompt_with_profile,
+                    history=history,
+                    user_parts=user_parts,
+                    tools=tool_definitions,
+                    tool_callbacks=tracked_tool_callbacks,  # type: ignore[arg-type]
+                    include_thinking=False,
+                )
+                reply_text = response_data.get("text", "")
+                thinking_text = (response_data.get("thinking", "") or "").strip()
+
+            # Handle responses with thinking content (show reasoning process)
+            show_thinking = settings.show_thinking_to_users and bool(thinking_text)
+            if show_thinking:
+                LOGGER.info(
+                    "Gemini returned thinking content, showing reasoning process to user"
+                )
+                if thinking_msg is None:
+                    try:
+                        thinking_msg = await message.reply("🤔 Думаю...")
+                    except Exception as exc:
+                        LOGGER.warning(f"Failed to send thinking placeholder: {exc}")
+                        thinking_msg = None
+                if thinking_msg is not None:
+                    thinking_display = _safe_html_payload(
+                        thinking_text,
+                        wrap=("<i>", "</i>"),
+                        ellipsis=True,
+                    )
+
+                    try:
+                        await thinking_msg.edit_text(
+                            thinking_display,
+                            parse_mode=ParseMode.HTML,
+                            disable_web_page_preview=True,
+                        )
+                    except Exception as exc:
+                        LOGGER.warning(f"Failed to edit thinking message: {exc}")
+                        thinking_message_sent = False
+                        thinking_placeholder_sent = False
+                    else:
+                        # Wait a moment for user to see thinking
+                        await asyncio.sleep(0.5)
+                        thinking_placeholder_sent = True
+                        thinking_message_sent = True
+                else:
+                    thinking_message_sent = False
+                    thinking_placeholder_sent = False
+            elif thinking_text:
+                LOGGER.debug(
+                    "Thinking content suppressed (length=%s)", len(thinking_text)
+                )
+                thinking_message_sent = thinking_placeholder_sent
+            else:
+                thinking_message_sent = thinking_placeholder_sent
 
             # Check if tools were disabled during generation (API overload fallback)
             if gemini_client.tools_fallback_disabled and tool_definitions:
@@ -2756,13 +2872,30 @@ async def handle_group_message(
             )
 
         reply_trimmed = reply_text[:4096]
-        # FORMATTING DISABLED: Sending plain text, relying on system prompt
-        # reply_formatted = _format_for_telegram(reply_trimmed)
-        response_message = await message.reply(
-            reply_trimmed,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-        )
+        reply_payload = _safe_html_payload(reply_trimmed)
+
+        response_message: Message | None = None
+
+        if thinking_message_sent and thinking_msg is not None:
+            try:
+                await thinking_msg.edit_text(
+                    reply_payload,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+                response_message = thinking_msg
+            except Exception as exc:
+                LOGGER.warning(
+                    "Failed to replace thinking message with final answer: %s", exc
+                )
+                thinking_message_sent = False
+
+        if not thinking_message_sent or thinking_msg is None:
+            response_message = await message.reply(
+                reply_payload,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
 
         model_meta = _build_model_metadata(
             response=response_message,

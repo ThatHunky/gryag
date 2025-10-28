@@ -1,7 +1,8 @@
 """
 Command throttling middleware - prevents command spam.
 
-Limits all bot commands to 1 per 5 minutes per user.
+Detects and blocks spam (multiple commands within 5 seconds).
+Only processes commands registered to this bot (KNOWN_COMMANDS).
 Admins bypass this restriction.
 
 Usage:
@@ -26,10 +27,10 @@ class CommandThrottleMiddleware(BaseMiddleware):
     """
     Throttle bot commands to prevent spam.
 
-    Only throttles commands that are registered to this bot.
-    Ignores commands meant for other bots or unknown commands.
+    Only processes commands registered to this bot (KNOWN_COMMANDS).
+    Completely ignores commands meant for other bots or unknown commands.
 
-    Limits: Configurable cooldown per command (default: 5 minutes)
+    Spam Detection: 5-second cooldown (warns once, then silently ignores)
     Admins: Bypass all limits
     Disabled: If ENABLE_COMMAND_THROTTLING=false
     """
@@ -121,18 +122,9 @@ class CommandThrottleMiddleware(BaseMiddleware):
             )
             return None
 
-        # Skip throttling logic entirely if feature disabled
-        if not self.enabled:
-            return await handler(message, data)
-
         # Extract command name (without @ mention if present)
         text = message.text or ""
         command_with_args = text.split()[0] if text else ""
-
-        # Throttle all slash commands regardless of registration status.
-        # This prevents spam from unknown or deprecated commands as well.
-        # If a command explicitly targets another bot via @mention (handled below),
-        # we'll skip throttling accordingly.
 
         # Check if command is addressed to a specific bot
         # Format: /command@bot_username
@@ -145,7 +137,7 @@ class CommandThrottleMiddleware(BaseMiddleware):
                 # If command is for a different bot, don't throttle
                 if mentioned_bot.lower() != bot_username.lower():
                     logger.debug(
-                        f"Command for different bot (@{mentioned_bot}), skipping throttle",
+                        f"Command for different bot (@{mentioned_bot}), ignoring",
                         extra={
                             "user_id": message.from_user.id,
                             "command": command_with_args,
@@ -153,7 +145,28 @@ class CommandThrottleMiddleware(BaseMiddleware):
                             "our_bot": bot_username,
                         },
                     )
-                    return await handler(message, data)
+                    return None
+
+        # Extract base command name (without / and @bot_username)
+        # Examples: "/gryag" -> "gryag", "/gryag@bot" -> "gryag"
+        base_command = command_with_args.lstrip("/").split("@")[0].lower()
+
+        # Only process commands registered to this bot
+        if base_command not in self.KNOWN_COMMANDS:
+            logger.debug(
+                f"Unknown command '{base_command}', ignoring",
+                extra={
+                    "user_id": message.from_user.id,
+                    "command": command_with_args,
+                    "base_command": base_command,
+                },
+            )
+            return None
+
+        # Skip throttling logic entirely if feature disabled
+        # (but still enforce KNOWN_COMMANDS filtering above)
+        if not self.enabled:
+            return await handler(message, data)
 
         user_id = message.from_user.id
 
@@ -161,28 +174,20 @@ class CommandThrottleMiddleware(BaseMiddleware):
         if user_id in self.settings.admin_user_ids_list:
             return await handler(message, data)
 
-        # Check cooldown
+        # Check for spam (5-second cooldown)
         allowed, retry_after, should_show_error = (
             await self.rate_limiter.check_cooldown(
                 user_id=user_id,
                 feature="bot_commands",
-                cooldown_seconds=self.cooldown_seconds,
+                cooldown_seconds=5,  # 5 seconds spam detection
             )
         )
 
         if not allowed:
             # Only send error message if we haven't sent one recently (10 min cooldown)
             if should_show_error:
-                # User is throttled - show warning message
-                minutes = retry_after // 60
-                seconds = retry_after % 60
-
-                cooldown_minutes = self.cooldown_seconds // 60
-                throttle_msg = (
-                    f"<b>Зачекай трохи!</b>\n\n"
-                    f"Команди можна використовувати раз на <b>{cooldown_minutes} хвилин</b>. "
-                    f"Наступна команда через: ⏱ <b>{minutes} хв {seconds} сек</b>"
-                )
+                # User is spamming - show warning message
+                throttle_msg = "<b>Зачекай трохи!</b> Не спамуй командами."
 
                 await message.reply(throttle_msg, parse_mode="HTML")
                 logger.info(

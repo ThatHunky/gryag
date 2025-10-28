@@ -115,12 +115,13 @@ class IntentClassifier:
         )
 
         try:
-            response = await self.gemini.generate(
-                message=prompt,
-                context=[],
+            response_data = await self.gemini.generate(
                 system_prompt=self._get_intent_system_prompt(),
+                history=[],
+                user_parts=[{"text": prompt}],
             )
 
+            response = response_data.get("text", "")
             intent = self._parse_intent_response(response, window)
 
             if intent and intent.confidence >= 0.5:  # Minimum threshold

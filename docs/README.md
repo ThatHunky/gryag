@@ -16,6 +16,8 @@ Structure recommended:
 
 ## Recent Changes
 
+**October 28, 2025**: **🧠 Thinking Display Controls** — Added `SHOW_THINKING_TO_USERS` to keep Gemini’s reasoning hidden from chat participants unless explicitly enabled, escaped all reasoning/final replies for Telegram HTML safety, added `THINKING_BUDGET_TOKENS` (default 1024) for tunable chain-of-thought budgets, and added a fallback to rerun generations without thinking when Gemini returns only chain-of-thought. Verification: `.venv/bin/pytest tests/unit/test_gemini_empty_tool_response.py`.
+
 **October 27, 2025**: **🔄 Google Search Grounding** — Reaffirmed Google Search grounding with support for a separate `WEB_SEARCH_API_KEY`. Brave Search experiment disabled; no additional configuration required beyond the optional key.
 
 **October 27, 2025**: Context Pipeline Doc — Added a complete, end-to-end overview of how the model context is assembled and sent to Gemini, including `[speaker]`/`[meta]` blocks, attachments, compact mode, tool calls, and response cleanup. See `docs/overview/MODEL_CONTEXT_PIPELINE.md`. Also shipped the optional monospace “system context block” (toggle with `ENABLE_SYSTEM_CONTEXT_BLOCK`) that inlines the last N chat messages inside the system prompt while keeping media limited to the trigger/reply turns. Verification: enable DEBUG logs, turn the flag on, trigger a message, and confirm `history_length=0` with an increased `system_prompt_length` in `app/handlers/chat.py:2184`; check `system_prompt` snippet in logs for the fenced block.

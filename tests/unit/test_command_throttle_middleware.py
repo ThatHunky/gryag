@@ -79,7 +79,7 @@ async def test_passes_messages_without_text(middleware, mock_message, mock_handl
 @pytest.mark.asyncio
 async def test_passes_admin_commands(middleware, mock_message, mock_handler):
     """Test that admin commands bypass throttling."""
-    mock_message.text = "/admin_command"
+    mock_message.text = "/gryag"
     mock_message.from_user.id = 12345  # Admin
     data = {}
 
@@ -110,12 +110,12 @@ async def test_throttles_regular_user_commands(
     middleware, mock_message, mock_handler, mock_rate_limiter
 ):
     """Test that regular user commands are throttled when cooldown active."""
-    mock_message.text = "/command"
+    mock_message.text = "/gryag"
     mock_rate_limiter.check_cooldown.return_value = (
         False,
-        120,
+        5,
         True,
-    )  # Not allowed, 120s remaining
+    )  # Not allowed, 5s remaining
     data = {}
 
     with patch.object(mock_message, "reply", new_callable=AsyncMock) as mock_reply:
@@ -128,14 +128,14 @@ async def test_throttles_regular_user_commands(
 
 @pytest.mark.asyncio
 async def test_ignores_commands_for_other_bots(middleware, mock_message, mock_handler):
-    """Test that commands addressed to other bots are ignored."""
-    mock_message.text = "/command@other_bot"
+    """Test that commands addressed to other bots are completely ignored."""
+    mock_message.text = "/gryag@other_bot"
     data = {"bot_username": "gryag_bot"}
 
     result = await middleware(mock_handler, mock_message, data)
 
-    assert result == "handler_result"
-    mock_handler.assert_called_once()
+    assert result is None  # Completely ignored
+    mock_handler.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -143,8 +143,8 @@ async def test_throttles_commands_for_this_bot(
     middleware, mock_message, mock_handler, mock_rate_limiter
 ):
     """Test that commands addressed to this bot are throttled."""
-    mock_message.text = "/command@gryag_bot"
-    mock_rate_limiter.check_cooldown.return_value = (False, 120, True)  # Not allowed
+    mock_message.text = "/gryag@gryag_bot"
+    mock_rate_limiter.check_cooldown.return_value = (False, 5, True)  # Not allowed
     data = {"bot_username": "gryag_bot"}
 
     with patch.object(mock_message, "reply", new_callable=AsyncMock) as mock_reply:
@@ -160,7 +160,7 @@ async def test_case_insensitive_bot_username_matching(
     middleware, mock_message, mock_handler
 ):
     """Test that bot username matching is case-insensitive."""
-    mock_message.text = "/command@GRYAG_BOT"
+    mock_message.text = "/gryag@GRYAG_BOT"
     data = {"bot_username": "gryag_bot"}
 
     # Should throttle because it's for this bot (case-insensitive match)
@@ -168,34 +168,33 @@ async def test_case_insensitive_bot_username_matching(
 
     # Will pass through since cooldown check passes by default
     assert result == "handler_result"
+    mock_handler.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_generic_commands_without_bot_mention(
+async def test_ignores_unknown_commands(
     middleware, mock_message, mock_handler, mock_rate_limiter
 ):
-    """Test that generic commands (no @bot) are throttled."""
-    mock_message.text = "/start"
-    mock_rate_limiter.check_cooldown.return_value = (False, 180, True)  # Not allowed
+    """Test that unknown commands (not in KNOWN_COMMANDS) are completely ignored."""
+    mock_message.text = "/start"  # Not in KNOWN_COMMANDS
     data = {"bot_username": "gryag_bot"}
 
-    with patch.object(mock_message, "reply", new_callable=AsyncMock) as mock_reply:
-        result = await middleware(mock_handler, mock_message, data)
+    result = await middleware(mock_handler, mock_message, data)
 
-    assert result is None  # Blocked
+    assert result is None  # Completely ignored
     mock_handler.assert_not_called()
-    mock_reply.assert_called_once()
+    mock_rate_limiter.check_cooldown.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_disabled_throttling(
     mock_settings, mock_rate_limiter, mock_message, mock_handler
 ):
-    """Test that middleware passes through when throttling is disabled."""
+    """Test that middleware passes through when throttling is disabled (but still filters KNOWN_COMMANDS)."""
     mock_settings.enable_command_throttling = False
     middleware = CommandThrottleMiddleware(mock_settings, mock_rate_limiter)
 
-    mock_message.text = "/command"
+    mock_message.text = "/gryag"
     data = {}
 
     result = await middleware(mock_handler, mock_message, data)
@@ -211,10 +210,10 @@ async def test_silent_throttling(
     middleware, mock_message, mock_handler, mock_rate_limiter
 ):
     """Test that error messages are suppressed when should_show_error is False."""
-    mock_message.text = "/command"
+    mock_message.text = "/gryag"
     mock_rate_limiter.check_cooldown.return_value = (
         False,
-        120,
+        5,
         False,
     )  # Not allowed, suppress error
     data = {}
@@ -231,22 +230,22 @@ async def test_silent_throttling(
 async def test_command_with_parameters_and_bot_mention(
     middleware, mock_message, mock_handler
 ):
-    """Test commands with parameters and bot mentions are correctly parsed."""
-    mock_message.text = "/command@other_bot param1 param2"
+    """Test commands with parameters and bot mentions are correctly parsed and ignored if for another bot."""
+    mock_message.text = "/gryag@other_bot param1 param2"
     data = {"bot_username": "gryag_bot"}
 
     result = await middleware(mock_handler, mock_message, data)
 
-    assert result == "handler_result"
-    mock_handler.assert_called_once()
+    assert result is None  # Completely ignored
+    mock_handler.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_no_bot_username_in_data(
     middleware, mock_message, mock_handler, mock_rate_limiter
 ):
-    """Test that commands are throttled even when bot_username is not in data."""
-    mock_message.text = "/command@some_bot"
+    """Test that commands are processed when bot_username is not in data (can't determine if for another bot)."""
+    mock_message.text = "/gryag@some_bot"
     mock_rate_limiter.check_cooldown.return_value = (True, 0, False)
     data = {}  # No bot_username
 

@@ -432,7 +432,7 @@ class GeminiClient:
 
         for attempt in range(max(1, attempts)):
             client, key = await self._acquire_client()
-            
+
             # Retry loop for transient server errors
             for retry in range(server_error_retries):
                 try:
@@ -455,13 +455,13 @@ class GeminiClient:
                         await self._mark_quota(key)
                         last_quota_exc = exc
                         break  # Break inner loop, try next key
-                    
+
                     # Handle transient server errors (503, 500, etc.)
                     if self._is_server_error(exc):
                         last_server_exc = exc
                         if retry < server_error_retries - 1:
                             # Exponential backoff: 1s, 2s, 4s
-                            backoff = 2 ** retry
+                            backoff = 2**retry
                             self._logger.warning(
                                 f"Server error (503/500), retry {retry + 1}/{server_error_retries} "
                                 f"after {backoff}s: {exc}"
@@ -474,14 +474,14 @@ class GeminiClient:
                                 f"Server error persisted after {server_error_retries} retries: {exc}"
                             )
                             break  # Break inner loop, try next key or fail
-                    
+
                     # Other errors - propagate immediately
                     raise
 
         # If we exhausted all keys due to quota errors
         if last_quota_exc:
             raise last_quota_exc
-        
+
         # If we exhausted retries due to server errors
         if last_server_exc:
             raise GeminiError(

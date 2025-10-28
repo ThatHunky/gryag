@@ -196,8 +196,8 @@ class DonationScheduler:
             async with aiosqlite.connect(self.db_path) as db:
                 cursor = await db.execute(
                     """
-                    SELECT COUNT(*) FROM conversation_history
-                    WHERE chat_id = ? AND role = 'model' AND timestamp >= ?
+                    SELECT COUNT(*) FROM messages
+                    WHERE chat_id = ? AND role = 'model' AND ts >= ?
                     """,
                     (chat_id, activity_cutoff),
                 )

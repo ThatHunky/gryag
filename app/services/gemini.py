@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable, Iterable, cast
 
 from google import genai
 from google.genai import types
+from google.genai.errors import ServerError
 
 from app.services import telemetry
 from app.services.embedding_cache import EmbeddingCache
@@ -206,6 +207,20 @@ class GeminiClient:
             or "quota" in message
             or "rate limit" in message
             or "resourceexhausted" in message
+        )
+
+    @staticmethod
+    def _is_server_error(exc: Exception) -> bool:
+        """Check if error is a transient server error (503, 500, etc.)."""
+        if isinstance(exc, ServerError):
+            return True
+        message = f"{type(exc).__name__} {exc}".lower()
+        return (
+            "503" in message
+            or "500" in message
+            or "unavailable" in message
+            or "overloaded" in message
+            or "servererror" in message
         )
 
     @staticmethod
@@ -412,32 +427,66 @@ class GeminiClient:
 
         attempts = len(self._api_keys) if self._free_tier_mode else 1
         last_quota_exc: Exception | None = None
+        last_server_exc: Exception | None = None
+        server_error_retries = 3  # Retry server errors up to 3 times
 
-        for _ in range(max(1, attempts)):
+        for attempt in range(max(1, attempts)):
             client, key = await self._acquire_client()
-            try:
-                # New SDK uses client.models.generate_content (async by default)
-                payload = cast(types.ContentListUnionDict, contents)
-                response = await asyncio.wait_for(
-                    client.aio.models.generate_content(
-                        model=self._model_name,
-                        contents=payload,
-                        config=config,
-                    ),
-                    timeout=self._generate_timeout,
-                )
-                return response
-            except asyncio.TimeoutError as exc:
-                raise GeminiError("Gemini request timed out") from exc
-            except Exception as exc:
-                if self._is_quota_error(exc):
-                    await self._mark_quota(key)
-                    last_quota_exc = exc
-                    continue
-                raise
+            
+            # Retry loop for transient server errors
+            for retry in range(server_error_retries):
+                try:
+                    # New SDK uses client.models.generate_content (async by default)
+                    payload = cast(types.ContentListUnionDict, contents)
+                    response = await asyncio.wait_for(
+                        client.aio.models.generate_content(
+                            model=self._model_name,
+                            contents=payload,
+                            config=config,
+                        ),
+                        timeout=self._generate_timeout,
+                    )
+                    return response
+                except asyncio.TimeoutError as exc:
+                    raise GeminiError("Gemini request timed out") from exc
+                except Exception as exc:
+                    # Handle quota errors (rotate keys)
+                    if self._is_quota_error(exc):
+                        await self._mark_quota(key)
+                        last_quota_exc = exc
+                        break  # Break inner loop, try next key
+                    
+                    # Handle transient server errors (503, 500, etc.)
+                    if self._is_server_error(exc):
+                        last_server_exc = exc
+                        if retry < server_error_retries - 1:
+                            # Exponential backoff: 1s, 2s, 4s
+                            backoff = 2 ** retry
+                            self._logger.warning(
+                                f"Server error (503/500), retry {retry + 1}/{server_error_retries} "
+                                f"after {backoff}s: {exc}"
+                            )
+                            await asyncio.sleep(backoff)
+                            continue
+                        else:
+                            # Last retry failed, let it propagate or try next key
+                            self._logger.error(
+                                f"Server error persisted after {server_error_retries} retries: {exc}"
+                            )
+                            break  # Break inner loop, try next key or fail
+                    
+                    # Other errors - propagate immediately
+                    raise
 
+        # If we exhausted all keys due to quota errors
         if last_quota_exc:
             raise last_quota_exc
+        
+        # If we exhausted retries due to server errors
+        if last_server_exc:
+            raise GeminiError(
+                "Gemini servers are overloaded, please try again later"
+            ) from last_server_exc
 
         raise GeminiError("Gemini request failed after rotating API keys")
 
@@ -618,13 +667,20 @@ class GeminiClient:
         except Exception as exc:  # pragma: no cover - network failure paths
             err_text = str(exc)
 
+            # Check for server errors (503, 500) - these are already retried in _invoke_model
+            # If we get here, retries were exhausted
+            if self._is_server_error(exc):
+                self._logger.error(
+                    f"Gemini server overloaded after retries: {err_text[:200]}. "
+                    f"This is a temporary issue on Google's side."
+                )
+                self._record_failure()
+                raise GeminiError(
+                    "Gemini servers are temporarily overloaded. Please try again in a moment."
+                ) from exc
+
             # Check for rate limit errors (429)
-            is_rate_limit = (
-                "429" in err_text
-                or "quota" in err_text.lower()
-                or "rate limit" in err_text.lower()
-                or "ResourceExhausted" in str(type(exc))
-            )
+            is_rate_limit = self._is_quota_error(exc)
 
             if is_rate_limit:
                 self._logger.warning(

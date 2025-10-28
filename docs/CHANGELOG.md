@@ -5,6 +5,29 @@ All notable changes to gryag's memory, context, and learning systems.
 
 ## [Unreleased]
 
+### 2025-10-28 — Gemini 503 Error Resilience
+
+**Summary**: Added automatic retry logic with exponential backoff for Gemini 503 "server overloaded" errors, improving reliability during peak API usage.
+
+**Changes**:
+- Implemented server error detection (`_is_server_error()`) for 503/500 responses
+- Added retry loop (3 attempts) with exponential backoff (1s, 2s, 4s) in `_invoke_model()`
+- Better error messages distinguishing server overload vs quota limits
+- Enhanced logging for debugging retry attempts
+- Fixed donation scheduler querying non-existent `conversation_history` table (should use `messages` with `ts` column)
+
+**Impact**:
+- Most transient 503 errors now succeed after automatic retry
+- Episode summarization more resilient during API overload
+- No user-facing changes - transparent retry logic
+- Max 7 seconds additional latency only when servers actually overloaded
+
+**Verification**:
+```bash
+# Watch for retry messages in logs
+docker-compose logs -f bot | grep -E "Server error|retry"
+```
+
 ### 2025-10-28 — Safer Thinking Display Controls
 
 **Summary**: Guarded Gemini’s chain-of-thought output behind configuration, sanitized Telegram replies, and retried generations when only reasoning was returned.

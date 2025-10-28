@@ -32,8 +32,8 @@ class Settings(BaseSettings):
     gemini_embed_model: str = Field(
         "models/text-embedding-004", alias="GEMINI_EMBED_MODEL"
     )
-    gemini_enable_thinking: bool = Field(False, alias="GEMINI_ENABLE_THINKING")
-    show_thinking_to_users: bool = Field(False, alias="SHOW_THINKING_TO_USERS")
+    gemini_enable_thinking: bool = Field(True, alias="GEMINI_ENABLE_THINKING")
+    show_thinking_to_users: bool = Field(True, alias="SHOW_THINKING_TO_USERS")
     thinking_budget_tokens: int = Field(
         1024, alias="THINKING_BUDGET_TOKENS", ge=64, le=4096
     )
@@ -62,6 +62,16 @@ class Settings(BaseSettings):
     )
     memory_limit_per_hour: int = Field(30, alias="MEMORY_LIMIT_PER_HOUR", ge=1, le=100)
     poll_limit_per_day: int = Field(5, alias="POLL_LIMIT_PER_DAY", ge=1, le=20)
+
+    # Processing lock configuration (prevent multiple simultaneous messages per user)
+    enable_processing_lock: bool = Field(True, alias="ENABLE_PROCESSING_LOCK")
+    processing_lock_use_redis: bool = Field(
+        True, alias="PROCESSING_LOCK_USE_REDIS"
+    )  # Use Redis if available
+    processing_lock_ttl_seconds: int = Field(
+        300, alias="PROCESSING_LOCK_TTL_SECONDS", ge=30, le=3600
+    )  # Lock timeout (safety)
+
     use_redis: bool = Field(False, alias="USE_REDIS")
     redis_url: str | None = Field("redis://localhost:6379/0", alias="REDIS_URL")
     admin_user_ids: str = Field("", alias="ADMIN_USER_IDS")

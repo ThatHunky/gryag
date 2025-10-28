@@ -124,7 +124,10 @@ class MultiLevelContextManager:
         self._immediate_cache: dict[
             tuple[int, int | None], tuple[list[dict], float]
         ] = {}
-        self._cache_ttl = 60  # 1 minute
+        self._cache_ttl = 300  # 5 minutes (increase from 1 min)
+        # Persistent cache for recent chats (last N)
+        self._recent_cache: dict[tuple[int, int | None], tuple[list[dict], float]] = {}
+        self._recent_cache_size = 20  # Cache last 20 chats
 
     async def build_context(
         self,
@@ -323,18 +326,16 @@ class MultiLevelContextManager:
         """
         Get immediate context - last few messages.
 
-        Cached for 1 minute for performance.
+        Cached for 5 minutes for performance. Also uses persistent cache for recent chats.
         """
         cache_key = (chat_id, thread_id)
         now = time.time()
 
-        # Check cache
+        # Check immediate cache
         if cache_key in self._immediate_cache:
             messages, cache_time = self._immediate_cache[cache_key]
             if now - cache_time < self._cache_ttl:
                 tokens = self._estimate_tokens(messages)
-
-                # Debug: Log media presence
                 media_count = sum(
                     1
                     for msg in messages
@@ -346,21 +347,26 @@ class MultiLevelContextManager:
                     LOGGER.debug(
                         f"Immediate context (cached) contains {media_count} media items"
                     )
-
                 return ImmediateContext(
                     messages=messages,
                     token_count=tokens,
                 )
 
+        # Check persistent recent cache
+        if cache_key in self._recent_cache:
+            messages, cache_time = self._recent_cache[cache_key]
+            tokens = self._estimate_tokens(messages)
+            LOGGER.debug(f"Immediate context (persistent cache) hit for chat {chat_id}")
+            return ImmediateContext(
+                messages=messages,
+                token_count=tokens,
+            )
+
         # Fetch recent messages
-        # immediate_context_size is in messages, but recent() expects turns (pairs)
-        # Convert message count to turn count (divide by 2, round up)
         limit = (self.settings.immediate_context_size + 1) // 2
         messages = await self.context_store.recent(chat_id, thread_id, limit)
-        # Filter and sanitize fetched messages before further processing
         messages = self._filter_history(messages)
 
-        # Debug: Log media presence before truncation
         media_count_before = sum(
             1
             for msg in messages
@@ -372,10 +378,8 @@ class MultiLevelContextManager:
                 f"Retrieved {len(messages)} messages with {media_count_before} media items"
             )
 
-        # Truncate to budget
         messages = self._truncate_to_budget(messages, max_tokens)
 
-        # Debug: Log media presence after truncation
         media_count_after = sum(
             1
             for msg in messages
@@ -388,8 +392,15 @@ class MultiLevelContextManager:
                 f"(lost {media_count_before - media_count_after})"
             )
 
-        # Cache it
+        # Cache it (immediate and persistent)
         self._immediate_cache[cache_key] = (messages, now)
+        self._recent_cache[cache_key] = (messages, now)
+        # Enforce persistent cache size
+        if len(self._recent_cache) > self._recent_cache_size:
+            # Remove oldest
+            oldest = sorted(self._recent_cache.items(), key=lambda x: x[1][1])[:1]
+            for k, _ in oldest:
+                del self._recent_cache[k]
 
         tokens = self._estimate_tokens(messages)
 

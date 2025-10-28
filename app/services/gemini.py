@@ -283,12 +283,26 @@ class GeminiClient:
         """
         Detect if the model supports returning thinking/thought parts.
 
-        Only dedicated reasoning/thinking models surface these parts; default
-        flash/pro models ignore the flag.
+        All Gemini 2.5 series models support thinking:
+        - gemini-2.5-flash / gemini-flash-latest (thinkingBudget: 0-24576)
+        - gemini-2.5-pro / gemini-pro-latest (thinkingBudget: 128-32768)
+        - gemini-2.5-flash-lite (thinkingBudget: 512-24576)
+
+        See: https://ai.google.dev/gemini-api/docs/thinking
         """
         model_lower = model_name.lower()
-        keywords = ("thinking", "reasoning", "pro", "exp")
-        return any(keyword in model_lower for keyword in keywords)
+
+        # All Gemini 2.5 series models support thinking
+        if "2.5" in model_lower or "2-5" in model_lower:
+            return True
+
+        # -latest variants map to 2.5 series (as of Oct 2025)
+        if "flash-latest" in model_lower or "pro-latest" in model_lower:
+            return True
+
+        # Legacy/experimental thinking models
+        thinking_keywords = ("thinking", "reasoning", "exp")
+        return any(keyword in model_lower for keyword in thinking_keywords)
 
     def _resolve_thinking(self, override: bool | None) -> bool:
         """

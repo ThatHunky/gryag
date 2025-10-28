@@ -5,6 +5,147 @@ All notable changes to gryag's memory, context, and learning systems.
 
 ## [Unreleased]
 
+### 2025-10-28 — Processing Lock Only for Bot Messages
+
+**Summary**: Fixed processing lock to only apply to bot-addressed messages, not ALL user messages. Users can now chat normally while bot processes someone else's message.
+
+**Changes**:
+- **Moved processing lock check from middleware to handler** (`app/handlers/chat.py`):
+  - Lock now checked AFTER `is_addressed` check (line ~1410)
+  - Only bot-triggered messages acquire the processing lock
+  - Users can send messages to each other without being blocked
+- **Updated `ProcessingLockMiddleware`** (`app/middlewares/processing_lock.py`):
+  - Now provides helper functions instead of enforcing lock directly
+  - Handlers call `_processing_lock_check()` and `_processing_lock_set()` when needed
+- **Admin bypass still works**: Admins can send multiple bot messages simultaneously
+
+**Root Cause**:
+The middleware was checking locks for ALL messages before determining if they were addressed to the bot. This blocked normal user-to-user conversation.
+
+**Impact**:
+- ✅ Users can chat normally even when bot is busy
+- ✅ Lock only applies when user triggers the bot
+- ✅ No more "Dropping message" logs for regular chat messages
+- ✅ Admin bypass still functional
+
+**Verification**:
+```bash
+# Send multiple messages without triggering bot - should NOT be dropped
+# Then trigger bot multiple times - second message should be dropped
+docker-compose logs -f bot | grep "Dropping"
+```
+
+### 2025-10-28 — Thinking Display Timing Increased
+
+**Summary**: Increased thinking message display duration from 0.5s to 3.0s to give users sufficient time to read the bot's reasoning process before showing the final answer.
+
+**Changes**:
+- **Updated thinking display timing in `app/handlers/chat.py`**:
+  - Initial "🤔 Думаю..." placeholder now shows for 3 seconds (was instant)
+  - Thinking content display increased from 0.5s to 3.0s
+  - Ensures users have time to read the reasoning before final answer appears
+
+**Impact**:
+- ✅ Users can actually read thinking content before it gets replaced
+- ✅ Better UX: bot appears more thoughtful and deliberate
+- ⚠️ Responses take 3 seconds longer when thinking is shown
+
+**Verification**:
+```bash
+# Enable thinking in .env
+SHOW_THINKING_TO_USERS=true
+
+# Send message and observe 3-second delay with thinking content
+docker-compose logs -f bot | grep "thinking enabled: True"
+```
+
+### 2025-10-28 — Gemini 2.5 Thinking Support Fix
+
+**Summary**: Fixed thinking mode detection logic to correctly recognize that all Gemini 2.5 series models support thinking (2.5-flash, 2.5-pro, 2.5-flash-lite), including `-latest` variants, as per official Google documentation.
+
+**Changes**:
+- **Fixed `_detect_thinking_support()` in `app/services/gemini.py`**:
+  - Now correctly detects all Gemini 2.5 series models (`2.5` or `2-5` in name)
+  - Added support for `-latest` variants (`gemini-flash-latest`, `gemini-pro-latest`)
+  - Updated docstring with official thinking budget ranges from Google docs
+  - Removed incorrect assumption that only "pro"/"reasoning"/"thinking" keywords indicate support
+  - Reference: https://ai.google.dev/gemini-api/docs/thinking
+
+**Root Cause**:
+The detection logic was checking for keywords like "pro", "thinking", "reasoning" but **Gemini 2.5 Flash** doesn't contain any of those words, so it was incorrectly marked as unsupported despite Google's documentation clearly stating "Thinking features are supported on all the 2.5 series models."
+
+**Impact**:
+- ✅ `gemini-2.5-flash` now correctly enables thinking mode
+- ✅ `gemini-2.5-pro` now correctly enables thinking mode  
+- ✅ `gemini-2.5-flash-lite` now correctly enables thinking mode
+- ✅ `gemini-flash-latest` now correctly enables thinking mode (maps to 2.5-flash)
+- ✅ `gemini-pro-latest` now correctly enables thinking mode (maps to 2.5-pro)
+- ✅ Thinking budgets (0-24576 for Flash, 128-32768 for Pro) now respected
+- ✅ No more false "model does not appear to support thinking output" warnings
+
+**Verification**:
+```bash
+# Test detection logic
+.venv/bin/python3 -c "from app.services.gemini import GeminiClient; print(GeminiClient._detect_thinking_support('gemini-2.5-flash'))"
+# Expected: True
+
+# Test -latest variants
+.venv/bin/python3 -c "from app.services.gemini import GeminiClient; print(GeminiClient._detect_thinking_support('gemini-flash-latest'))"
+# Expected: True
+
+# Run all tests
+.venv/bin/pytest tests/unit/test_gemini_thinking_detection.py -v
+# Expected: 18 passed
+
+# Check logs after restart
+docker-compose restart bot && docker-compose logs -f bot | grep thinking
+# Should see "thinking enabled: True" instead of warning
+```
+
+### 2025-10-28 — Processing Lock & Thinking Mode Fixes
+
+**Summary**: Added per-user message processing lock to prevent queue buildup and multiple simultaneous responses. Fixed thinking mode configuration not being respected from environment variables.
+
+**Changes**:
+- **Processing Lock Middleware** (`app/middlewares/processing_lock.py`):
+  - Prevents processing multiple messages from the same user simultaneously
+  - Drops subsequent messages while bot is processing the first one
+  - Uses Redis for distributed deployments (falls back to in-memory)
+  - Per-user locks: `(chat_id, user_id)` ensures users don't block each other
+  - Admin bypass: admins can always send messages
+  - Safety TTL: 5-minute timeout prevents permanent locks
+  - Telemetry: tracks dropped messages via `chat.dropped_during_processing`
+- **Configuration** (`app/config.py`):
+  - Added `enable_processing_lock` (default: `True`)
+  - Added `processing_lock_use_redis` (default: `True`)
+  - Added `processing_lock_ttl_seconds` (default: 300, range: 30-3600)
+  - Fixed `gemini_enable_thinking` default from `False` to `True`
+  - Fixed `show_thinking_to_users` default from `False` to `True`
+- **Environment Variables** (`.env.example`):
+  - Added `ENABLE_PROCESSING_LOCK=true`
+  - Added `PROCESSING_LOCK_USE_REDIS=true`
+  - Added `PROCESSING_LOCK_TTL_SECONDS=300`
+
+**Impact**:
+- ✅ No more cascading responses to outdated messages
+- ✅ Reduced API waste on stale messages
+- ✅ Better UX: bot only responds to current context
+- ✅ Thinking mode now works as configured in `.env`
+- ⚠️ Messages sent during processing are silently dropped (logged)
+
+**Verification**:
+```bash
+# Test processing lock (send multiple messages quickly)
+# Expected: Only first message processed, others dropped with log entry
+
+# Test thinking mode
+docker-compose logs -f bot | grep "thinking enabled: True"
+# Should show "thinking enabled: True" instead of False
+
+# Monitor dropped messages
+docker-compose logs -f bot | grep "Dropping message"
+```
+
 ### 2025-10-28 — Gemini 503 Error Resilience
 
 **Summary**: Added automatic retry logic with exponential backoff for Gemini 503 "server overloaded" errors, improving reliability during peak API usage.

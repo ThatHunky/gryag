@@ -404,7 +404,9 @@ def _extract_meta_value(meta_text: str, key: str) -> str | None:
     return match.group(1) or match.group(2)
 
 
-def _extract_meta_and_text(parts: list[dict[str, Any]]) -> tuple[str | None, str | None]:
+def _extract_meta_and_text(
+    parts: list[dict[str, Any]],
+) -> tuple[str | None, str | None]:
     meta_text: str | None = None
     text_fragments: list[str] = []
 
@@ -471,9 +473,13 @@ def _build_system_context_block(
 
     if reply_context:
         reply_message_id = (
-            str(reply_context.get("message_id")) if reply_context.get("message_id") else None
+            str(reply_context.get("message_id"))
+            if reply_context.get("message_id")
+            else None
         )
-        reply_media_marker = _media_marker_from_media(reply_raw_media, reply_media_parts)
+        reply_media_marker = _media_marker_from_media(
+            reply_raw_media, reply_media_parts
+        )
         reply_text = reply_context.get("text") or reply_context.get("excerpt")
         reply_user_id = reply_context.get("user_id")
         reply_name = reply_context.get("name")
@@ -497,7 +503,9 @@ def _build_system_context_block(
             meta_text = None
 
         display_text = text_content or ""
-        message_id = _extract_meta_value(meta_text or "", "message_id") if meta_text else None
+        message_id = (
+            _extract_meta_value(meta_text or "", "message_id") if meta_text else None
+        )
         if message_id and reply_message_id and message_id == reply_message_id:
             reply_in_history = True
             if reply_media_marker:
@@ -512,7 +520,9 @@ def _build_system_context_block(
             )
         )
 
-    trigger_media_marker = _media_marker_from_media(trigger_raw_media, trigger_media_parts)
+    trigger_media_marker = _media_marker_from_media(
+        trigger_raw_media, trigger_media_parts
+    )
     trigger_text = trigger_text or ""
     trigger_text = sanitize_placeholder_text(trigger_text)
     trigger_text = " ".join(trigger_text.split())
@@ -543,9 +553,7 @@ def _build_system_context_block(
             "username": reply_username,
             "is_bot": reply_is_bot,
         }
-        reply_meta_text = (
-            format_metadata(reply_meta_dict) if include_meta else None
-        )
+        reply_meta_text = format_metadata(reply_meta_dict) if include_meta else None
         reply_line = (
             "user" if not reply_is_bot else "bot",
             reply_meta_text,
@@ -1326,6 +1334,9 @@ async def handle_group_message(
     image_gen_service: ImageGenerationService | None = None,
     feature_limiter: Any | None = None,
     memory_repo: MemoryRepository | None = None,
+    chat_profile_store: Any | None = None,
+    donation_scheduler: Any | None = None,
+    data: dict[str, Any] | None = None,
 ):
     if message.from_user is None or message.from_user.is_bot:
         LOGGER.debug("Ignoring message: no from_user or is_bot")
@@ -1393,8 +1404,126 @@ async def handle_group_message(
     )
     user_id = message.from_user.id
 
-    # Check admin status first (admins bypass rate limiting)
+    # Ensure data dict exists
+    if data is None:
+        data = {}
+
+    # Check admin status first (admins bypass rate limiting and processing locks)
     is_admin = user_id in settings.admin_user_ids_list
+
+    # Processing lock: Check if already processing a message from this user
+    # (Skip for admins)
+    if not is_admin:
+        lock_key = (chat_id, user_id)
+
+        # Check if processing (via middleware data)
+        processing_check = data.get("_processing_lock_check")
+        if processing_check:
+            is_processing = await processing_check(lock_key)
+            if is_processing:
+                # Drop the message silently
+                LOGGER.info(
+                    "Dropping bot-addressed message from user %s in chat %s "
+                    "(already processing previous message) - message_id=%s",
+                    user_id,
+                    chat_id,
+                    message.message_id,
+                )
+                telemetry.increment_counter(
+                    "chat.dropped_during_processing",
+                    user_id=user_id,
+                    chat_id=chat_id,
+                )
+                return  # Drop message
+
+        # Acquire lock
+        processing_set = data.get("_processing_lock_set")
+        if processing_set:
+            await processing_set(lock_key, True)
+            LOGGER.debug(
+                "Processing lock acquired for user %s in chat %s (message_id=%s)",
+                user_id,
+                chat_id,
+                message.message_id,
+            )
+
+    # Ensure lock is released in finally block
+    try:
+        await _handle_bot_message_locked(
+            message=message,
+            bot=bot,
+            settings=settings,
+            store=store,
+            gemini_client=gemini_client,
+            profile_store=profile_store,
+            chat_profile_store=chat_profile_store,
+            hybrid_search=hybrid_search,
+            episodic_memory=episodic_memory,
+            episode_monitor=episode_monitor,
+            bot_profile=bot_profile,
+            bot_learning=bot_learning,
+            prompt_manager=prompt_manager,
+            feature_limiter=feature_limiter,
+            multi_level_context_manager=multi_level_context_manager,
+            redis_client=redis_client,
+            rate_limiter=rate_limiter,
+            persona_loader=persona_loader,
+            image_gen_service=image_gen_service,
+            donation_scheduler=donation_scheduler,
+            memory_repo=memory_repo,
+            bot_username=bot_username,
+            bot_id=bot_id,
+            is_admin=is_admin,
+            user_id=user_id,
+            chat_id=message.chat.id,
+            thread_id=message.message_thread_id,
+            data=data,
+        )
+    finally:
+        # Release lock
+        if not is_admin:
+            processing_set = data.get("_processing_lock_set")
+            if processing_set:
+                await processing_set(lock_key, False)
+                LOGGER.debug(
+                    "Processing lock released for user %s in chat %s (message_id=%s)",
+                    user_id,
+                    chat_id,
+                    message.message_id,
+                )
+
+
+async def _handle_bot_message_locked(
+    message: Message,
+    bot: Bot,
+    settings: Settings,
+    store: ContextStore,
+    gemini_client: GeminiClient,
+    profile_store: UserProfileStore,
+    chat_profile_store: Any,
+    hybrid_search: HybridSearchEngine,
+    episodic_memory: EpisodicMemoryStore,
+    episode_monitor: Any,
+    bot_profile: Any,
+    bot_learning: Any,
+    prompt_manager: SystemPromptManager,
+    feature_limiter: Any,
+    multi_level_context_manager: MultiLevelContextManager,
+    redis_client: RedisLike | None,
+    rate_limiter: RateLimiter | None,
+    persona_loader: Any,
+    image_gen_service: ImageGenerationService | None,
+    donation_scheduler: Any,
+    memory_repo: MemoryRepository,
+    bot_username: str,
+    bot_id: int | None,
+    is_admin: bool,
+    user_id: int,
+    chat_id: int,
+    thread_id: int | None,
+    data: dict[str, Any],
+) -> None:
+    """Handle bot-addressed message with processing lock acquired."""
 
     # Rate limiting (skip for admins)
     if not is_admin and rate_limiter is not None:
@@ -1710,7 +1839,9 @@ async def handle_group_message(
 
     if use_system_context_block:
         target_thread_for_block = (
-            thread_id if (settings.system_context_block_thread_only and thread_id is not None) else None
+            thread_id
+            if (settings.system_context_block_thread_only and thread_id is not None)
+            else None
         )
         max_turns_for_block = max(
             1, math.ceil(settings.system_context_block_max_messages / 2)
@@ -1849,9 +1980,18 @@ async def handle_group_message(
         store=store, gemini_client=gemini_client, chat_id=chat_id, thread_id=thread_id
     )
 
-    # Centralized tool definitions (registry)
+    # Centralized tool definitions (registry) with caching
     # Note: Memory tools are already included in build_tool_definitions_registry
-    tool_definitions: list[dict[str, Any]] = build_tool_definitions_registry(settings)
+    global _TOOL_DEFINITIONS_CACHE, _TOOL_DEFINITIONS_SETTINGS_CACHE
+    if '_TOOL_DEFINITIONS_CACHE' not in globals():
+        _TOOL_DEFINITIONS_CACHE = None
+        _TOOL_DEFINITIONS_SETTINGS_CACHE = None
+    if _TOOL_DEFINITIONS_CACHE is None or _TOOL_DEFINITIONS_SETTINGS_CACHE != settings:
+        tool_definitions: list[dict[str, Any]] = build_tool_definitions_registry(settings)
+        _TOOL_DEFINITIONS_CACHE = tool_definitions
+        _TOOL_DEFINITIONS_SETTINGS_CACHE = settings
+    else:
+        tool_definitions: list[dict[str, Any]] = _TOOL_DEFINITIONS_CACHE
 
     # Enrich with user profile context
     # Note: If using multi-level context, profile is already included
@@ -1879,32 +2019,42 @@ async def handle_group_message(
 
     timestamp_context = f"\n\n# Current Time\n\nThe current time is: {current_time}"
 
-    # Fetch custom system prompt from database (if configured by admin)
-    base_system_prompt = SYSTEM_PERSONA
-
-    # Use persona from loader if available
-    if persona_loader is not None:
-        try:
-            base_system_prompt = persona_loader.get_system_prompt(
-                current_time=current_time
-            )
-        except Exception as e:
-            LOGGER.warning(
-                f"Failed to get system prompt from persona loader, using default: {e}"
-            )
-
-    if prompt_manager:
-        try:
-            custom_prompt = await prompt_manager.get_active_prompt(chat_id=chat_id)
-            if custom_prompt:
-                base_system_prompt = custom_prompt.prompt_text
-                LOGGER.debug(
-                    f"Using custom system prompt: version={custom_prompt.version}, "
-                    f"scope={custom_prompt.scope}, chat_id={custom_prompt.chat_id}"
+    # System prompt caching (static persona only, dynamic persona disables cache)
+    global _SYSTEM_PROMPT_CACHE, _SYSTEM_PROMPT_PERSONA_LOADER_CACHE, _SYSTEM_PROMPT_CHAT_ID_CACHE
+    if '_SYSTEM_PROMPT_CACHE' not in globals():
+        _SYSTEM_PROMPT_CACHE = None
+        _SYSTEM_PROMPT_PERSONA_LOADER_CACHE = None
+        _SYSTEM_PROMPT_CHAT_ID_CACHE = None
+    cacheable = persona_loader is None and not prompt_manager
+    if cacheable and _SYSTEM_PROMPT_CACHE is not None:
+        base_system_prompt = _SYSTEM_PROMPT_CACHE
+    else:
+        base_system_prompt = SYSTEM_PERSONA
+        # Use persona from loader if available
+        if persona_loader is not None:
+            try:
+                base_system_prompt = persona_loader.get_system_prompt(
+                    current_time=current_time
                 )
-        except Exception as e:
-            LOGGER.warning(f"Failed to fetch custom system prompt, using default: {e}")
-
+            except Exception as e:
+                LOGGER.warning(
+                    f"Failed to get system prompt from persona loader, using default: {e}"
+                )
+        if prompt_manager:
+            try:
+                custom_prompt = await prompt_manager.get_active_prompt(chat_id=chat_id)
+                if custom_prompt:
+                    base_system_prompt = custom_prompt.prompt_text
+                    LOGGER.debug(
+                        f"Using custom system prompt: version={custom_prompt.version}, "
+                        f"scope={custom_prompt.scope}, chat_id={custom_prompt.chat_id}"
+                    )
+            except Exception as e:
+                LOGGER.warning(f"Failed to fetch custom system prompt, using default: {e}")
+        if cacheable:
+            _SYSTEM_PROMPT_CACHE = base_system_prompt
+            _SYSTEM_PROMPT_PERSONA_LOADER_CACHE = persona_loader
+            _SYSTEM_PROMPT_CHAT_ID_CACHE = chat_id
     # If we have profile context, inject it into the system prompt
     system_prompt_with_profile = base_system_prompt + timestamp_context
 
@@ -2068,11 +2218,7 @@ async def handle_group_message(
 
             # Priority 3: Historical media from context (limited to max_historical)
             historical_media = formatted_context.get("historical_media", [])
-            if (
-                not use_system_context_block
-                and historical_media
-                and max_historical > 0
-            ):
+            if not use_system_context_block and historical_media and max_historical > 0:
                 remaining_slots = min(
                     max_media_total - len(all_media),  # Don't exceed total limit
                     max_historical,  # Don't exceed historical limit
@@ -2584,6 +2730,8 @@ async def handle_group_message(
             else:
                 thinking_placeholder_sent = True
                 thinking_message_sent = True
+                # Show placeholder for 3 seconds so users see the bot is thinking
+                await asyncio.sleep(3.0)
 
         try:
             response_data = await gemini_client.generate(
@@ -2642,8 +2790,8 @@ async def handle_group_message(
                         thinking_message_sent = False
                         thinking_placeholder_sent = False
                     else:
-                        # Wait a moment for user to see thinking
-                        await asyncio.sleep(0.5)
+                        # Wait 3 seconds for user to see thinking content
+                        await asyncio.sleep(3.0)
                         thinking_placeholder_sent = True
                         thinking_message_sent = True
                 else:

@@ -22,6 +22,7 @@ from app.handlers.chat_members import router as chat_members_router
 from app.middlewares.chat_filter import ChatFilterMiddleware
 from app.middlewares.chat_meta import ChatMetaMiddleware
 from app.middlewares.command_throttle import CommandThrottleMiddleware
+from app.middlewares.processing_lock import ProcessingLockMiddleware
 from app.core.initialization import (
     init_bot_and_dispatcher,
     init_core_services,
@@ -401,8 +402,17 @@ async def main() -> None:
         chat_meta_middleware
     )  # Also handle callback queries
     dispatcher.chat_member.middleware(chat_meta_middleware)
+
     # Chat filter must come BEFORE other processing to prevent wasting resources on blocked chats
     dispatcher.message.middleware(ChatFilterMiddleware(settings))
+
+    # Processing lock: prevent multiple simultaneous messages per user (only process one at a time)
+    processing_lock_middleware = ProcessingLockMiddleware(
+        settings=settings,
+        redis_client=redis_client,
+    )
+    dispatcher.message.middleware(processing_lock_middleware)
+
     # Command throttle: limit commands to 1 per 5 minutes (admins bypass)
     dispatcher.message.middleware(CommandThrottleMiddleware(settings, feature_limiter))
 

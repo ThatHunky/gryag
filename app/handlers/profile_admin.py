@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 from datetime import datetime
@@ -483,7 +484,9 @@ async def get_user_facts_command(
     if not verbose_mode:
         # Compact format (DEFAULT, like ChatGPT Memories)
         # Header with pagination info
-        header = f"📚 <b>Факти: {display_name}</b>"
+        # Escape display_name to prevent @mentions from creating clickable tags
+        escaped_name = html.escape(display_name or "Користувач")
+        header = f"📚 <b>Факти: {escaped_name}</b>"
         if fact_type_filter:
             header += f" ({fact_type_filter})"
         header += f"\n<i>Сторінка {page}/{total_pages} • Всього: {total_count}</i>\n\n"
@@ -496,14 +499,14 @@ async def get_user_facts_command(
                 fact_value = item.get("fact_value", "")
                 confidence = item.get("confidence", 0.0)
 
-                # One-liner format: [ID] key: value (confidence%)
-                line = f"<code>[{fact_id}]</code> <b>{fact_key}</b>: {fact_value} ({confidence:.0%})"
+                # One-liner format: [ID] key: value (confidence%) - all in monospace to prevent mentions
+                line = f"<code>[{fact_id}] {fact_key}: {fact_value} ({confidence:.0%})</code>"
                 lines.append(line)
             elif item["type"] == "memory":
-                # New memory format: [MID] 💭 memory text
+                # New memory format: [MID] 💭 memory text - in monospace to prevent mentions
                 memory_id = item.get("id", "?")
                 memory_text = item.get("text", "")
-                line = f"<code>[{memory_id}]</code> 💭 {memory_text}"
+                line = f"<code>[{memory_id}] 💭 {memory_text}</code>"
                 lines.append(line)
 
         response = "\n".join(lines)
@@ -533,7 +536,9 @@ async def get_user_facts_command(
             keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
     else:
         # Verbose format (OLD STYLE, only with --verbose flag)
-        header = f"📚 <b>Факти: {display_name}</b> (детальний режим)"
+        # Escape display_name to prevent @mentions from creating clickable tags
+        escaped_name = html.escape(display_name or "Користувач")
+        header = f"📚 <b>Факти: {escaped_name}</b> (детальний режим)"
         if fact_type_filter:
             header += f" ({_format_fact_type(fact_type_filter)})"
         header += f"\n<i>Сторінка {page}/{total_pages} • Всього: {total_count}</i>\n\n"
@@ -686,7 +691,9 @@ async def facts_pagination_callback(
 
     if not verbose_mode:
         # Compact format
-        header = f"📚 <b>Факти: {display_name}</b>"
+        # Escape display_name to prevent @mentions from creating clickable tags
+        escaped_name = html.escape(display_name)
+        header = f"📚 <b>Факти: {escaped_name}</b>"
         if fact_type_filter:
             header += f" ({fact_type_filter})"
         header += f"\n<i>Сторінка {page}/{total_pages} • Всього: {total_count}</i>\n\n"
@@ -698,7 +705,10 @@ async def facts_pagination_callback(
             fact_value = fact.get("fact_value", "")
             confidence = fact.get("confidence", 0.0)
 
-            line = f"<code>[{fact_id}]</code> <b>{fact_key}</b>: {fact_value} ({confidence:.0%})"
+            # One-liner format: [ID] key: value (confidence%) - all in monospace to prevent mentions
+            line = (
+                f"<code>[{fact_id}] {fact_key}: {fact_value} ({confidence:.0%})</code>"
+            )
             lines.append(line)
 
         response = "\n".join(lines)
@@ -722,7 +732,9 @@ async def facts_pagination_callback(
             keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
     else:
         # Verbose format
-        header = f"📚 <b>Факти: {display_name}</b> (детальний режим)"
+        # Escape display_name to prevent @mentions from creating clickable tags
+        escaped_name = html.escape(display_name)
+        header = f"📚 <b>Факти: {escaped_name}</b> (детальний режим)"
         if fact_type_filter:
             header += f" ({_format_fact_type(fact_type_filter)})"
         header += f"\n<i>Сторінка {page}/{total_pages} • Всього: {total_count}</i>\n\n"

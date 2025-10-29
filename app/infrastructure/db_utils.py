@@ -21,50 +21,47 @@ async def get_db_connection(
 ) -> AsyncIterator[aiosqlite.Connection]:
     """
     Get a database connection with proper WAL mode and timeout settings.
-    
+
     Args:
         db_path: Path to SQLite database file
         timeout: Connection timeout in seconds (default: 30.0)
-        max_retries: Maximum number of retries for database locked errors (default: 3)
-        
+        max_retries: Maximum number of retries for connection setup errors (default: 3)
+
     Yields:
         aiosqlite.Connection with WAL mode enabled
-        
+
     This context manager:
     - Enables WAL (Write-Ahead Logging) mode for better concurrency
-    - Sets a reasonable busy timeout
-    - Retries on database locked errors
+    - Sets a reasonable busy timeout to handle database locks automatically
+    - Retries on connection setup errors
     """
-    retry_count = 0
     last_error = None
-    
-    while retry_count < max_retries:
+
+    # Retry loop for connection setup
+    for attempt in range(max_retries):
         try:
             async with aiosqlite.connect(db_path, timeout=timeout) as db:
                 # Enable WAL mode for better concurrent access
                 await db.execute("PRAGMA journal_mode=WAL")
-                # Set busy timeout (milliseconds)
-                await db.execute(f"PRAGMA busy_timeout={int(timeout * 1000)}")
+                # Set busy timeout to handle locks automatically (in milliseconds)
+                # Increased to 10 seconds to handle contentious locks
+                await db.execute("PRAGMA busy_timeout=10000")
                 yield db
-                return
+            return
         except aiosqlite.OperationalError as e:
-            if "database is locked" in str(e):
-                retry_count += 1
-                last_error = e
-                if retry_count < max_retries:
-                    # Exponential backoff: 0.1s, 0.2s, 0.4s
-                    wait_time = 0.1 * (2 ** (retry_count - 1))
-                    logger.warning(
-                        f"Database locked, retrying in {wait_time}s (attempt {retry_count}/{max_retries})"
-                    )
-                    await asyncio.sleep(wait_time)
-                    continue
-            raise
-    
-    # If we exhausted all retries, raise the last error
-    if last_error:
-        logger.error(f"Failed to acquire database connection after {max_retries} retries")
-        raise last_error
+            if "database is locked" not in str(e):
+                raise
+            last_error = e
+            if attempt < max_retries - 1:
+                # Exponential backoff: 0.1s, 0.2s, 0.4s
+                wait_time = 0.1 * (2 ** attempt)
+                logger.warning(
+                    f"Database locked during connection setup, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})"
+                )
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error(f"Failed to acquire database connection after {max_retries} retries")
+                raise
     
 
 async def init_database(db_path: Path | str) -> None:

@@ -17,6 +17,7 @@ from typing import Any
 import aiosqlite
 
 from app.config import Settings
+from app.infrastructure.db_utils import get_db_connection
 
 LOGGER = logging.getLogger(__name__)
 
@@ -121,7 +122,7 @@ class EpisodicMemoryStore:
         except Exception as e:
             LOGGER.warning(f"Failed to generate episode embedding: {e}")
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db_connection(self.db_path) as db:
             cursor = await db.execute(
                 """
                 INSERT INTO episodes 
@@ -186,7 +187,7 @@ class EpisodicMemoryStore:
             LOGGER.warning(f"Failed to generate query embedding: {e}")
 
         # Fetch candidate episodes
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db_connection(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """
@@ -347,7 +348,7 @@ class EpisodicMemoryStore:
         """Record that an episode was accessed."""
         ts = int(time.time())
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db_connection(self.db_path) as db:
             # Update episode
             await db.execute(
                 """
@@ -370,7 +371,7 @@ class EpisodicMemoryStore:
         """Get a specific episode by ID."""
         await self.init()
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db_connection(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT * FROM episodes WHERE id = ?", (episode_id,)

@@ -11,6 +11,9 @@ import math
 
 import aiosqlite
 
+from app.infrastructure.db_utils import get_db_connection
+
+logger = logging.getLogger(__name__)
 
 # Determine the location of the project root dynamically.
 # context_store.py lives at: <project_root>/app/services/context_store.py
@@ -224,7 +227,7 @@ class ContextStore:
                 raise FileNotFoundError(
                     f"SQLite schema file not found at {SCHEMA_PATH}. Ensure 'db/schema.sql' exists in project root and is mounted into the container."
                 )
-            async with aiosqlite.connect(self._db_path) as db:
+            async with get_db_connection(self._db_path) as db:
                 # Preflight migration for legacy DBs: ensure external_* columns exist
                 try:
                     async with db.execute(
@@ -275,9 +278,9 @@ class ContextStore:
                                 "ALTER TABLE messages ADD COLUMN sender_is_bot INTEGER DEFAULT 0"
                             )
                         await db.commit()
-                except Exception:
+                except Exception as e:
                     # Best-effort; proceed to full schema application
-                    pass
+                    logger.warning(f"Preflight migration check encountered error: {e}", exc_info=True)
 
                 # Apply (or re-apply) full schema — safe due to IF NOT EXISTS
                 with SCHEMA_PATH.open("r", encoding="utf-8") as fh:
@@ -285,52 +288,52 @@ class ContextStore:
                 try:
                     await db.execute("ALTER TABLE messages ADD COLUMN embedding TEXT")
                 except aiosqlite.OperationalError:
-                    pass
+                    logger.debug("Column embedding already exists")
                 # Ensure external ID text columns exist for robustness (idempotent)
                 try:
                     await db.execute(
                         "ALTER TABLE messages ADD COLUMN external_message_id TEXT"
                     )
                 except aiosqlite.OperationalError:
-                    pass
+                    logger.debug("Column external_message_id already exists")
                 try:
                     await db.execute(
                         "ALTER TABLE messages ADD COLUMN external_user_id TEXT"
                     )
                 except aiosqlite.OperationalError:
-                    pass
+                    logger.debug("Column external_user_id already exists")
                 try:
                     await db.execute(
                         "ALTER TABLE messages ADD COLUMN reply_to_external_message_id TEXT"
                     )
                 except aiosqlite.OperationalError:
-                    pass
+                    logger.debug("Column reply_to_external_message_id already exists")
                 try:
                     await db.execute(
                         "ALTER TABLE messages ADD COLUMN reply_to_external_user_id TEXT"
                     )
                 except aiosqlite.OperationalError:
-                    pass
+                    logger.debug("Column reply_to_external_user_id already exists")
                 try:
                     await db.execute("ALTER TABLE messages ADD COLUMN sender_role TEXT")
                 except aiosqlite.OperationalError:
-                    pass
+                    logger.debug("Column sender_role already exists")
                 try:
                     await db.execute("ALTER TABLE messages ADD COLUMN sender_name TEXT")
                 except aiosqlite.OperationalError:
-                    pass
+                    logger.debug("Column sender_name already exists")
                 try:
                     await db.execute(
                         "ALTER TABLE messages ADD COLUMN sender_username TEXT"
                     )
                 except aiosqlite.OperationalError:
-                    pass
+                    logger.debug("Column sender_username already exists")
                 try:
                     await db.execute(
                         "ALTER TABLE messages ADD COLUMN sender_is_bot INTEGER DEFAULT 0"
                     )
                 except aiosqlite.OperationalError:
-                    pass
+                    logger.debug("Column sender_is_bot already exists")
 
                 # Add last_notice_time column to bans table for throttled ban notices
                 try:
@@ -338,7 +341,7 @@ class ContextStore:
                         "ALTER TABLE bans ADD COLUMN last_notice_time INTEGER"
                     )
                 except aiosqlite.OperationalError:
-                    pass
+                    logger.debug("Column last_notice_time already exists")
 
                 await db.commit()
             self._initialized = True
@@ -356,7 +359,7 @@ class ContextStore:
         retention_days: int | None = None,
         *,
         sender: TurnSender | None = None,
-    ) -> None:
+    ) -> int:
         await self.init()
         ts = int(time.time())
         payload: dict[str, Any] = {
@@ -390,40 +393,66 @@ class ContextStore:
             if sender.is_bot is not None:
                 sender_is_bot = 1 if sender.is_bot else 0
 
+        from app.infrastructure.db_utils import get_db_connection, execute_with_retry
+
+        message_id = 0
+
+        async def insert_message():
+            nonlocal message_id
+            async with get_db_connection(self._db_path) as db:
+                cursor = await db.execute(
+                    """
+                    INSERT INTO messages (
+                        chat_id, thread_id, user_id, role, text, media, embedding, ts,
+                        external_message_id, external_user_id, reply_to_external_message_id, reply_to_external_user_id,
+                        sender_role, sender_name, sender_username, sender_is_bot
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        chat_id,
+                        thread_id,
+                        user_id,
+                        role,
+                        text,
+                        media_json,
+                        json.dumps(embedding) if embedding else None,
+                        ts,
+                        ext_message_id,
+                        ext_user_id,
+                        reply_to_ext_message_id,
+                        reply_to_ext_user_id,
+                        sender_role,
+                        sender_name,
+                        sender_username,
+                        sender_is_bot,
+                    ),
+                )
+                await db.commit()
+                message_id = cursor.lastrowid or 0
+
+        await execute_with_retry(insert_message, max_retries=5)
+        # NOTE: Retention pruning moved to background task in main.py to avoid blocking message processing
+        # Previously: if retention_days: await self._maybe_prune(retention_days)
+        return int(message_id)
+
+    async def update_message_embedding(
+        self, message_id: int, embedding: list[float] | None
+    ) -> None:
+        """Update the embedding for an existing message row.
+
+        Args:
+            message_id: Primary key of the message in `messages` table
+            embedding: Vector to store (JSON) or None to clear
+        """
         from app.infrastructure.db_utils import get_db_connection
 
         async with get_db_connection(self._db_path) as db:
             await db.execute(
-                """
-                INSERT INTO messages (
-                    chat_id, thread_id, user_id, role, text, media, embedding, ts,
-                    external_message_id, external_user_id, reply_to_external_message_id, reply_to_external_user_id,
-                    sender_role, sender_name, sender_username, sender_is_bot
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    chat_id,
-                    thread_id,
-                    user_id,
-                    role,
-                    text,
-                    media_json,
-                    json.dumps(embedding) if embedding else None,
-                    ts,
-                    ext_message_id,
-                    ext_user_id,
-                    reply_to_ext_message_id,
-                    reply_to_ext_user_id,
-                    sender_role,
-                    sender_name,
-                    sender_username,
-                    sender_is_bot,
-                ),
+                "UPDATE messages SET embedding = ? WHERE id = ?",
+                (json.dumps(embedding) if embedding else None, message_id),
             )
             await db.commit()
-        if retention_days:
-            await self._maybe_prune(retention_days)
 
     async def _maybe_prune(self, retention_days: int) -> None:
         now = int(time.time())
@@ -441,7 +470,7 @@ class ContextStore:
     async def ban_user(self, chat_id: int, user_id: int) -> None:
         await self.init()
         ts = int(time.time())
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             await db.execute(
                 "INSERT OR REPLACE INTO bans (chat_id, user_id, ts, last_notice_time) VALUES (?, ?, ?, NULL)",
                 (chat_id, user_id, ts),
@@ -451,7 +480,7 @@ class ContextStore:
     async def delete_user_messages(self, chat_id: int, user_id: int) -> int:
         """Remove all stored messages for a user within a chat."""
         await self.init()
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             cursor = await db.execute(
                 "SELECT id FROM messages WHERE chat_id = ? AND user_id = ?",
                 (chat_id, user_id),
@@ -489,7 +518,7 @@ class ContextStore:
     ) -> bool:
         """Remove a stored message by its original Telegram message ID."""
         await self.init()
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             # Try matching dedicated external column first (stringified)
             cursor = await db.execute(
                 "SELECT id FROM messages WHERE chat_id = ? AND external_message_id = ? LIMIT 1",
@@ -520,7 +549,7 @@ class ContextStore:
 
     async def unban_user(self, chat_id: int, user_id: int) -> None:
         await self.init()
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             await db.execute(
                 "DELETE FROM bans WHERE chat_id = ? AND user_id = ?",
                 (chat_id, user_id),
@@ -529,7 +558,7 @@ class ContextStore:
 
     async def is_banned(self, chat_id: int, user_id: int) -> bool:
         await self.init()
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             async with db.execute(
                 "SELECT 1 FROM bans WHERE chat_id = ? AND user_id = ? LIMIT 1",
                 (chat_id, user_id),
@@ -548,7 +577,7 @@ class ContextStore:
         await self.init()
         current_time = int(time.time())
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             # Check last ban notice time
             async with db.execute(
                 "SELECT last_notice_time FROM bans WHERE chat_id = ? AND user_id = ?",
@@ -612,7 +641,7 @@ class ContextStore:
             )
             params = (chat_id, thread_id, message_limit)
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(query, params) as cursor:
                 rows = list(await cursor.fetchall())  # list for reversed()
@@ -735,7 +764,7 @@ class ContextStore:
             )
             params = (chat_id, thread_id, candidate_cap)
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(query, params) as cursor:
                 rows = await cursor.fetchall()
@@ -791,12 +820,13 @@ class ContextStore:
         - Skips messages referenced in `episodes.message_ids`
         - Skips messages with explicit `message_importance.retention_days` overrides
         - Deletes in chunks to avoid long locks
+        - Adds delays between chunks to allow other operations
         """
         await self.init()
         cutoff = int(time.time()) - int(retention_days) * 86400
 
         deleted_total = 0
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             db.row_factory = aiosqlite.Row
 
             # Build list of candidate message ids that are older than cutoff
@@ -823,26 +853,43 @@ class ContextStore:
                 self._last_prune_ts = int(time.time())
                 return 0
 
-            # Delete in chunks of 500
-            for chunk in _chunked(candidate_ids, 500):
-                placeholders = ",".join("?" * len(chunk))
-                # Remove metadata first
-                await db.execute(
-                    f"DELETE FROM message_metadata WHERE message_id IN ({placeholders})",
-                    chunk,
-                )
-                # Remove any message_importance records referencing these messages
-                await db.execute(
-                    f"DELETE FROM message_importance WHERE message_id IN ({placeholders})",
-                    chunk,
-                )
-                # Finally remove messages
-                await db.execute(
-                    f"DELETE FROM messages WHERE id IN ({placeholders})",
-                    chunk,
-                )
-                await db.commit()
-                deleted_total += len(chunk)
+            # Delete in smaller chunks (100 instead of 500) with delays between chunks
+            # to avoid blocking other database operations
+            chunk_size = 100
+            for chunk_idx, chunk in enumerate(_chunked(candidate_ids, chunk_size)):
+                try:
+                    placeholders = ",".join("?" * len(chunk))
+                    # Remove metadata first
+                    await db.execute(
+                        f"DELETE FROM message_metadata WHERE message_id IN ({placeholders})",
+                        chunk,
+                    )
+                    # Remove any message_importance records referencing these messages
+                    await db.execute(
+                        f"DELETE FROM message_importance WHERE message_id IN ({placeholders})",
+                        chunk,
+                    )
+                    # Finally remove messages
+                    await db.execute(
+                        f"DELETE FROM messages WHERE id IN ({placeholders})",
+                        chunk,
+                    )
+                    await db.commit()
+                    deleted_total += len(chunk)
+
+                    # Add small delay between chunks to allow other operations to proceed
+                    # Only delay if there are more chunks to process
+                    if chunk_idx < (len(candidate_ids) + chunk_size - 1) // chunk_size - 1:
+                        await asyncio.sleep(0.05)  # 50ms delay between chunks
+                except aiosqlite.OperationalError as e:
+                    if "database is locked" in str(e):
+                        logger.warning(
+                            f"Pruning operation hit database lock, continuing with remaining chunks: {e}",
+                            extra={"deleted_so_far": deleted_total},
+                        )
+                        # Continue with next chunk rather than failing completely
+                        continue
+                    raise
 
         self._last_prune_ts = int(time.time())
         return deleted_total
@@ -870,7 +917,7 @@ class ContextStore:
         window_seconds = 3600
         window_start = current_ts - (current_ts % window_seconds)
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             # Drop very old windows (older than previous hour) to keep table small
             await db.execute(
                 "DELETE FROM rate_limits WHERE window_start < ?",
@@ -926,7 +973,7 @@ class ContextStore:
         window_seconds = 3600
         cutoff = current_ts - window_seconds
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             async with db.execute(
                 """
                 SELECT COALESCE(SUM(request_count), 0)
@@ -953,7 +1000,7 @@ class ContextStore:
             Number of rows deleted
         """
         await self.init()
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             cursor = await db.execute("DELETE FROM rate_limits")
             await db.commit()
             return cursor.rowcount or 0

@@ -1379,7 +1379,7 @@ async def handle_group_message(
             )
         )
 
-    is_addressed = addressed_to_bot(message, bot_username, bot_id)
+    is_addressed = addressed_to_bot(message, bot_username, bot_id, chat_id)
     if not is_addressed:
         telemetry.increment_counter("chat.unaddressed")
         LOGGER.debug(
@@ -1449,36 +1449,53 @@ async def handle_group_message(
 
     # Ensure lock is released in finally block
     try:
-        await _handle_bot_message_locked(
-            message=message,
-            bot=bot,
-            settings=settings,
-            store=store,
-            gemini_client=gemini_client,
-            profile_store=profile_store,
-            chat_profile_store=chat_profile_store,
-            hybrid_search=hybrid_search,
-            episodic_memory=episodic_memory,
-            episode_monitor=episode_monitor,
-            bot_profile=bot_profile,
-            bot_learning=bot_learning,
-            prompt_manager=prompt_manager,
-            feature_limiter=feature_limiter,
-            multi_level_context_manager=multi_level_context_manager,
-            redis_client=redis_client,
-            rate_limiter=rate_limiter,
-            persona_loader=persona_loader,
-            image_gen_service=image_gen_service,
-            donation_scheduler=donation_scheduler,
-            memory_repo=memory_repo,
-            bot_username=bot_username,
-            bot_id=bot_id,
-            is_admin=is_admin,
-            user_id=user_id,
-            chat_id=message.chat.id,
-            thread_id=message.message_thread_id,
-            data=data,
-        )
+        try:
+            await _handle_bot_message_locked(
+                message=message,
+                bot=bot,
+                settings=settings,
+                store=store,
+                gemini_client=gemini_client,
+                profile_store=profile_store,
+                chat_profile_store=chat_profile_store,
+                hybrid_search=hybrid_search,
+                episodic_memory=episodic_memory,
+                episode_monitor=episode_monitor,
+                bot_profile=bot_profile,
+                bot_learning=bot_learning,
+                prompt_manager=prompt_manager,
+                feature_limiter=feature_limiter,
+                multi_level_context_manager=multi_level_context_manager,
+                redis_client=redis_client,
+                rate_limiter=rate_limiter,
+                persona_loader=persona_loader,
+                image_gen_service=image_gen_service,
+                donation_scheduler=donation_scheduler,
+                memory_repo=memory_repo,
+                bot_username=bot_username,
+                bot_id=bot_id,
+                is_admin=is_admin,
+                user_id=user_id,
+                chat_id=message.chat.id,
+                thread_id=message.message_thread_id,
+                data=data,
+            )
+        except Exception as handler_exc:
+            LOGGER.critical(
+                f"Message handler crashed unexpectedly: {handler_exc}",
+                exc_info=True
+            )
+            # Try to notify user of the error
+            try:
+                await message.reply(
+                    "❌ Критична помилка при обробці. Будь ласка, спробуй пізніше.",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception as notify_exc:
+                LOGGER.error(
+                    f"Failed to send error notification to user: {notify_exc}",
+                    exc_info=True
+                )
     finally:
         # Release lock
         if not is_admin:
@@ -2730,8 +2747,7 @@ async def _handle_bot_message_locked(
             else:
                 thinking_placeholder_sent = True
                 thinking_message_sent = True
-                # Show placeholder for 3 seconds so users see the bot is thinking
-                await asyncio.sleep(3.0)
+                # Placeholder sent; response generation will continue without blocking
 
         try:
             response_data = await gemini_client.generate(
@@ -2790,8 +2806,7 @@ async def _handle_bot_message_locked(
                         thinking_message_sent = False
                         thinking_placeholder_sent = False
                     else:
-                        # Wait 3 seconds for user to see thinking content
-                        await asyncio.sleep(3.0)
+                        # Thinking content shown; continue to generate final response
                         thinking_placeholder_sent = True
                         thinking_message_sent = True
                 else:
@@ -3039,10 +3054,31 @@ async def _handle_bot_message_locked(
                 thinking_message_sent = False
 
         if not thinking_message_sent or thinking_msg is None:
-            response_message = await message.reply(
-                reply_payload,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
+            LOGGER.debug(
+                f"Sending response to chat {chat_id}: "
+                f"length={len(reply_payload)}, message_id={message.message_id}"
+            )
+            try:
+                response_message = await message.reply(
+                    reply_payload,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+                if response_message is not None:
+                    LOGGER.info(
+                        f"Response sent successfully to chat {chat_id}: "
+                        f"response_id={response_message.message_id}"
+                    )
+            except Exception as exc:
+                LOGGER.error(
+                    f"Failed to send response message to chat {chat_id}: {exc}",
+                    exc_info=True
+                )
+                response_message = None
+
+        if response_message is None:
+            LOGGER.warning(
+                f"Response message is None for chat {chat_id} (message_id={message.message_id})"
             )
 
         model_meta = _build_model_metadata(

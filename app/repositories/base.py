@@ -12,6 +12,7 @@ from typing import Any, Dict, Generic, List, Optional, TypeVar
 import aiosqlite
 
 from app.core.exceptions import DatabaseError
+from app.infrastructure.db_utils import get_db_connection
 
 T = TypeVar("T")
 
@@ -38,18 +39,19 @@ class Repository(ABC, Generic[T]):
         """
         self.db_path = str(db_path) if isinstance(db_path, Path) else db_path
 
-    def _get_connection(self) -> aiosqlite.Connection:
-        """Get database connection manager.
+    def _get_connection(self):
+        """Get database connection manager with proper timeout and WAL configuration.
 
         Returns:
-            Database connection manager (context manager for async with)
+            Async context manager for database connection
 
         Note:
-            This returns the connection manager from aiosqlite.connect(),
-            which should be used with 'async with' in calling code.
-            Row factory is set after connection is opened.
+            This uses get_db_connection() which ensures:
+            - 30-second busy timeout for concurrent access
+            - WAL mode enabled for better concurrency
+            - Proper error handling and retries
         """
-        return aiosqlite.connect(self.db_path)
+        return get_db_connection(self.db_path)
 
     async def _execute(
         self,

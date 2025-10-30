@@ -5,8 +5,7 @@ import time
 from pathlib import Path
 from typing import Tuple
 
-import aiosqlite
-
+from app.infrastructure.db_utils import get_db_connection
 from app.services import telemetry
 
 
@@ -27,8 +26,7 @@ class RateLimiter:
 
     async def init(self) -> None:
         """Ensure database is reachable."""
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute("PRAGMA journal_mode=WAL")
+        async with get_db_connection(self._db_path) as db:
             await db.commit()
 
     def should_send_error_message(self, user_id: int) -> bool:
@@ -78,7 +76,7 @@ class RateLimiter:
         retry_after = max(reset_at - current_ts, 0)
 
         async with self._lock:
-            async with aiosqlite.connect(self._db_path) as db:
+            async with get_db_connection(self._db_path) as db:
                 await db.execute(
                     "DELETE FROM rate_limits WHERE window_start < ?",
                     (window_start - self.WINDOW_SECONDS,),
@@ -142,7 +140,7 @@ class RateLimiter:
             Number of rate limit records deleted
         """
         async with self._lock:
-            async with aiosqlite.connect(self._db_path) as db:
+            async with get_db_connection(self._db_path) as db:
                 cursor = await db.execute("DELETE FROM rate_limits")
                 await db.commit()
                 deleted = cursor.rowcount or 0
@@ -165,7 +163,7 @@ class RateLimiter:
             Number of rate limit records deleted
         """
         async with self._lock:
-            async with aiosqlite.connect(self._db_path) as db:
+            async with get_db_connection(self._db_path) as db:
                 cursor = await db.execute(
                     "DELETE FROM rate_limits WHERE user_id = ?",
                     (user_id,),

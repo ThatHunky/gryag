@@ -20,6 +20,7 @@ from typing import Any
 
 import aiosqlite
 
+from app.infrastructure.db_utils import get_db_connection
 from app.services import telemetry
 
 LOGGER = logging.getLogger(__name__)
@@ -49,7 +50,7 @@ class BotProfileStore:
         if self._initialized:
             return
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             # Create global profile
             await db.execute(
                 """
@@ -70,7 +71,7 @@ class BotProfileStore:
         await self.init()
         now = int(time.time())
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             # Try to get existing profile
             async with db.execute(
                 "SELECT id FROM bot_profiles WHERE bot_id = ? AND chat_id IS ?",
@@ -135,7 +136,7 @@ class BotProfileStore:
         """
         if not embedding or not self._enable_semantic_dedup:
             # Fallback to exact key match
-            async with aiosqlite.connect(self._db_path) as db:
+            async with get_db_connection(self._db_path) as db:
                 async with db.execute(
                     """
                     SELECT id FROM bot_facts
@@ -148,7 +149,7 @@ class BotProfileStore:
                     return (row[0], 1.0) if row else (None, 0.0)
 
         # Semantic search among existing facts of same category
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             async with db.execute(
                 """
                 SELECT id, fact_key, fact_value, fact_embedding
@@ -219,7 +220,7 @@ class BotProfileStore:
             profile_id, category, key, value, embedding
         )
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             if similar_fact_id:
                 # Reinforce existing fact
                 async with db.execute(
@@ -344,7 +345,7 @@ class BotProfileStore:
             query += " AND bf.confidence >= ?"
             params.append(min_confidence)
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(query, params) as cursor:
                 rows = await cursor.fetchall()
@@ -415,7 +416,7 @@ class BotProfileStore:
         profile_id = await self._get_or_create_profile_id(chat_id)
         now = int(time.time())
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             cursor = await db.execute(
                 """
                 INSERT INTO bot_interaction_outcomes (
@@ -482,7 +483,7 @@ class BotProfileStore:
         profile_id = await self._get_or_create_profile_id(chat_id)
         now = int(time.time())
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             await db.execute(
                 """
                 INSERT INTO bot_performance_metrics (
@@ -518,7 +519,7 @@ class BotProfileStore:
         profile_id = await self._get_or_create_profile_id(chat_id)
         cutoff_time = int(time.time()) - (days * 86400)
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             # Get outcome distribution
             async with db.execute(
                 """
@@ -614,7 +615,7 @@ class BotProfileStore:
         profile_id = await self._get_or_create_profile_id(chat_id)
         now = int(time.time())
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             cursor = await db.execute(
                 """
                 INSERT INTO bot_insights (
@@ -666,7 +667,7 @@ class BotProfileStore:
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(query, params) as cursor:
                 rows = await cursor.fetchall()
@@ -684,7 +685,7 @@ class BotProfileStore:
         summary = await self.get_effectiveness_summary(chat_id, days=7)
         new_score = summary["recent_effectiveness"]
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             await db.execute(
                 """
                 UPDATE bot_profiles

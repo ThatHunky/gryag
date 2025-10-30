@@ -22,6 +22,7 @@ from typing import Any
 import aiosqlite
 
 from app.config import Settings
+from app.infrastructure.db_utils import get_db_connection
 
 LOGGER = logging.getLogger(__name__)
 
@@ -94,6 +95,7 @@ class HybridSearchEngine:
         user_id: int | None = None,
         limit: int = 10,
         time_range_days: int | None = None,
+        timeout_seconds: float = 10.0,
     ) -> list[SearchResult]:
         """
         Hybrid search with multiple signals.
@@ -105,6 +107,7 @@ class HybridSearchEngine:
             user_id: User making the query (for importance weighting)
             limit: Maximum results to return
             time_range_days: Limit search to recent N days (optional)
+            timeout_seconds: Maximum seconds to wait for search (default 10s)
 
         Returns:
             List of SearchResults ranked by final_score
@@ -115,23 +118,36 @@ class HybridSearchEngine:
                 query, chat_id, thread_id, limit, time_range_days
             )
 
-        # Execute searches in parallel
-        tasks = []
+        try:
+            # Execute searches in parallel with timeout protection
+            tasks = []
 
-        # Semantic search
-        tasks.append(
-            self._semantic_search(query, chat_id, thread_id, limit * 3, time_range_days)
-        )
-
-        # Keyword search (if enabled)
-        if self.settings.enable_keyword_search:
+            # Semantic search
             tasks.append(
-                self._keyword_search(
-                    query, chat_id, thread_id, limit * 3, time_range_days
-                )
+                self._semantic_search(query, chat_id, thread_id, limit * 3, time_range_days)
             )
 
-        results_list = await asyncio.gather(*tasks, return_exceptions=True)
+            # Keyword search (if enabled)
+            if self.settings.enable_keyword_search:
+                tasks.append(
+                    self._keyword_search(
+                        query, chat_id, thread_id, limit * 3, time_range_days
+                    )
+                )
+
+            results_list = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=timeout_seconds
+            )
+        except asyncio.TimeoutError:
+            LOGGER.warning(
+                f"Hybrid search timeout ({timeout_seconds}s) for chat {chat_id}, using semantic-only fallback",
+                extra={"chat_id": chat_id, "query": query[:100]},
+            )
+            # Fallback to semantic only
+            return await self._semantic_search_only(
+                query, chat_id, thread_id, limit, time_range_days
+            )
 
         # Handle exceptions
         semantic_results = []
@@ -205,7 +221,7 @@ class HybridSearchEngine:
             """
             params.append(min(limit, self.settings.max_search_candidates))
 
-            async with aiosqlite.connect(self.db_path) as db:
+            async with get_db_connection(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(query_sql, params) as cursor:
                     rows = await cursor.fetchall()
@@ -311,7 +327,7 @@ class HybridSearchEngine:
             """
             params.append(limit)
 
-            async with aiosqlite.connect(self.db_path) as db:
+            async with get_db_connection(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(query_sql, params) as cursor:
                     rows = await cursor.fetchall()
@@ -470,7 +486,7 @@ class HybridSearchEngine:
 
         # Query database
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with get_db_connection(self.db_path) as db:
                 async with db.execute(
                     """
                     SELECT user_id, COUNT(*) as msg_count

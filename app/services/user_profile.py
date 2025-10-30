@@ -11,6 +11,7 @@ from typing import Any
 
 import aiosqlite
 
+from app.infrastructure.db_utils import get_db_connection
 from app.services import telemetry
 
 LOGGER = logging.getLogger(__name__)
@@ -253,7 +254,7 @@ class UserProfileStore:
             # Schema is applied by ContextStore.init()
 
             # Add summary_updated_at column if missing (for Phase 2 summarization)
-            async with aiosqlite.connect(self._db_path) as db:
+            async with get_db_connection(self._db_path) as db:
                 try:
                     await db.execute(
                         "ALTER TABLE user_profiles ADD COLUMN summary_updated_at INTEGER"
@@ -298,7 +299,7 @@ class UserProfileStore:
         await self.init()
         now = int(time.time())
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             db.row_factory = aiosqlite.Row
 
             # Try to get existing profile
@@ -392,7 +393,7 @@ class UserProfileStore:
         """
         await self.init()
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             db.row_factory = aiosqlite.Row
 
             # If chat_id is None, aggregate across all chats for this user
@@ -456,7 +457,7 @@ class UserProfileStore:
         params = list(kwargs.values())
         params.extend([user_id, chat_id])
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             await db.execute(
                 f"UPDATE user_profiles SET {', '.join(updates)} WHERE user_id = ? AND chat_id = ?",
                 params,
@@ -472,7 +473,7 @@ class UserProfileStore:
         await self.init()
         now = int(time.time())
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             updates = [
                 "interaction_count = interaction_count + 1",
                 "message_count = message_count + 1",
@@ -503,7 +504,7 @@ class UserProfileStore:
         """Return users known in a chat ordered by activity."""
         await self.init()
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             query = """
                 SELECT user_id, display_name, username, pronouns, membership_status,
@@ -558,7 +559,7 @@ class UserProfileStore:
         await self.init()
         now = int(time.time())
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             # Check if similar fact exists (same type and key)
             async with db.execute(
                 """
@@ -737,7 +738,7 @@ class UserProfileStore:
         await self.init()
 
         # Check if user_facts table exists (for backward compatibility)
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             try:
                 async with db.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='user_facts'"
@@ -770,8 +771,11 @@ class UserProfileStore:
                 async with db.execute(query, params) as cursor:
                     rows = await cursor.fetchall()
                     return [dict(row) for row in rows]
+            except aiosqlite.OperationalError as e:
+                LOGGER.warning(f"Error fetching facts from database: {e}", exc_info=True)
+                return []
             except Exception as e:
-                LOGGER.warning(f"Error fetching facts (deprecated): {e}")
+                LOGGER.error(f"Unexpected error fetching facts (deprecated): {e}", exc_info=True)
                 return []
 
     async def deactivate_fact(self, fact_id: int) -> None:
@@ -781,7 +785,7 @@ class UserProfileStore:
         """
         await self.init()
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             try:
                 # Check if table exists
                 async with db.execute(
@@ -799,8 +803,10 @@ class UserProfileStore:
                 )
                 await db.commit()
                 LOGGER.info(f"Deactivated fact {fact_id}")
+            except aiosqlite.OperationalError as e:
+                LOGGER.warning(f"Database error deactivating fact {fact_id}: {e}", exc_info=True)
             except Exception as e:
-                LOGGER.warning(f"Error deactivating fact {fact_id}: {e}")
+                LOGGER.error(f"Unexpected error deactivating fact {fact_id}: {e}", exc_info=True)
 
     async def delete_fact(self, fact_id: int) -> bool:
         """
@@ -812,7 +818,7 @@ class UserProfileStore:
         """
         await self.init()
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             try:
                 # Check if table exists
                 async with db.execute(
@@ -833,8 +839,11 @@ class UserProfileStore:
                     return True
 
                 return False
+            except aiosqlite.OperationalError as e:
+                LOGGER.warning(f"Database error deleting fact {fact_id}: {e}", exc_info=True)
+                return False
             except Exception as e:
-                LOGGER.warning(f"Error deleting fact {fact_id}: {e}")
+                LOGGER.error(f"Unexpected error deleting fact {fact_id}: {e}", exc_info=True)
                 return False
 
     async def record_relationship(
@@ -855,7 +864,7 @@ class UserProfileStore:
         await self.init()
         now = int(time.time())
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             # Check if relationship exists
             async with db.execute(
                 """
@@ -917,7 +926,7 @@ class UserProfileStore:
         """Get relationships for a user, sorted by strength."""
         await self.init()
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """
@@ -1014,7 +1023,7 @@ class UserProfileStore:
 
         now = int(time.time())
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             await db.execute(
                 """
                 UPDATE user_profiles
@@ -1035,7 +1044,7 @@ class UserProfileStore:
         """
         await self.init()
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             await db.execute(
                 "DELETE FROM user_profiles WHERE user_id = ? AND chat_id = ?",
                 (user_id, chat_id),
@@ -1052,7 +1061,7 @@ class UserProfileStore:
         await self.init()
         cutoff = int(time.time()) - (retention_days * 86400)
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             cursor = await db.execute(
                 "DELETE FROM user_facts WHERE created_at < ? AND is_active = 0",
                 (cutoff,),
@@ -1071,7 +1080,7 @@ class UserProfileStore:
         """Get count of active facts for a user."""
         await self.init()
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             async with db.execute(
                 "SELECT COUNT(*) FROM user_facts WHERE user_id = ? AND chat_id = ? AND is_active = 1",
                 (user_id, chat_id),
@@ -1088,7 +1097,7 @@ class UserProfileStore:
         await self.init()
         now = int(time.time())
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             cursor = await db.execute(
                 """
                 UPDATE user_facts 
@@ -1124,7 +1133,7 @@ class UserProfileStore:
         """
         await self.init()
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             async with db.execute(
                 """
                 SELECT DISTINCT p.user_id
@@ -1158,7 +1167,7 @@ class UserProfileStore:
         await self.init()
         now = int(time.time())
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             await db.execute(
                 """
                 UPDATE user_profiles 

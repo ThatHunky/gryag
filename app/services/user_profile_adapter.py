@@ -16,6 +16,7 @@ from typing import Any
 
 import aiosqlite
 
+from app.infrastructure.db_utils import get_db_connection
 from app.services import telemetry
 from app.repositories.fact_repository import UnifiedFactRepository
 
@@ -75,7 +76,7 @@ class UserProfileStoreAdapter:
             if self._initialized:
                 return
 
-            async with aiosqlite.connect(self._db_path) as db:
+            async with get_db_connection(self._db_path) as db:
                 try:
                     await db.execute(
                         "ALTER TABLE user_profiles ADD COLUMN pronouns TEXT"
@@ -192,7 +193,7 @@ class UserProfileStoreAdapter:
         chat_context = chat_id if user_id > 0 else None
         entity_type = "chat" if user_id < 0 else "user"
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             query = """
                 SELECT COUNT(*) FROM facts 
                 WHERE entity_type = ? AND entity_id = ? AND is_active = 1
@@ -301,7 +302,7 @@ class UserProfileStoreAdapter:
         self, user_id: int, chat_id: int | None = None, limit: int | None = None
     ) -> dict[str, Any] | None:
         """Get profile for a user in a chat, or None if not exists."""
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             db.row_factory = aiosqlite.Row
 
             if chat_id is None:
@@ -334,7 +335,7 @@ class UserProfileStoreAdapter:
         """Increment interaction counters and refresh last seen metadata."""
         now = int(time.time())
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             updates = [
                 "interaction_count = interaction_count + 1",
                 "message_count = message_count + 1",
@@ -370,7 +371,7 @@ class UserProfileStoreAdapter:
         params = list(kwargs.values())
         params.extend([user_id, chat_id])
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             await db.execute(
                 f"UPDATE user_profiles SET {', '.join(columns)} WHERE user_id = ? AND chat_id = ?",
                 params,
@@ -386,7 +387,7 @@ class UserProfileStoreAdapter:
         """Return known users in a chat ordered by activity."""
         await self.init()
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             query = """
                 SELECT user_id, display_name, username, pronouns, membership_status,
@@ -424,7 +425,7 @@ class UserProfileStoreAdapter:
         self, user_id: int, chat_id: int, min_strength: float = 0.0
     ) -> list[dict[str, Any]]:
         """Get relationships for a user, sorted by strength."""
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """
@@ -441,7 +442,7 @@ class UserProfileStoreAdapter:
         """Return user IDs that require profile summarization."""
         await self.init()
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             async with db.execute(
                 """
                 SELECT DISTINCT p.user_id
@@ -469,7 +470,7 @@ class UserProfileStoreAdapter:
         await self.init()
         now = int(time.time())
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             await db.execute(
                 """
                 UPDATE user_profiles
@@ -560,7 +561,7 @@ class UserProfileStoreAdapter:
 
         now = int(time.time())
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             await db.execute(
                 """
                 UPDATE user_profiles

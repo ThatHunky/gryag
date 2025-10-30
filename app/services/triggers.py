@@ -68,8 +68,17 @@ def addressed_to_bot(
     message: Message,
     bot_username: str,
     bot_id: int | None = None,
+    chat_id: int | None = None,
 ) -> bool:
-    """Return True if the incoming message is directed to the bot."""
+    """Return True if the incoming message is directed to the bot.
+
+    Args:
+        message: The incoming message
+        bot_username: Bot's username
+        bot_id: Bot's user ID
+        chat_id: Chat ID (positive for personal chats, negative for groups).
+                 If positive (personal chat), keyword trigger is not required.
+    """
 
     username = (bot_username or "").lstrip("@").lower()
 
@@ -90,6 +99,10 @@ def addressed_to_bot(
             return True
 
     if _contains_keyword(message.text) or _contains_keyword(message.caption):
+        return True
+
+    # In personal chats (chat_id > 0), respond without keyword trigger
+    if chat_id is not None and chat_id > 0:
         return True
 
     return False

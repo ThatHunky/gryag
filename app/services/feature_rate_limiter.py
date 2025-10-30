@@ -33,8 +33,7 @@ import time
 from pathlib import Path
 from typing import Tuple
 
-import aiosqlite
-
+from app.infrastructure.db_utils import get_db_connection
 from app.services import telemetry
 
 
@@ -94,8 +93,7 @@ class FeatureRateLimiter:
 
     async def init(self) -> None:
         """Ensure database is reachable and create tables if needed."""
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute("PRAGMA journal_mode=WAL")
+        async with get_db_connection(self._db_path) as db:
             await db.commit()
 
     def is_admin(self, user_id: int) -> bool:
@@ -169,7 +167,7 @@ class FeatureRateLimiter:
         retry_after = max(reset_at - current_ts, 0)
 
         async with self._lock:
-            async with aiosqlite.connect(self._db_path) as db:
+            async with get_db_connection(self._db_path) as db:
                 # Clean up old records
                 await db.execute(
                     "DELETE FROM feature_rate_limits WHERE window_start < ?",
@@ -279,7 +277,7 @@ class FeatureRateLimiter:
         current_ts = int(time.time())
 
         async with self._lock:
-            async with aiosqlite.connect(self._db_path) as db:
+            async with get_db_connection(self._db_path) as db:
                 cursor = await db.execute(
                     """
                     SELECT last_used, cooldown_seconds
@@ -337,7 +335,7 @@ class FeatureRateLimiter:
         current_ts = int(time.time())
         window_start = current_ts - (current_ts % self.WINDOW_SECONDS)
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             # Get current rate limits
             cursor = await db.execute(
                 """
@@ -407,7 +405,7 @@ class FeatureRateLimiter:
             Number of records deleted
         """
         async with self._lock:
-            async with aiosqlite.connect(self._db_path) as db:
+            async with get_db_connection(self._db_path) as db:
                 if feature:
                     cursor = await db.execute(
                         "DELETE FROM feature_rate_limits WHERE user_id = ? AND feature_name = ?",
@@ -441,7 +439,7 @@ class FeatureRateLimiter:
         cutoff = current_ts - (2 * self.WINDOW_SECONDS)  # Keep last 2 hours
 
         async with self._lock:
-            async with aiosqlite.connect(self._db_path) as db:
+            async with get_db_connection(self._db_path) as db:
                 cursor = await db.execute(
                     "DELETE FROM feature_rate_limits WHERE window_start < ?",
                     (cutoff,),

@@ -13,6 +13,7 @@ from typing import List
 import aiosqlite
 
 from app.core.exceptions import DatabaseError
+from app.infrastructure.db_utils import get_db_connection
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ class DatabaseMigrator:
             DatabaseError: If migration fails
         """
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with get_db_connection(self.db_path) as db:
                 # Ensure migrations table exists
                 await self._ensure_migrations_table(db)
 
@@ -99,7 +100,7 @@ class DatabaseMigrator:
             Latest applied migration version, or 0 if none applied
         """
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with get_db_connection(self.db_path) as db:
                 await self._ensure_migrations_table(db)
                 cursor = await db.execute("SELECT MAX(version) FROM schema_migrations")
                 row = await cursor.fetchone()
@@ -127,7 +128,7 @@ class DatabaseMigrator:
             DatabaseError: If rollback fails
         """
         try:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with get_db_connection(self.db_path) as db:
                 await self._ensure_migrations_table(db)
 
                 # Get applied migrations

@@ -17,6 +17,8 @@ from typing import Any
 
 import aiosqlite
 
+from app.infrastructure.db_utils import get_db_connection
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -63,7 +65,7 @@ class EmbeddingCache:
             return
 
         if self.enable_persistence and self.db_path:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with get_db_connection(self.db_path) as db:
                 # Create embeddings cache table if not exists
                 await db.execute(
                     """
@@ -131,42 +133,47 @@ class EmbeddingCache:
         if self.enable_persistence and self.db_path:
             text_hash = self._hash_text(text)
 
-            async with aiosqlite.connect(self.db_path) as db:
-                async with db.execute(
-                    "SELECT embedding, cached_at FROM embedding_cache WHERE text_hash = ? AND model = ?",
-                    (text_hash, model),
-                ) as cursor:
-                    row = await cursor.fetchone()
+            try:
+                async with asyncio.timeout(10):  # 10-second timeout for database operations
+                    async with get_db_connection(self.db_path) as db:
+                        async with db.execute(
+                            "SELECT embedding, cached_at FROM embedding_cache WHERE text_hash = ? AND model = ?",
+                            (text_hash, model),
+                        ) as cursor:
+                            row = await cursor.fetchone()
 
-                if row:
-                    embedding_json, cached_at = row
-                    try:
-                        embedding = json.loads(embedding_json)
+                        if row:
+                            embedding_json, cached_at = row
+                            try:
+                                embedding = json.loads(embedding_json)
 
-                        # Update access tracking
-                        now = int(time.time())
-                        await db.execute(
-                            "UPDATE embedding_cache SET last_accessed = ?, access_count = access_count + 1 WHERE text_hash = ? AND model = ?",
-                            (now, text_hash, model),
-                        )
-                        await db.commit()
+                                # Update access tracking
+                                now = int(time.time())
+                                await db.execute(
+                                    "UPDATE embedding_cache SET last_accessed = ?, access_count = access_count + 1 WHERE text_hash = ? AND model = ?",
+                                    (now, text_hash, model),
+                                )
+                                await db.commit()
 
-                        # Add to in-memory cache
-                        async with self._lock:
-                            self._cache[cache_key] = (embedding, cached_at)
-                            self._evict_if_needed()
-                            self._hits += 1
+                                # Add to in-memory cache
+                                async with self._lock:
+                                    self._cache[cache_key] = (embedding, cached_at)
+                                    self._evict_if_needed()
+                                    self._hits += 1
 
-                        LOGGER.debug(
-                            f"Embedding cache hit (persistent)",
-                            extra={"text_preview": text[:50], "model": model},
-                        )
-                        return embedding
-                    except json.JSONDecodeError:
-                        LOGGER.warning(
-                            f"Failed to decode cached embedding",
-                            extra={"text_hash": text_hash},
-                        )
+                                LOGGER.debug(
+                                    f"Embedding cache hit (persistent)",
+                                    extra={"text_preview": text[:50], "model": model},
+                                )
+                                return embedding
+                            except json.JSONDecodeError:
+                                LOGGER.warning(
+                                    f"Failed to decode cached embedding",
+                                    extra={"text_hash": text_hash},
+                                )
+            except asyncio.TimeoutError:
+                LOGGER.warning(f"Timeout accessing persistent embedding cache (10s timeout)", extra={"text_hash": text_hash, "model": model})
+                # Fall through to cache miss - don't block the request
 
         # Cache miss
         async with self._lock:
@@ -201,19 +208,27 @@ class EmbeddingCache:
             text_preview = text[:200]  # Store preview for debugging
             embedding_json = json.dumps(embedding)
 
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute(
-                    """
-                    INSERT INTO embedding_cache (text_hash, text_preview, embedding, model, cached_at, last_accessed)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(text_hash) DO UPDATE SET
-                        embedding = excluded.embedding,
-                        last_accessed = excluded.last_accessed,
-                        access_count = access_count + 1
-                    """,
-                    (text_hash, text_preview, embedding_json, model, now, now),
-                )
-                await db.commit()
+            try:
+                async with asyncio.timeout(10):  # 10-second timeout for database operations
+                    async with get_db_connection(self.db_path) as db:
+                        await db.execute(
+                            """
+                            INSERT INTO embedding_cache (text_hash, text_preview, embedding, model, cached_at, last_accessed)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(text_hash) DO UPDATE SET
+                                embedding = excluded.embedding,
+                                last_accessed = excluded.last_accessed,
+                                access_count = access_count + 1
+                            """,
+                            (text_hash, text_preview, embedding_json, model, now, now),
+                        )
+                        await db.commit()
+            except asyncio.TimeoutError:
+                LOGGER.warning(f"Timeout persisting embedding to cache (10s timeout)", extra={"text_hash": text_hash, "model": model})
+                # Don't block the request if persistence fails - in-memory cache is sufficient
+            except Exception as e:
+                LOGGER.error(f"Failed to persist embedding to cache: {e}", exc_info=True)
+                # Continue - in-memory cache will still work
 
     def _evict_if_needed(self) -> None:
         """Evict oldest entry if cache is full (must hold lock)."""
@@ -258,20 +273,28 @@ class EmbeddingCache:
 
         cutoff = int(time.time()) - (retention_days * 86400)
 
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "DELETE FROM embedding_cache WHERE last_accessed < ?",
-                (cutoff,),
-            )
-            deleted = cursor.rowcount or 0
-            await db.commit()
+        try:
+            async with asyncio.timeout(30):  # 30-second timeout for pruning operation
+                async with get_db_connection(self.db_path) as db:
+                    cursor = await db.execute(
+                        "DELETE FROM embedding_cache WHERE last_accessed < ?",
+                        (cutoff,),
+                    )
+                    deleted = cursor.rowcount or 0
+                    await db.commit()
 
-        if deleted > 0:
-            LOGGER.info(
-                f"Pruned {deleted} old embeddings from cache (retention: {retention_days} days)"
-            )
+                if deleted > 0:
+                    LOGGER.info(
+                        f"Pruned {deleted} old embeddings from cache (retention: {retention_days} days)"
+                    )
 
-        return deleted
+                return deleted
+        except asyncio.TimeoutError:
+            LOGGER.warning(f"Timeout pruning embedding cache (30s timeout)", extra={"retention_days": retention_days})
+            return 0
+        except Exception as e:
+            LOGGER.error(f"Error pruning embedding cache: {e}", exc_info=True)
+            return 0
 
 
 # Global cache instance (initialized on first use)

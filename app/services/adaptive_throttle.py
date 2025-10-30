@@ -28,6 +28,7 @@ from pathlib import Path
 
 import aiosqlite
 
+from app.infrastructure.db_utils import get_db_connection
 from app.services import telemetry
 
 
@@ -74,7 +75,7 @@ class AdaptiveThrottleManager:
 
     async def init(self) -> None:
         """Ensure database is reachable."""
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             await db.execute("PRAGMA journal_mode=WAL")
             await db.commit()
 
@@ -88,7 +89,7 @@ class AdaptiveThrottleManager:
         """
         current_ts = int(time.time())
 
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             cursor = await db.execute(
                 """
                 SELECT throttle_multiplier, last_reputation_update, spam_score
@@ -124,7 +125,7 @@ class AdaptiveThrottleManager:
         analysis_start = current_ts - (self.ANALYSIS_DAYS * 86400)
 
         async with self._lock:
-            async with aiosqlite.connect(self._db_path) as db:
+            async with get_db_connection(self._db_path) as db:
                 # Get request history for analysis
                 cursor = await db.execute(
                     """
@@ -294,7 +295,7 @@ class AdaptiveThrottleManager:
         Returns:
             Dict with all reputation metrics
         """
-        async with aiosqlite.connect(self._db_path) as db:
+        async with get_db_connection(self._db_path) as db:
             cursor = await db.execute(
                 """
                 SELECT throttle_multiplier, spam_score, total_requests,
@@ -348,7 +349,7 @@ class AdaptiveThrottleManager:
         current_ts = int(time.time())
 
         async with self._lock:
-            async with aiosqlite.connect(self._db_path) as db:
+            async with get_db_connection(self._db_path) as db:
                 await db.execute(
                     """
                     INSERT OR REPLACE INTO user_throttle_metrics

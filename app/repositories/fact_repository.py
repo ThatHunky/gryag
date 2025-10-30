@@ -19,6 +19,8 @@ from typing import Any, Literal
 
 import aiosqlite
 
+from app.infrastructure.db_utils import get_db_connection
+
 logger = logging.getLogger(__name__)
 
 
@@ -79,7 +81,7 @@ class UnifiedFactRepository:
         now = int(time.time())
         embedding_json = json.dumps(embedding) if embedding else None
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db_connection(self.db_path) as db:
             cursor = await db.execute(
                 """
                 INSERT INTO facts (
@@ -190,7 +192,7 @@ class UnifiedFactRepository:
         query += " ORDER BY confidence DESC, last_reinforced DESC LIMIT ?"
         params.append(limit)
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db_connection(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(query, params)
             rows = await cursor.fetchall()
@@ -215,7 +217,7 @@ class UnifiedFactRepository:
 
     async def get_fact_by_id(self, fact_id: int) -> dict[str, Any] | None:
         """Get a single fact by ID."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db_connection(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute("SELECT * FROM facts WHERE id = ?", (fact_id,))
             row = await cursor.fetchone()
@@ -281,7 +283,7 @@ class UnifiedFactRepository:
 
         params.append(fact_id)
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db_connection(self.db_path) as db:
             cursor = await db.execute(
                 f"UPDATE facts SET {', '.join(updates)} WHERE id = ?",
                 params,
@@ -307,7 +309,7 @@ class UnifiedFactRepository:
         Returns:
             True if deleted, False if not found
         """
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db_connection(self.db_path) as db:
             if soft:
                 cursor = await db.execute(
                     "UPDATE facts SET is_active = 0, updated_at = ? WHERE id = ?",
@@ -354,7 +356,7 @@ class UnifiedFactRepository:
             where_clause += " AND chat_context = ?"
             params.append(chat_context)
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db_connection(self.db_path) as db:
             if soft:
                 params.insert(0, int(time.time()))
                 cursor = await db.execute(
@@ -424,7 +426,7 @@ class UnifiedFactRepository:
         sql += " ORDER BY confidence DESC, last_reinforced DESC LIMIT ?"
         params.append(limit)
 
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db_connection(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(sql, params)
             rows = await cursor.fetchall()
@@ -443,7 +445,7 @@ class UnifiedFactRepository:
 
     async def get_stats(self) -> dict[str, Any]:
         """Get statistics about facts in the repository."""
-        async with aiosqlite.connect(self.db_path) as db:
+        async with get_db_connection(self.db_path) as db:
             # Total counts
             cursor = await db.execute(
                 "SELECT entity_type, COUNT(*) FROM facts WHERE is_active = 1 GROUP BY entity_type"

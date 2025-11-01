@@ -79,7 +79,7 @@ class _DummySettings:
 @pytest.mark.asyncio
 async def test_build_tool_definitions_flags():
     s = _DummySettings(
-        enable_search_grounding=True,
+        enable_web_search=True,
         enable_tool_based_memory=True,
         enable_image_generation=False,
     )
@@ -105,7 +105,7 @@ async def test_build_tool_definitions_flags():
 
     # Enable image tools
     s2 = _DummySettings(
-        enable_search_grounding=False,
+        enable_web_search=False,
         enable_tool_based_memory=False,
         enable_image_generation=True,
     )
@@ -121,7 +121,7 @@ async def test_build_tool_definitions_flags():
 @pytest.mark.asyncio
 async def test_search_messages_callback_tracks_usage_and_formats_output():
     s = _DummySettings(
-        enable_search_grounding=False,
+        enable_web_search=False,
         enable_tool_based_memory=False,
         enable_image_generation=False,
     )

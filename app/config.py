@@ -81,7 +81,7 @@ class Settings(BaseSettings):
     retention_prune_interval_seconds: int = Field(
         86400, alias="RETENTION_PRUNE_INTERVAL_SECONDS", ge=60
     )  # Default: run once per day
-    enable_search_grounding: bool = Field(False, alias="ENABLE_SEARCH_GROUNDING")
+    enable_web_search: bool = Field(False, alias="ENABLE_WEB_SEARCH")
 
     # Media handling configuration
     gemini_max_media_items: int = Field(
@@ -118,12 +118,8 @@ class Settings(BaseSettings):
         3, alias="IMAGE_GENERATION_DAILY_LIMIT", ge=1, le=10
     )  # Images per user per day (admins unlimited)
 
-    # Web search configuration
-    web_search_api_key: str | None = Field(
-        None, alias="WEB_SEARCH_API_KEY"
-    )  # Optional separate API key for web search (defaults to gemini_api_key)
-
     # Donation scheduler configuration
+    enable_donation_scheduler: bool = Field(True, alias="ENABLE_DONATION_SCHEDULER")
     donation_ignored_chat_ids: str = Field(
         "", alias="DONATION_IGNORED_CHAT_IDS"
     )  # Comma-separated chat IDs to never send donation messages to

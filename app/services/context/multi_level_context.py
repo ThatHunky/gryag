@@ -170,12 +170,16 @@ class MultiLevelContextManager:
         episodic_budget = int(max_tokens * 0.10)  # 10% - episodes
 
         # Level 1: Immediate context (always included)
+        immediate_start = time.time()
         immediate = await self._get_immediate_context(
             chat_id, thread_id, immediate_budget
         )
+        immediate_time_ms = (time.time() - immediate_start) * 1000
 
         # Parallel retrieval of other levels
         tasks = []
+        level_names = ["recent", "relevant", "background", "episodic"]
+        parallel_start = time.time()
 
         if include_recent:
             tasks.append(self._get_recent_context(chat_id, thread_id, recent_budget))
@@ -211,6 +215,7 @@ class MultiLevelContextManager:
 
         # Execute in parallel
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        parallel_time_ms = (time.time() - parallel_start) * 1000
 
         # Unpack results
         recent = results[0] if not isinstance(results[0], Exception) else None
@@ -273,37 +278,46 @@ class MultiLevelContextManager:
                     "context.episodic_tokens", episodes.token_count
                 )
 
-        LOGGER.debug(
-            f"Assembled context: {total_tokens} tokens in {assembly_time:.1f}ms",
+        # Detailed timing breakdown for diagnostics
+        timing_data = {
+            "assembly_time_ms": assembly_time,
+            "immediate_time_ms": immediate_time_ms,
+            "parallel_time_ms": parallel_time_ms,
+            "levels": {
+                "immediate": immediate.token_count,
+                "recent": (
+                    recent.token_count
+                    if recent and not isinstance(recent, Exception)
+                    else 0
+                ),
+                "relevant": (
+                    relevant.token_count
+                    if relevant and not isinstance(relevant, Exception)
+                    else 0
+                ),
+                "background": (
+                    background.token_count
+                    if background and not isinstance(background, Exception)
+                    else 0
+                ),
+                "episodic": (
+                    episodes.token_count
+                    if episodes and not isinstance(episodes, Exception)
+                    else 0
+                ),
+            },
+        }
+
+        # Log at INFO level if assembly is slow (> 2 seconds)
+        log_level_method = LOGGER.warning if assembly_time > 2000 else LOGGER.debug
+        log_level_method(
+            f"Assembled context: {total_tokens} tokens in {assembly_time:.1f}ms (immediate: {immediate_time_ms:.1f}ms, parallel: {parallel_time_ms:.1f}ms)",
             extra={
                 "chat_id": chat_id,
                 "total_tokens": total_tokens,
                 "budget": max_tokens,
                 "budget_usage_pct": round((total_tokens / max_tokens) * 100, 1),
-                "assembly_time_ms": assembly_time,
-                "levels": {
-                    "immediate": immediate.token_count,
-                    "recent": (
-                        recent.token_count
-                        if recent and not isinstance(recent, Exception)
-                        else 0
-                    ),
-                    "relevant": (
-                        relevant.token_count
-                        if relevant and not isinstance(relevant, Exception)
-                        else 0
-                    ),
-                    "background": (
-                        background.token_count
-                        if background and not isinstance(background, Exception)
-                        else 0
-                    ),
-                    "episodic": (
-                        episodes.token_count
-                        if episodes and not isinstance(episodes, Exception)
-                        else 0
-                    ),
-                },
+                **timing_data,
             },
         )
 
@@ -502,7 +516,7 @@ class MultiLevelContextManager:
         estimated_results = max(1, max_tokens // 150)
         limit = min(estimated_results, self.settings.relevant_context_size)
 
-        # Execute hybrid search
+        # Execute hybrid search with timeout to prevent runaway searches
         try:
             results = await self.hybrid_search.search(
                 query=query,
@@ -510,6 +524,7 @@ class MultiLevelContextManager:
                 thread_id=thread_id,
                 user_id=user_id,
                 limit=limit,
+                timeout_seconds=5.0,  # 5 second timeout for relevant context search
             )
         except Exception as e:
             LOGGER.error(f"Hybrid search failed: {e}", exc_info=True)

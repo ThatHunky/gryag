@@ -1,20 +1,22 @@
 services:
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
-    volumes:
-      - ./redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    networks:
-      default:
-        ipv4_address: 172.19.0.10
+  # Redis disabled for LOW CPU MODE (no background processing or distributed locks needed)
+  # Uncomment to re-enable Redis:
+  # redis:
+  #   image: redis:7-alpine
+  #   restart: unless-stopped
+  #   ports:
+  #     - "6379:6379"
+  #   command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+  #   volumes:
+  #     - ./redis-data:/data
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "ping"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+  #   networks:
+  #     default:
+  #       ipv4_address: 172.20.0.10
 
   warp:
     build:
@@ -37,9 +39,9 @@ services:
       timeout: 5s
       retries: 12
     restart: unless-stopped
-    # Allow warp (and bot sharing its network) to access Redis via static IP
-    extra_hosts:
-      - "redis:172.19.0.10"
+    # Redis extra_hosts disabled (LOW CPU MODE)
+    # extra_hosts:
+    #   - "redis:172.20.0.10"
 
   bot:
     build:
@@ -53,23 +55,25 @@ services:
       - ./models:/app/models # Persistent volume for local models stored in codebase
     restart: unless-stopped
     depends_on:
-      redis:
-        condition: service_healthy
+      # Redis dependency removed (LOW CPU MODE)
+      # redis:
+      #   condition: service_healthy
       warp:
         condition: service_healthy
     network_mode: "service:warp"
-    environment:
-      - USE_REDIS=true
-      - REDIS_URL=redis://redis:6379/0
-# Note: Redis data and models are now stored in local folders (./redis-data and ./models)
-# This keeps all persistent data within the codebase directory for easier backup and management
+    # Redis environment variables removed (LOW CPU MODE - controlled by .env)
+    # environment:
+    #   - USE_REDIS=true
+    #   - REDIS_URL=redis://redis:6379/0
+# Note: Models are stored in local folder (./models)
+# Redis data folder (./redis-data) preserved for future use
 
 networks:
   default:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.19.0.0/16
+        - subnet: 172.20.0.0/16
 
 volumes:
   warp-state:

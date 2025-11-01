@@ -59,7 +59,7 @@ def _names_from_defs(defs: list[dict]) -> list[str]:
 @pytest.mark.asyncio
 async def test_tool_definitions_unique_and_have_parameters():
     settings = _DummySettings(
-        enable_search_grounding=True,
+        enable_web_search=True,
         enable_tool_based_memory=True,
         enable_image_generation=True,
     )
@@ -87,7 +87,7 @@ async def test_tool_definitions_unique_and_have_parameters():
 @pytest.mark.asyncio
 async def test_registry_callbacks_include_defined_tools_when_enabled(monkeypatch):
     settings = _DummySettings(
-        enable_search_grounding=True,
+        enable_web_search=True,
         enable_tool_based_memory=True,
         enable_image_generation=True,
     )

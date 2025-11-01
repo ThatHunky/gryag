@@ -867,6 +867,23 @@ def _clean_response_text(text: str) -> str:
         flags=re.IGNORECASE,
     )
 
+    # Remove tool call descriptions that the model might return instead of executing
+    # Patterns: "tool_call:", "function_call:", "generate_image(...)", etc.
+    tool_patterns = [
+        r"tool_call\s*:\s*\w+",
+        r"function_call\s*:\s*\w+",
+        r"tool_call\s*\(\s*[^)]*\s*\)",
+        r"\bgenerate_image\s*\([^)]*\)",
+        r"\bedit_image\s*\([^)]*\)",
+        r"\bsearch_web\s*\([^)]*\)",
+        r"\bcalculate\s*\([^)]*\)",
+        r"\bget_weather\s*\([^)]*\)",
+        r"\bremember_memory\s*\([^)]*\)",
+        r"\brecall_memories\s*\([^)]*\)",
+    ]
+    for pattern in tool_patterns:
+        text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+
     # Clean up extra whitespace and empty lines
     lines = [line.strip() for line in text.split("\n")]
     lines = [line for line in lines if line and not line.startswith("[meta")]
@@ -2535,37 +2552,50 @@ async def _handle_bot_message_locked(
             )
             history = []
 
+            # Inject reply media into user_parts when using system context block
+            # System context block only includes text markers, not actual media data
+            if reply_media_parts_for_block:
+                current_media_count = sum(
+                    1
+                    for p in user_parts
+                    if isinstance(p, dict) and ("inline_data" in p or "file_data" in p)
+                )
+                max_total = settings.gemini_max_media_items
+                remaining = max(0, max_total - current_media_count)
+                if remaining > 0:
+                    to_add = reply_media_parts_for_block[:remaining]
+                    user_parts.extend(to_add)
+                    dropped = len(reply_media_parts_for_block) - len(to_add)
+                    LOGGER.debug(
+                        "Added %d reply media item(s) for system context block mode (dropped: %d)",
+                        len(to_add),
+                        max(dropped, 0),
+                    )
+                    telemetry.increment_counter(
+                        "context.reply_media_system_block", len(to_add)
+                    )
+
     # Track which tools were used in this request
     tools_used_in_request: list[str] = []
 
     # Centralized callbacks (registry) with tracking
-    if memory_repo:
-        tracked_tool_callbacks = build_tool_callbacks_registry(
-            settings=settings,
-            store=store,
-            gemini_client=gemini_client,
-            profile_store=profile_store,
-            memory_repo=memory_repo,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            message_id=message.message_id,
-            tools_used_tracker=tools_used_in_request,
-            user_id=user_id,
-            bot=bot,
-            message=message,
-            image_gen_service=image_gen_service,
-            feature_limiter=feature_limiter,
-        )
-    else:
-        # Handle the case where memory_repo is None, perhaps by excluding memory tools
-        # For now, we'll log a warning and proceed without memory tools.
-        LOGGER.warning(
-            "MemoryRepository is not available. Memory tools will be disabled."
-        )
-        # You might want to have a version of build_tool_callbacks_registry that doesn't require memory_repo
-        # Or, ensure memory_repo is always initialized. Based on the error, we'll ensure it's not None.
-        # This 'else' block is a safeguard.
-        tracked_tool_callbacks = {}
+    # Always build tool callbacks - memory_repo can be None and will be handled gracefully
+    tracked_tool_callbacks = build_tool_callbacks_registry(
+        settings=settings,
+        store=store,
+        gemini_client=gemini_client,
+        profile_store=profile_store,
+        memory_repo=memory_repo,  # Can be None, memory tools will be skipped
+        chat_id=chat_id,
+        thread_id=thread_id,
+        message_id=message.message_id,
+        tools_used_tracker=tools_used_in_request,
+        user_id=user_id,
+        bot=bot,
+        message=message,
+        image_gen_service=image_gen_service,
+        feature_limiter=feature_limiter,
+    )
     # Web search, image tools, and memory tool callbacks are provided by registry
 
     # Extract specific tool callbacks for fallback usage
@@ -2917,11 +2947,25 @@ async def _handle_bot_message_locked(
             LOGGER.debug(f"Original response contained: {original_reply[:200]}")
 
         # Fallback: force image generation/edit if Gemini returned nothing but the user clearly asked for it
+        # OR if the response contained tool call descriptions that got filtered out
+        tool_description_detected = False
+        if original_reply and original_reply != reply_text:
+            lower_original = original_reply.lower()
+            tool_keywords = ["tool_call", "function_call", "generate_image", "edit_image", "search_web"]
+            tool_description_detected = any(kw in lower_original for kw in tool_keywords)
+
         if (
             settings.enable_image_generation
             and image_gen_service is not None
-            and (not reply_text or reply_text.isspace())
+            and (
+                (not reply_text or reply_text.isspace())
+                or (tool_description_detected and len(reply_text) < 20)
+            )
         ):
+            if tool_description_detected:
+                LOGGER.warning(
+                    "Tool call description detected in response instead of actual tool call. Triggering fallback."
+                )
             fallback_prompt = (raw_text or "").strip()
             if fallback_prompt:
                 if bot_username:

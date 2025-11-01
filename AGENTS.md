@@ -1,84 +1,91 @@
-# AGENTS
+---
+description: "Copilot instructions tailored for the gryag repository — concise, actionable, and code-aware."
 
-This repository accepts limited automated edits from trusted agents. The rules below are short and designed to minimize surprise for human maintainers.
+## Purpose (one-liner)
+Practical guidance for automated coding agents to be immediately productive in this repo: how the app boots, where to look for service boundaries, and project-specific rules to follow.
 
-Short contract for agents:
+- Run locally: `.venv/bin/python3 -m app.main` (or `source .venv/bin/activate` then `python3 -m app.main`).
+- Tests: `.venv/bin/pytest tests/` (or `make test`).
+- Docker dev: `docker compose up bot` (service `bot`).
 
-- **No littering**: NEVER create files at the repository root. Follow the strict organization rules below.
-- **Virtual environment**: ALWAYS activate `.venv` before running Python commands: `source .venv/bin/activate` or use `.venv/bin/python3` directly. Use `python3` (not `python`) for explicit Python 3.
-- Readability: Keep edits small and focused. If you must change >3 files, add a brief `docs/CHANGELOG.md` entry and update `docs/README.md` describing the changes.
-- Docs: Put long-form documentation under `docs/` (see `docs/README.md`) and prefer `git mv` for renames. Preserve relative links inside moved files.
-- Tests & Validation: If you change runnable code, run the project's tests with `.venv/bin/pytest` or activate venv first, and include the result in your commit message.
-- No secrets: Never add secrets, tokens, or credentials to the repository. If a secret is required, note the required env var in a `.env.example` update.
-- Backwards compatible: Avoid breaking public APIs. If a change is large and may break things, create a draft PR and describe the migration steps in `docs/README.md`.
-- Transparency: For any multi-file change add a one-paragraph summary to `docs/README.md` describing what moved/was added and how to verify.
+## High-level architecture (what matters)
+- Entry: `app/main.py` — initializes services, background tasks, and registers routers (see `dispatcher.include_router(...)`).
+- Handlers: `app/handlers/` (core chat flow in `app/handlers/chat.py`).
+- Dependency injection: `app/middlewares/chat_meta.py` — middleware injects almost all services into handler `data` (do NOT instantiate services in handlers).
+- Context & memory: `app/services/context/` — `MultiLevelContextManager`, `HybridSearchEngine`, `EpisodicMemoryStore`; DB schema in `db/schema.sql` is authoritative.
 
-If you are human: Follow these rules too; they make reviews faster and safer.
+## Project-specific conventions (do not break)
+- Always use middleware-injected services (see `ChatMetaMiddleware`). Example injected keys: `settings`, `store`, `gemini_client`, `profile_store`, `multi_level_context_manager`, `redis_client`, `bot_username`, `bot_id`.
+- Persona/system prompt: `app/persona.py` — user-facing replies must conform (plain text, Ukrainian tone). Do not add Markdown in replies.
+- Virtualenv mandatory: use `.venv/bin/python3` for scripts and tests.
+- DB edits: update `db/schema.sql` and mirror migration/initialization code under `app/core/` or `app/services/context/`.
+- DB schema is authoritative in `db/schema.sql`. Mirror schema edits in `app/services/context/context_store.py` (migrations/initialization there).
+## Concrete examples & patterns
+- Handler registration: add a `Router` in `app/handlers/<feature>.py` and include it in `app/main.py`.
+- Tools: implement tool code under `app/services/` and register tool definitions via `build_tool_definitions` / `build_tool_callbacks` used in `app/handlers/chat.py`.
+- Context: call `MultiLevelContextManager.build_context(...)` for token-budgeted context assembly; fallback is `ContextStore.recent(...)`.
 
-## File Organization Rules (MANDATORY)
+## Safety, PRs and agent rules
+- Never create arbitrary files at repo root (see `AGENTS.md` file-organization rules). Put new code under `app/`, docs under `docs/`, scripts under `scripts/`.
+- Keep edits small. If changing >3 files, add a one-line `docs/CHANGELOG.md` entry and update `docs/README.md` with verification steps.
+- Do NOT add secrets. If a new env var is required, document it in `.env.example` (do not commit real secrets).
 
-The repository root must remain clean. **Only these files are allowed at root:**
-- `README.md`, `AGENTS.md` (documentation)
-- Configuration files: `.env.example`, `Dockerfile`, `docker-compose.yml`, `Makefile`, `pyproject.toml`, `requirements*.txt`
-- Package metadata: `LICENSE`, `setup.py` (if needed)
+## Useful files to open first
+- `app/main.py` — start/registration and background tasks.
+- `app/handlers/chat.py` — central message flow, tool wiring, formatting rules.
+- `app/middlewares/chat_meta.py` — which services are injected and how.
+- `app/services/context/multi_level_context.py` — how multi-level context is assembled and token budgets.
+- `app/persona.py` — system persona and strict behavior rules.
+- `db/schema.sql` — canonical schema (FTS, memories, bot learning).
+- Middlewares (DI & throttling): `app/middlewares/` — `chat_meta.py`, `throttle.py`.
+If you want this shortened further or want concrete code snippets for any of the above files, tell me which area to expand and I will iterate.
+- Context & memory: `app/services/context/` — `multi_level_context.py`, `episodic_memory.py`, `hybrid_search.py`.
+## Examples (concrete)
+## Patterns & examples
+- Middleware-injected keys (available in handler `data` / parameters):
+- Register a handler: create `app/handlers/<feature>.py` and add `dispatcher.include_router(...)` in `app/main.py`.
+  - `settings`, `store` (ContextStore), `gemini_client`, `profile_store`, `chat_profile_store`,
+    `hybrid_search`, `episodic_memory`, `episode_monitor`, `bot_profile`, `bot_learning`,
+    `prompt_manager`, `feature_limiter`, `multi_level_context_manager`, `redis_client`,
+    `rate_limiter`, `persona_loader`, `image_gen_service`, `donation_scheduler`, `memory_repo`,
+    plus `bot_username` and `bot_id`.
+- Virtualenv is mandatory: `.venv/` exists in project root. Use `.venv/bin/python3` for scripts in automation.
+- Typical handler signature (real example from `app/handlers/chat.py`):
+- CI: follow the existing `Makefile` targets (`make test`) and ensure you do not add secrets to commits.
+  async def handle_group_message(message: Message, bot: Bot, settings: Settings, store: ContextStore, gemini_client: GeminiClient, profile_store: UserProfileStore, bot_username: str, bot_id: int | None, ...)
+## PR and agent rules
+- Callback-query middleware: register `ChatMetaMiddleware` for callbacks too — see `app/main.py` where the code calls:
+- Keep edits small and reversible. If changing >3 files, add a one-line `docs/CHANGELOG.md` entry and update `docs/README.md` with verification steps.
+  dispatcher.callback_query.middleware(chat_meta_middleware)
 
-**All other files MUST go in their proper directory:**
+- Key env vars (most immediately useful):
+  - `TELEGRAM_TOKEN`, `GEMINI_API_KEY` / `GEMINI_API_KEYS`, `DB_PATH`, `USE_REDIS`, `REDIS_URL`, `ADMIN_USER_IDS`.
+  - Feature toggles: `ENABLE_MULTI_LEVEL_CONTEXT`, `ENABLE_IMAGE_GENERATION`, `ENABLE_COMPACT_CONVERSATION_FORMAT`.
+- `app/persona.py` — system prompt and persona rules
+---
 
-### Documentation (`docs/`)
-- **Feature docs** → `docs/features/`
-- **Implementation plans** → `docs/plans/`
-- **Phase reports** → `docs/phases/`
-- **Guides & tutorials** → `docs/guides/`
-- **Bug fixes & patches** → `docs/fixes/`
-- **Historical notes** → `docs/history/`
-- **Overview docs** → `docs/overview/`
+- `app/services/context/multi_level_context.py` — token-aware context composition
 
-### Scripts (`scripts/`)
-- **Database migrations** → `scripts/migrations/`
-- **Diagnostic tools** → `scripts/diagnostics/`
-- **Integration tests** → `scripts/tests/`
-- **Verification scripts** → `scripts/verification/`
-- **Deprecated code** → `scripts/deprecated/`
-- **Utility scripts** → `scripts/` (root level if general purpose)
+If you want this trimmed further or to include specific example snippets from a file, tell me which parts to expand.
 
-### Application Code (`app/`)
-- All Python application code lives under `app/`
-- Never create `.py` files at repository root (except `setup.py` if needed for packaging)
+## Examples (concrete)
 
-### Tests (`tests/`)
-- Unit tests → `tests/unit/`
-- Integration tests → `tests/integration/`
+- Middleware-injected keys (available in handler `data` / parameters):
 
-**Enforcement**: Before creating any file, ask yourself: "Is this a root-level config file?" If not, it belongs in a subdirectory. Check `scripts/README.md` and `docs/README.md` for the organization structure.
+  - `settings`, `store` (ContextStore), `gemini_client`, `profile_store`, `chat_profile_store`,
+    `hybrid_search`, `episodic_memory`, `episode_monitor`, `bot_profile`, `bot_learning`,
+    `prompt_manager`, `feature_limiter`, `multi_level_context_manager`, `redis_client`,
+    `rate_limiter`, `persona_loader`, `image_gen_service`, `donation_scheduler`, `memory_repo`,
+    plus `bot_username` and `bot_id`.
 
-## Suggested moves
+- Typical handler signature (real example from `app/handlers/chat.py`):
 
-**Note**: Repository cleanup completed on 2025-10-08. The root directory is now clean with only essential files remaining. All documentation is in `docs/`, all scripts are in `scripts/`, and all application code is in `app/`.
+  async def handle_group_message(message: Message, bot: Bot, settings: Settings, store: ContextStore, gemini_client: GeminiClient, profile_store: UserProfileStore, bot_username: str, bot_id: int | None, ...)
 
-**Historical context**: On 2025-10-02 a large reorganization moved many top-level Markdown docs into `docs/`. On 2025-10-08, all remaining scripts and utilities were organized into `scripts/` subdirectories. See `docs/CHANGELOG.md` for the full history.
+- Callback-query middleware: register `ChatMetaMiddleware` for callbacks too — see `app/main.py` where the code calls:
 
+  dispatcher.callback_query.middleware(chat_meta_middleware)
 
-## Conversation Pattern Reference
-
-- The canonical conversation format is documented in `docs/overview/CURRENT_CONVERSATION_PATTERN.md`.
-- If the pattern changes, update that file and update this file and `.github/copilot-instructions.md` to reference the new pattern.
-
-## Development Environment
-
-**Critical**: This project uses a Python virtual environment at `.venv/`.
-
-- **Always activate venv**: `source .venv/bin/activate` before running commands
-- **Or use direct paths**: `.venv/bin/python3`, `.venv/bin/pytest`, `.venv/bin/pip`
-- **Use `python3`**: Never use bare `python` command - always `python3`
-- **Run tests**: `.venv/bin/pytest tests/` or activate venv first
-- **Install packages**: `.venv/bin/pip install <package>` or activate venv first
-
-If you need to create new files:
-
-1. **Never create files at repository root** - use the organization rules above
-2. Use `git mv <src> <dest>` if moving existing files (preserves history)
-3. Add a one-line entry in `docs/README.md` or `docs/CHANGELOG.md` 
-4. Add a verification command (e.g., `grep -r "keyword" newdir/`)
-5. Run the project's quick sanity checks when possible: `.venv/bin/pytest tests/`
-
-If you cannot run tests (no runtime available), still add the changelog entry and a short note explaining why tests were skipped.
+- Key env vars (most immediately useful):
+  - `TELEGRAM_TOKEN`, `GEMINI_API_KEY` / `GEMINI_API_KEYS`, `DB_PATH`, `USE_REDIS`, `REDIS_URL`, `ADMIN_USER_IDS`.
+  - Feature toggles: `ENABLE_MULTI_LEVEL_CONTEXT`, `ENABLE_IMAGE_GENERATION`, `ENABLE_COMPACT_CONVERSATION_FORMAT`.

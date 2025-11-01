@@ -202,23 +202,34 @@ async def main() -> None:
     await profile_summarizer.start()
 
     # Initialize donation reminder scheduler
-    # Get target chat IDs from settings (whitelist if enabled, otherwise empty list for manual management)
-    donation_chat_ids = (
-        settings.allowed_chat_ids_list
-        if settings.bot_behavior_mode == "whitelist"
-        else []
-    )
-    donation_scheduler = DonationScheduler(
-        bot=bot,
-        db_path=settings.db_path,
-        context_store=store,
-        target_chat_ids=donation_chat_ids,
-        ignored_chat_ids=settings.donation_ignored_chat_ids_list,
-    )
-    await donation_scheduler.start()
-    logging.info(
-        "Donation scheduler initialized (sends to groups with recent activity every 2 days at 18:00 Ukraine time)"
-    )
+    if settings.enable_donation_scheduler:
+        # Get target chat IDs from settings (whitelist if enabled, otherwise empty list for manual management)
+        donation_chat_ids = (
+            settings.allowed_chat_ids_list
+            if settings.bot_behavior_mode == "whitelist"
+            else []
+        )
+        donation_scheduler = DonationScheduler(
+            bot=bot,
+            db_path=settings.db_path,
+            context_store=store,
+            target_chat_ids=donation_chat_ids,
+            ignored_chat_ids=settings.donation_ignored_chat_ids_list,
+        )
+        await donation_scheduler.start()
+        logging.info(
+            "Donation scheduler initialized (sends to groups with recent activity every 2 days at 18:00 Ukraine time)"
+        )
+    else:
+        # Create a minimal donation scheduler instance without starting it
+        donation_scheduler = DonationScheduler(
+            bot=bot,
+            db_path=settings.db_path,
+            context_store=store,
+            target_chat_ids=[],
+            ignored_chat_ids=[],
+        )
+        logging.info("Donation scheduler disabled (ENABLE_DONATION_SCHEDULER=false)")
 
     # Phase 3: Initialize hybrid search and episodic memory
     hybrid_search = HybridSearchEngine(
@@ -298,16 +309,15 @@ async def main() -> None:
         logging.info("Image generation disabled (ENABLE_IMAGE_GENERATION=false)")
 
     # Log web search configuration
-    if settings.enable_search_grounding:
-        using_separate_search_key = settings.web_search_api_key is not None
+    if settings.enable_web_search:
         logging.info(
-            "Web search grounding enabled",
+            "Web search enabled (using DuckDuckGo)",
             extra={
-                "separate_api_key": using_separate_search_key,
+                "search_provider": "DuckDuckGo",
             },
         )
     else:
-        logging.info("Web search grounding disabled (ENABLE_SEARCH_GROUNDING=false)")
+        logging.info("Web search disabled (ENABLE_WEB_SEARCH=false)")
 
     # Phase 5: Initialize bot self-learning system
     bot_profile: BotProfileStore | None = None
@@ -442,6 +452,14 @@ async def main() -> None:
                 await monitor_task
             except asyncio.CancelledError:
                 pass
+
+        # Cleanup: cancel retention pruning task
+        if prune_task is not None:
+            prune_task.cancel()
+            try:
+                await prune_task
+            except asyncio.CancelledError:
+                logging.info("Retention pruning task cancelled")
 
         # Cleanup profile summarizer
         await profile_summarizer.stop()

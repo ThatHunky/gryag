@@ -112,9 +112,13 @@ def check_database_messages():
             print(
                 f"  ID {row['id']} | {row['role']:5s} | {media_len:,} chars | {media_count} media items"
             )
-        except:
+        except json.JSONDecodeError as e:
             print(
-                f"  ID {row['id']} | {row['role']:5s} | {media_len:,} chars | (invalid JSON)"
+                f"  ID {row['id']} | {row['role']:5s} | {media_len:,} chars | (invalid JSON: {e})"
+            )
+        except Exception as e:
+            print(
+                f"  ID {row['id']} | {row['role']:5s} | {media_len:,} chars | (error processing media: {e})"
             )
 
     # Check embedding sizes (these should NOT be sent to Gemini!)

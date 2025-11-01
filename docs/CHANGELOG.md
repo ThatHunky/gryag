@@ -5,6 +5,42 @@ All notable changes to gryag's memory, context, and learning systems.
 
 ## [Unreleased]
 
+### 2025-10-30 — C++ Port Scaffolding
+
+**Summary**: Added a dedicated `cpp/` subproject bootstrapping the gryag C++ bot (tgbot-cpp runtime, Gemini client, context store, persona loader, tool registry) without modifying the Python service.
+
+**Changes**:
+- Created C++ project structure (`cpp/`) with CMake build, FetchContent dependencies, and executable `gryag-bot`.
+- Implemented core services (settings loader, logging, SQLite context store, hybrid search stub, episodic memory accessor, Gemini REST client, persona loader).
+- Added Telegram chat handler wiring with rate limiting and default calculator tool; registered stubs for remaining tools.
+- Documented build/run instructions in `cpp/README.md`.
+
+**Verification**:
+```bash
+# Requires cmake ≥3.25 and system libs (curl, sqlite3, hiredis)
+cmake -S cpp -B cpp/build
+cmake --build cpp/build -j
+```
+
+### 2025-10-30 — C++ Tools & Admin Handlers
+
+**Summary**: Implemented the first functional slice of the C++ bot: real tool integrations (weather, currency, polls, web/search, image + memories/search in chat), admin/profile commands, and a custom Telegram long-poll worker with in-process locks/rate limits to mirror the Python behaviour.
+
+**Changes**:
+- Added production-grade tool implementations under `cpp/include/gryag/services/tools/` (OpenWeather, ExchangeRate, DuckDuckGo, Gemini image generation, search_messages, memory tools) with proper Gemini function definitions and registry plumbing.
+- Wired tool definitions into the Gemini client, added basic function-call handling, and persisted tool results through the existing context store.
+- Ported admin and profile command handlers with ban management, rate-limit resets, chat info, donation prompts, profile lookups, user lists, and memory fact dumps.
+- Introduced processing locks and rate limiting with SQLite/in-memory fallbacks (no external Redis dependency) alongside a custom Telegram HTTP long-poll loop.
+
+**Verification**:
+```bash
+# Configure the C++ project (requires system dependencies: libcurl, sqlite3, hiredis)
+.venv/bin/cmake -S cpp -B cpp/build
+# Build (may take several minutes because FetchContent pulls dependencies)
+.venv/bin/cmake --build cpp/build -j
+```
+
+
 ### 2025-10-28 — Processing Lock Only for Bot Messages
 
 **Summary**: Fixed processing lock to only apply to bot-addressed messages, not ALL user messages. Users can now chat normally while bot processes someone else's message.

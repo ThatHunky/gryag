@@ -56,11 +56,11 @@ def test_ignored_chat_ids_empty_list():
 
 @pytest.mark.asyncio
 async def test_send_now_respects_ignored_list(donation_scheduler, mock_bot):
-    """Test that send_now refuses to send to ignored chats."""
+    """Test that send_now refuses to send to ignored chats when bypass_ignored=False."""
     await donation_scheduler.init()
 
-    # Try to send to ignored chat
-    result = await donation_scheduler.send_now(-100987654321)
+    # Try to send to ignored chat with bypass_ignored=False
+    result = await donation_scheduler.send_now(-100987654321, bypass_ignored=False)
 
     # Should return False and not send message
     assert result is False
@@ -103,8 +103,8 @@ async def test_scheduled_reminders_skip_ignored_chats(
 
     monkeypatch.setattr(donation_scheduler, "_should_send_to_chat", mock_should_send)
 
-    # Run scheduled reminders
-    await donation_scheduler._send_scheduled_reminders()
+    # Run scheduled reminders for groups (all test chat IDs are negative/groups)
+    await donation_scheduler._send_scheduled_reminders_groups()
 
     # Should only send to non-ignored chats (2 out of 3)
     assert mock_bot.send_message.call_count == 2

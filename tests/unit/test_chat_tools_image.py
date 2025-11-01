@@ -59,7 +59,7 @@ class _DummyMessage:
 
 @pytest.mark.asyncio
 async def test_generate_image_registry_callback(monkeypatch):
-    settings = _DummySettings(enable_image_generation=True, enable_search_grounding=False, enable_tool_based_memory=False)
+    settings = _DummySettings(enable_image_generation=True, enable_web_search=False, enable_tool_based_memory=False)
     bot = _DummyBot()
     image_service = _DummyImageService()
     profile_store = _DummyProfileStore()
@@ -92,7 +92,7 @@ async def test_generate_image_registry_callback(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_edit_image_registry_callback(monkeypatch):
-    settings = _DummySettings(enable_image_generation=True, enable_search_grounding=False, enable_tool_based_memory=False)
+    settings = _DummySettings(enable_image_generation=True, enable_web_search=False, enable_tool_based_memory=False)
     bot = _DummyBot()
     image_service = _DummyImageService()
     profile_store = _DummyProfileStore()

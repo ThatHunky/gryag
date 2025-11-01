@@ -29,23 +29,68 @@ YOUTUBE_REGEX = re.compile(
 
 async def _download(bot: Bot, file_id: str) -> bytes:
     """Download a file from Telegram servers."""
-    file = await bot.get_file(file_id)
+    # Resolve file path first (may raise) and then perform HTTP GET with retries
+    try:
+        file = await bot.get_file(file_id)
+    except Exception as exc:  # network or API error fetching file metadata
+        LOGGER.warning(
+            "Failed to fetch file metadata for %s: %s", file_id, exc, exc_info=True
+        )
+        return b""
+
     file_path = file.file_path
     if not file_path:
         return b""
+
     url = f"https://api.telegram.org/file/bot{bot.token}/{quote(file_path)}"
-    timeout = aiohttp.ClientTimeout(total=60, connect=10)  # Increased for videos
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as resp:
-                resp.raise_for_status()
-                return await resp.read()
-    except asyncio.TimeoutError:
-        LOGGER.warning(f"Timed out downloading Telegram file {file_id}")
-    except aiohttp.ClientError as exc:
-        LOGGER.warning(f"Failed to download Telegram file {file_id}: {exc}")
-    except Exception:  # pragma: no cover - unexpected runtime error
-        LOGGER.exception(f"Unexpected error while downloading Telegram file {file_id}")
+    timeout = aiohttp.ClientTimeout(total=60, connect=10)  # keep existing timeout
+
+    # Retry loop for transient network errors (DNS, TCP resets, timeouts)
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as resp:
+                    resp.raise_for_status()
+                    data = await resp.read()
+                    return data
+
+        except asyncio.TimeoutError:
+            LOGGER.warning(
+                "Timed out downloading Telegram file %s (timeout: %ss) attempt=%d/%d",
+                file_id,
+                timeout.total,
+                attempt,
+                max_attempts,
+            )
+        except aiohttp.ClientError as exc:
+            # Includes ClientConnectorError, ClientOSError, etc.
+            LOGGER.warning(
+                "HTTP error downloading Telegram file %s on attempt %d/%d: %s",
+                file_id,
+                attempt,
+                max_attempts,
+                exc,
+                exc_info=(attempt == max_attempts),
+            )
+        except OSError as exc:
+            # Low-level socket errors (Connection reset, DNS failures)
+            LOGGER.warning(
+                "OS error downloading Telegram file %s on attempt %d/%d: %s",
+                file_id,
+                attempt,
+                max_attempts,
+                exc,
+                exc_info=(attempt == max_attempts),
+            )
+
+        # Backoff before next attempt (avoid tight retry loops)
+        if attempt < max_attempts:
+            await asyncio.sleep(0.1 * (2 ** (attempt - 1)))
+
+    LOGGER.error(
+        "Failed to download Telegram file %s after %d attempts", file_id, max_attempts
+    )
     return b""
 
 
@@ -348,9 +393,11 @@ async def collect_media_parts(bot: Bot, message: Message) -> list[dict[str, Any]
                 MAX_INLINE_SIZE // (1024 * 1024),
             )
 
-    except Exception:  # pragma: no cover - downstream fetch issues
-        LOGGER.exception(
-            "Failed to collect media parts for message %s", message.message_id
+    except Exception as e:  # pragma: no cover - downstream fetch issues
+        LOGGER.error(
+            f"Failed to collect media parts for message {message.message_id}: {e}",
+            exc_info=True,
         )
+        # Return partial results if available (some parts may have been collected before the error)
 
     return parts

@@ -193,6 +193,7 @@ async def reset_quotas_command(
     rate_limiter: RateLimiter | None = None,
     redis_client: RedisLike | None = None,
     persona_loader: Any | None = None,
+    image_gen_service: Any | None = None,
 ) -> None:
     # Support both legacy "gryagreset" and dynamic "{prefix}reset"
     if not _is_admin(message, settings):
@@ -201,31 +202,110 @@ async def reset_quotas_command(
 
     chat_id = message.chat.id
 
+    # Check if this is a reply to a specific user (for per-user reset)
+    target_user_id = None
+    target_user_name = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user_id = message.reply_to_message.from_user.id
+        target_user_name = (
+            message.reply_to_message.from_user.full_name
+            or message.reply_to_message.from_user.username
+            or str(target_user_id)
+        )
+
     # Reset rate limiter (SQLite-backed)
+    rate_limit_reset_msg = ""
     if rate_limiter is not None:
-        deleted = await rate_limiter.reset_chat(chat_id)
-        LOGGER.info(f"Reset {deleted} rate limit record(s) for chat {chat_id}")
+        if target_user_id is not None:
+            # Per-user reset
+            deleted = await rate_limiter.reset_user(target_user_id)
+            LOGGER.info(
+                f"Reset {deleted} rate limit record(s) for user {target_user_id}"
+            )
+            if deleted > 0:
+                rate_limit_reset_msg = f"✓ Скинув ліміти для {target_user_name}\n"
+        else:
+            # Chat-wide reset
+            deleted = await rate_limiter.reset_chat(chat_id)
+            LOGGER.info(f"Reset {deleted} rate limit record(s) for chat {chat_id}")
+            if deleted > 0:
+                rate_limit_reset_msg = f"✓ Скинув ліміти повідомлень для чату ({deleted} записів)\n"
+
+    # Reset image generation quotas (if service available)
+    image_quota_reset_msg = ""
+    if image_gen_service is not None:
+        try:
+            if target_user_id is not None:
+                # Per-user image quota reset
+                was_reset = await image_gen_service.reset_user_quota(
+                    target_user_id, chat_id
+                )
+                LOGGER.info(
+                    f"Reset image quota for user {target_user_id} in chat {chat_id}"
+                )
+                if was_reset:
+                    image_quota_reset_msg = (
+                        f"✓ Скинув ліміт генерації зображень для {target_user_name}\n"
+                    )
+            else:
+                # Chat-wide image quota reset
+                deleted = await image_gen_service.reset_chat_quotas(chat_id)
+                LOGGER.info(
+                    f"Reset image quotas for {deleted} user(s) in chat {chat_id}"
+                )
+                # Show message even if no records existed (quota was already empty)
+                if deleted > 0:
+                    image_quota_reset_msg = (
+                        f"✓ Скинув ліміти зображень для чату ({deleted} користувачів)\n"
+                    )
+                else:
+                    image_quota_reset_msg = (
+                        "✓ Ліміти зображень скинуті для чату (нема активних квот)\n"
+                    )
+        except Exception as e:
+            LOGGER.warning(f"Failed to reset image quotas: {e}", exc_info=True)
 
     # Also clear Redis quotas if available (legacy cleanup with hardcoded namespace)
+    redis_reset_msg = ""
     if redis_client is not None:
         pattern = f"gryag:quota:{chat_id}:*"
         cursor = 0
         try:
+            deleted_keys = 0
             while True:
                 cursor, keys = await redis_client.scan(
                     cursor=cursor, match=pattern, count=100
                 )
                 if keys:
                     await redis_client.delete(*keys)
+                    deleted_keys += len(keys)
                 if cursor == 0:
                     break
+            if deleted_keys > 0:
+                redis_reset_msg = f"✓ Очистив Redis кеш ({deleted_keys} записів)\n"
         except Exception as e:
             LOGGER.warning(
                 f"Failed to clear Redis quotas for chat {chat_id}: {e}",
                 exc_info=True,
             )
 
-    await message.reply(_get_response("reset_done", persona_loader, RESET_DONE))
+    # Build final response
+    if target_user_id is not None:
+        response = (
+            f"<b>Скинув ліміти для {target_user_name}</b>:\n"
+            f"{rate_limit_reset_msg}{image_quota_reset_msg}"
+            if (rate_limit_reset_msg or image_quota_reset_msg)
+            else f"Нема чого скидати для {target_user_name}"
+        )
+    else:
+        response = (
+            f"<b>Обнулив ліміти</b>:\n"
+            f"{rate_limit_reset_msg}{image_quota_reset_msg}{redis_reset_msg}"
+            if (rate_limit_reset_msg or image_quota_reset_msg or redis_reset_msg)
+            else _get_response("reset_done", persona_loader, RESET_DONE)
+        )
+
+    await message.reply(response, parse_mode="HTML")
 
 
 @router.message(Command(commands=["gryagchatinfo", "chatinfo"]))
@@ -317,20 +397,45 @@ async def donate_command(
     chat_id = message.chat.id
 
     if donation_scheduler is None:
-        await message.reply("Donation scheduler is not initialized.")
+        error_msg = (
+            "❌ Donation scheduler not initialized. Please check bot logs and ensure the donation service started correctly."
+        )
+        await message.reply(error_msg)
         LOGGER.error("Donation scheduler is None in donate_command")
         return
 
     # Send donation message immediately
-    success = await donation_scheduler.send_now(chat_id)
+    try:
+        success = await donation_scheduler.send_now(chat_id)
 
-    if success:
-        await message.reply("✅ Donation message sent successfully!")
-        LOGGER.info(
-            f"Admin {message.from_user.id} triggered donation message in chat {chat_id}"
-        )
-    else:
+        if success:
+            await message.reply(
+                "✅ Donation message sent successfully!\n\n"
+                "щоб гряг продовжував функціонувати треба оплачувати його комуналку (API)\n\n"
+                "підтримати проєкт:\n\n"
+                "🔗Посилання на банку\nhttps://send.monobank.ua/jar/77iG8mGBsH\n\n"
+                "💳Номер картки банки\n4874 1000 2180 1892"
+            )
+            LOGGER.info(
+                f"Admin {message.from_user.id} triggered donation message in chat {chat_id}"
+            )
+        else:
+            await message.reply(
+                "❌ Failed to send donation message.\n\n"
+                "Possible reasons:\n"
+                "- Bot doesn't have permission to send messages in this chat\n"
+                "- Chat ID is in the ignored list\n"
+                "- Telegram API error\n\n"
+                "Check bot logs for more details."
+            )
+            LOGGER.error(f"Failed to send donation message in chat {chat_id}")
+    except Exception as e:
+        error_details = str(e)
         await message.reply(
-            "❌ Failed to send donation message. This chat may be in the ignored list. Check logs for details."
+            f"❌ Error sending donation message:\n{error_details}\n\n"
+            "Check bot logs for more details."
         )
-        LOGGER.error(f"Failed to send donation message in chat {chat_id}")
+        LOGGER.error(
+            f"Exception while sending donation message in chat {chat_id}: {e}",
+            exc_info=True,
+        )

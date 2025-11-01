@@ -341,6 +341,87 @@ class ImageGenerationService:
             "unlimited": False,
         }
 
+    async def reset_user_quota(self, user_id: int, chat_id: int) -> bool:
+        """
+        Reset image generation quota for a specific user in a specific chat.
+
+        Args:
+            user_id: Telegram user ID
+            chat_id: Telegram chat ID
+
+        Returns:
+            True if quota was reset successfully (even if no records were deleted)
+        """
+
+        def _reset() -> bool:
+            today = self._get_today_date()
+            conn = sqlite3.connect(self.db_path)
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    DELETE FROM image_quotas
+                    WHERE user_id = ? AND chat_id = ? AND generation_date = ?
+                    """,
+                    (user_id, chat_id, today),
+                )
+                conn.commit()
+                deleted = cursor.rowcount if cursor.rowcount is not None else 0
+                self.logger.info(
+                    f"Reset image quota for user {user_id} in chat {chat_id} (deleted {deleted} record(s))"
+                )
+                # Return True regardless of whether records were deleted
+                # (no records = quota already reset)
+                return True
+            except Exception as e:
+                self.logger.error(
+                    f"Failed to reset image quota for user {user_id}: {e}"
+                )
+                return False
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(_reset)
+
+    async def reset_chat_quotas(self, chat_id: int) -> int:
+        """
+        Reset image generation quotas for all users in a specific chat for today.
+
+        Args:
+            chat_id: Telegram chat ID
+
+        Returns:
+            Number of quota records deleted (0 if none existed)
+        """
+
+        def _reset() -> int:
+            today = self._get_today_date()
+            conn = sqlite3.connect(self.db_path)
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    DELETE FROM image_quotas
+                    WHERE chat_id = ? AND generation_date = ?
+                    """,
+                    (chat_id, today),
+                )
+                conn.commit()
+                deleted = cursor.rowcount if cursor.rowcount is not None else 0
+                self.logger.info(
+                    f"Reset image quotas for {deleted} user(s) in chat {chat_id}"
+                )
+                return deleted
+            except Exception as e:
+                self.logger.error(
+                    f"Failed to reset image quotas for chat {chat_id}: {e}"
+                )
+                return 0
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(_reset)
+
 
 # Tool definition for Gemini function calling
 GENERATE_IMAGE_TOOL_DEFINITION = {
@@ -348,8 +429,9 @@ GENERATE_IMAGE_TOOL_DEFINITION = {
         {
             "name": "generate_image",
             "description": (
-                "Генерує ФОТОРЕАЛІСТИЧНЕ зображення (фото) з текстового опису, якщо користувач не вказав інший стиль (малюнок, ілюстрація, мультик). "
-                "Викликай ЦЕЙ інструмент КОЖНОГО РАЗУ, коли користувач просить намалювати/згенерувати картинку або фото. "
+                "Генерує НОВЕ ФОТОРЕАЛІСТИЧНЕ зображення (фото) з текстового опису. "
+                "Викликай ЛИШЕ коли користувач ЯВНО просить СТВОРИТИ/ЗГЕНЕРУВАТИ/НАМАЛЮВАТИ нове зображення. "
+                "Якщо користувач хоче ЗНАЙТИ/ПОКАЗАТИ існуюче зображення (мальовник, фото, картинку) — використовуй search_web з search_type='images'. "
                 "Не відмовляй текстом і не посилайся на ліміти — сервер сам перевіряє ліміти і поверне відповідь. "
                 "ВАЖЛИВО: Завжди пиши prompt АНГЛІЙСЬКОЮ мовою для кращого результату."
             ),

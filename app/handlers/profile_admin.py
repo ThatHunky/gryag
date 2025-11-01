@@ -573,7 +573,8 @@ async def get_user_facts_command(
 
                     dt = datetime.fromtimestamp(created_at)
                     time_str = dt.strftime("%Y-%m-%d %H:%M")
-                except:
+                except (ValueError, TypeError, OSError) as e:
+                    logger.warning(f"Failed to format memory timestamp {created_at}: {e}")
                     time_str = "?"
 
                 line = f"💭 <code>[{memory_id}]</code> {memory_text}\n"

@@ -16,10 +16,13 @@ Tools include:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Awaitable, Callable
+from io import BytesIO
 
+import aiohttp
 from app.services.calculator import calculator_tool, CALCULATOR_TOOL_DEFINITION
 from app.services.weather import weather_tool, WEATHER_TOOL_DEFINITION
 from app.services.currency import currency_tool, CURRENCY_TOOL_DEFINITION
@@ -165,7 +168,7 @@ def build_tool_definitions(settings: Settings) -> list[dict[str, Any]]:
     tool_definitions.append(get_search_messages_definition())
 
     # Web search (if enabled)
-    if settings.enable_search_grounding:
+    if settings.enable_web_search:
         tool_definitions.append(SEARCH_WEB_TOOL_DEFINITION)
 
     # Calculator
@@ -270,12 +273,56 @@ def build_tool_definitions(settings: Settings) -> list[dict[str, Any]]:
     return tool_definitions
 
 
+def _is_nsfw_query(query: str) -> bool:
+    """Detect if a search query is likely NSFW content."""
+    if not query:
+        return False
+
+    query_lower = query.lower()
+
+    # Strong NSFW indicators (always mark as NSFW)
+    strong_nsfw = {
+        "nude", "naked", "porn", "sex", "xxx", "porno",
+        "boob", "breast", "ass ", "dick", "cock", "pussy", "vagina", "penis",
+        "horny", "masturbate", "orgasm", "stripper",
+        "prostitute", "escort", "nsfw", "18+",
+        "explicit", "uncensored", "fetish", "bdsm",
+        "bondage", "undress", "topless",
+    }
+
+    for keyword in strong_nsfw:
+        if keyword in query_lower:
+            return True
+
+    # Context-sensitive keywords (check for human/girl/woman context)
+    context_keywords = {
+        "sexy": ["girl", "woman", "men", "male", "female", "lady"],
+        "hot": ["girl", "woman", "men", "male", "female"],
+        "erotic": ["art", "image", "photo", "girl", "woman"],
+        "lingerie": ["model", "girl", "woman"],
+        "nude": ["girl", "woman", "model"],
+    }
+
+    for keyword, contexts in context_keywords.items():
+        if keyword in query_lower:
+            # Check if any context word is nearby (within 15 chars)
+            for context in contexts:
+                if context in query_lower:
+                    # Make sure it's related (simple proximity check)
+                    keyword_idx = query_lower.find(keyword)
+                    context_idx = query_lower.find(context)
+                    if abs(keyword_idx - context_idx) < 20:
+                        return True
+
+    return False
+
+
 def build_tool_callbacks(
     settings: Settings,
     store: ContextStore,
     gemini_client: GeminiClient,
     profile_store: UserProfileStore,
-    memory_repo: MemoryRepository,
+    memory_repo: MemoryRepository | None,
     chat_id: int,
     thread_id: int | None,
     message_id: int,
@@ -296,6 +343,7 @@ def build_tool_callbacks(
         store: Context store
         gemini_client: Gemini client
         profile_store: User profile store
+        memory_repo: Memory repository (optional, None disables memory tools)
         chat_id: Current chat ID
         thread_id: Current thread ID (if any)
         message_id: Current message ID
@@ -350,20 +398,174 @@ def build_tool_callbacks(
     callbacks["polls"] = make_tracked_callback("polls", polls_tool)
 
     # Web search (if enabled)
-    if settings.enable_search_grounding:
-        # Use separate API key if provided, otherwise fall back to main key
-        search_api_key = settings.web_search_api_key or settings.gemini_api_key
-        callbacks["search_web"] = make_tracked_callback(
-            "search_web",
-            lambda params: search_web_tool(
-                params,
-                gemini_client,
-                api_key=search_api_key,
-            ),
-        )
+    if settings.enable_web_search:
+        # Create wrapper that downloads and sends images for image searches
+        async def search_web_callback(params: dict[str, Any]) -> str:
+            """Search web and send images if applicable."""
+            # Call the original search_web_tool
+            result_json = await search_web_tool(params, gemini_client, api_key=None)
 
-    # Memory tools (if enabled)
-    if settings.enable_tool_based_memory:
+            try:
+                result = json.loads(result_json)
+            except (json.JSONDecodeError, TypeError):
+                return result_json
+
+            # Check if this was an image search and we have bot/chat_id
+            search_type = params.get("search_type", "text")
+            results = result.get("results", [])
+
+            if (
+                search_type == "images"
+                and results
+                and bot is not None
+                and chat_id is not None
+            ):
+                # Default to 1 image unless explicitly specified
+                max_images = params.get("max_results", 1)
+                if isinstance(max_images, str):
+                    try:
+                        max_images = int(max_images)
+                    except (ValueError, TypeError):
+                        max_images = 1
+                max_images = max(1, min(max_images, 10))  # Clamp to 1-10
+
+                # Check if this is an NSFW search
+                query = params.get("query", "")
+                is_nsfw = _is_nsfw_query(query)
+
+                # Try to download and send images
+                send_options = {}
+                if thread_id is not None:
+                    send_options["message_thread_id"] = thread_id
+                if is_nsfw:
+                    send_options["has_spoiler"] = True
+
+                downloaded_images = []
+                failed_urls = []
+
+                # Download images first
+                for idx, item in enumerate(results):
+                    if len(downloaded_images) >= max_images:
+                        break
+
+                    image_url = item.get("url")
+                    if not image_url:
+                        continue
+
+                    try:
+                        # Download image with timeout
+                        async with aiohttp.ClientSession() as session:
+                            async with session.get(
+                                image_url, timeout=aiohttp.ClientTimeout(total=10)
+                            ) as resp:
+                                if resp.status == 200:
+                                    image_data = await resp.read()
+                                    if len(image_data) > 0:
+                                        downloaded_images.append(
+                                            (image_data, f"search_result_{idx}.jpg")
+                                        )
+                                        logger.debug(
+                                            f"Downloaded image {len(downloaded_images)}: {image_url[:50]}"
+                                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Timeout downloading image: {image_url[:50]}")
+                        failed_urls.append(image_url)
+                    except Exception as e:
+                        logger.warning(
+                            f"Error downloading image from search: {e}"
+                        )
+                        failed_urls.append(image_url)
+
+                # Send downloaded images as media group if multiple, or single photo if one
+                sent_count = 0
+                if downloaded_images:
+                    try:
+                        if len(downloaded_images) == 1:
+                            # Send single image without caption
+                            file = BufferedInputFile(
+                                downloaded_images[0][0],
+                                filename=downloaded_images[0][1],
+                            )
+                            await bot.send_photo(
+                                chat_id=chat_id,
+                                photo=file,
+                                caption=None,
+                                **send_options,
+                            )
+                            sent_count = 1
+                        else:
+                            # Send multiple images as media group (album) without captions
+                            from aiogram.types import InputMediaPhoto
+
+                            media_group = [
+                                InputMediaPhoto(
+                                    media=BufferedInputFile(img_data, filename=filename),
+                                    caption=None,
+                                    has_spoiler=is_nsfw,
+                                )
+                                for img_data, filename in downloaded_images
+                            ]
+                            await bot.send_media_group(
+                                chat_id=chat_id,
+                                media=media_group,
+                                **send_options,
+                            )
+                            sent_count = len(downloaded_images)
+                    except TelegramBadRequest as e:
+                        logger.warning(f"Failed to send search images: {e}")
+                        if "thread not found" in str(e).lower() and thread_id:
+                            # Retry without thread_id
+                            try:
+                                if len(downloaded_images) == 1:
+                                    file = BufferedInputFile(
+                                        downloaded_images[0][0],
+                                        filename=downloaded_images[0][1],
+                                    )
+                                    await bot.send_photo(
+                                        chat_id=chat_id,
+                                        photo=file,
+                                        caption=None,
+                                        has_spoiler=is_nsfw,
+                                    )
+                                    sent_count = 1
+                                else:
+                                    from aiogram.types import InputMediaPhoto
+
+                                    media_group = [
+                                        InputMediaPhoto(
+                                            media=BufferedInputFile(
+                                                img_data, filename=filename
+                                            ),
+                                            caption=None,
+                                            has_spoiler=is_nsfw,
+                                        )
+                                        for img_data, filename in downloaded_images
+                                    ]
+                                    await bot.send_media_group(
+                                        chat_id=chat_id,
+                                        media=media_group,
+                                    )
+                                    sent_count = len(downloaded_images)
+                            except Exception as e2:
+                                logger.warning(
+                                    f"Failed to send search images on retry: {e2}"
+                                )
+
+                logger.info(
+                    f"Image search: sent {sent_count} images, failed {len(failed_urls)}"
+                )
+
+                # Return updated result with send status
+                result["_images_sent"] = sent_count
+                if failed_urls:
+                    result["_failed_urls"] = failed_urls[:3]  # Keep first 3 for debugging
+
+            return json.dumps(result)
+
+        callbacks["search_web"] = make_tracked_callback("search_web", search_web_callback)
+
+    # Memory tools (if enabled and memory_repo available)
+    if settings.enable_tool_based_memory and memory_repo is not None:
         # Helper to filter out internal underscore-prefixed params
         def _filter_internal_params(params: dict[str, Any]) -> dict[str, Any]:
             return {k: v for k, v in params.items() if not k.startswith("_")}
@@ -417,6 +619,7 @@ def build_tool_callbacks(
         and message is not None
         and user_id is not None
     ):
+        logger.info("Registering image generation tool callbacks")
 
         async def generate_image_tool(params: dict[str, Any]) -> str:
             if tools_used_tracker is not None:
@@ -843,4 +1046,5 @@ def build_tool_callbacks(
 
         callbacks["analyze_profile_photo"] = analyze_profile_photo_tool
 
+    logger.info(f"Built {len(callbacks)} tool callbacks: {', '.join(callbacks.keys())}")
     return callbacks

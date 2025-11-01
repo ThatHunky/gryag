@@ -112,7 +112,6 @@ class GeminiClient:
         self._embed_model = embed_model
         self._embedding_cache = embedding_cache
         self._logger = logging.getLogger(__name__)
-        self._search_grounding_supported = True
 
         # Model capability detection
         self._audio_supported = self._detect_audio_support(model)
@@ -335,27 +334,7 @@ class GeminiClient:
                 )
             return None
 
-        # Filter out search grounding if not supported
-        if self._search_grounding_supported:
-            return tools
-        filtered: list[dict[str, Any]] = []
-        for item in tools:
-            if isinstance(item, dict) and any(
-                key in item for key in ("google_search", "google_search_retrieval")
-            ):
-                continue
-            filtered.append(item)
-        return filtered
-
-    def _maybe_disable_search_grounding(self, error_message: str) -> bool:
-        if (
-            "Search Grounding is not supported" in error_message
-            and self._search_grounding_supported
-        ):
-            self._search_grounding_supported = False
-            self._logger.warning(f"Disabling search grounding tools: {error_message}")
-            return True
-        return False
+        return tools
 
     def _maybe_disable_tools(self, error_message: str) -> bool:
         """
@@ -642,6 +621,31 @@ class GeminiClient:
             bool(system_prompt) and self._system_instruction_supported
         )
         filtered_tools = self._filter_tools(tools)
+
+        # Log tool configuration
+        if tools:
+            tool_names = []
+            for tool in tools:
+                if "function_declarations" in tool:
+                    for func in tool["function_declarations"]:
+                        tool_names.append(func.get("name", "unknown"))
+            self._logger.info(f"Requesting with {len(tool_names)} tools: {', '.join(tool_names)}")
+
+            # Enforcement check: warn if tools are provided but not supported
+            if not self._tools_supported:
+                self._logger.error(
+                    f"TOOLS DISABLED: {len(tool_names)} tools provided but _tools_supported=False. "
+                    f"Model: {self._model_name}. Tools will be filtered out!"
+                )
+        if tool_callbacks:
+            self._logger.info(f"Tool callbacks registered: {', '.join(tool_callbacks.keys())}")
+
+        # Check if tools were filtered out
+        if tools and not filtered_tools:
+            self._logger.warning(
+                "All tools were filtered out! This may cause the model to return text descriptions instead of function calls."
+            )
+
         system_instruction = system_prompt if use_system_instruction else None
         contents = assemble(not use_system_instruction)
         call_contents = contents
@@ -744,8 +748,6 @@ class GeminiClient:
                 self._tools_fallback_disabled = (
                     True  # Mark tools as temporarily disabled
                 )
-            elif self._maybe_disable_search_grounding(err_text):
-                filtered_tools = self._filter_tools(tools)
 
             try:
                 response = await self._invoke_model(
@@ -804,6 +806,18 @@ class GeminiClient:
         extracted_thinking = (
             self._extract_thinking(response) if thinking_enabled else ""
         )
+
+        # Log if extracted text contains tool-related keywords
+        if extracted_text:
+            lower_text = extracted_text.lower()
+            tool_keywords = ["tool_call", "function_call", "generate_image", "search_web"]
+            found_keywords = [kw for kw in tool_keywords if kw in lower_text]
+            if found_keywords:
+                self._logger.warning(
+                    f"DETECTED TOOL KEYWORDS IN TEXT RESPONSE: {', '.join(found_keywords)}. "
+                    f"First 200 chars: {extracted_text[:200]}"
+                )
+
         self._logger.info(
             f"Extracted text length: {len(extracted_text)}, is_empty: {not extracted_text or extracted_text.isspace()}, "
             f"thinking enabled: {thinking_enabled}, thinking length: {len(extracted_thinking)}"
@@ -811,8 +825,7 @@ class GeminiClient:
 
         return {"text": extracted_text, "thinking": extracted_thinking}
 
-    @staticmethod
-    def _extract_text(response: Any) -> str:
+    def _extract_text(self, response: Any) -> str:
         candidates = getattr(response, "candidates", None) or []
         for candidate in candidates:
             content = getattr(candidate, "content", None)
@@ -1078,21 +1091,6 @@ class GeminiClient:
                 self._logger.exception(
                     "Gemini tool-followup failed; retrying without tools"
                 )
-                if self._maybe_disable_search_grounding(err_text):
-                    filtered_tools = self._filter_tools(tools)
-                    if filtered_tools:
-                        try:
-                            current_response = await self._invoke_model(
-                                contents,
-                                filtered_tools,
-                                system_instruction,
-                                include_thinking=include_thinking,
-                            )
-                            continue
-                        except Exception:
-                            self._logger.exception(
-                                "Gemini follow-up retry with filtered tools failed"
-                            )
                 try:
                     current_response = await self._invoke_model(
                         contents,

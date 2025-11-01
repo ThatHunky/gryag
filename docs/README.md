@@ -16,6 +16,9 @@ Structure recommended:
 
 ## Recent Changes
 
+**October 30, 2025**: **🛠️ C++ Tools & Admin Slice** — Weather, currency, polls, web/search, memory, and Gemini image tools now work in `cpp/`, along with admin/profile handlers and Redis-backed locks. Verification: `.venv/bin/cmake -S cpp -B cpp/build && .venv/bin/cmake --build cpp/build -j`
+**October 30, 2025**: **⚙️ C++ Bot Scaffold** — Added `cpp/` subproject with tgbot-cpp runtime, Gemini client, context store, persona loader, and tool registry scaffolding. Verification: `cmake -S cpp -B cpp/build && cmake --build cpp/build -j`
+
 **October 28, 2025**: **🧠 Gemini 2.5 Thinking Support Fixed** — Fixed critical bug where Gemini 2.5 Flash was incorrectly detected as not supporting thinking mode. The detection logic was checking for keywords like "pro"/"reasoning"/"thinking" but **all Gemini 2.5 series models support thinking** (2.5-flash, 2.5-pro, 2.5-flash-lite) per [official Google documentation](https://ai.google.dev/gemini-api/docs/thinking). Updated `_detect_thinking_support()` to check for "2.5" in model name and added support for `-latest` variants (`gemini-flash-latest`, `gemini-pro-latest`). This fix enables thinking budgets (0-24576 tokens for Flash) and eliminates false warnings. Verification: `.venv/bin/pytest tests/unit/test_gemini_thinking_detection.py -v` (18 tests pass).
 
 **October 28, 2025**: **🧠 Thinking Display Controls** — Added `SHOW_THINKING_TO_USERS` to keep Gemini's reasoning hidden from chat participants unless explicitly enabled, escaped all reasoning/final replies for Telegram HTML safety, added `THINKING_BUDGET_TOKENS` (default 1024) for tunable chain-of-thought budgets, and added a fallback to rerun generations without thinking when Gemini returns only chain-of-thought. Verification: `.venv/bin/pytest tests/unit/test_gemini_empty_tool_response.py`.

@@ -13,6 +13,44 @@ import aiosqlite
 logger = logging.getLogger(__name__)
 
 
+async def execute_with_retry(
+    coro_func,
+    max_retries: int = 5,
+    initial_delay: float = 0.1,
+    max_delay: float = 2.0,
+) -> None:
+    """
+    Execute an async operation with exponential backoff retry for database locks.
+
+    Args:
+        coro_func: Async function to execute
+        max_retries: Maximum number of attempts
+        initial_delay: Initial delay in seconds for retry
+        max_delay: Maximum delay cap for backoff
+    """
+    import aiosqlite
+
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            return await coro_func()
+        except aiosqlite.OperationalError as e:
+            if "database is locked" not in str(e):
+                raise
+            last_error = e
+            if attempt < max_retries - 1:
+                delay = min(initial_delay * (2 ** attempt), max_delay)
+                logger.warning(
+                    f"Database locked, retrying in {delay:.2f}s (attempt {attempt + 1}/{max_retries})"
+                )
+                await asyncio.sleep(delay)
+
+    if last_error:
+        logger.error(f"Failed after {max_retries} retries: {last_error}")
+        raise last_error
+    raise RuntimeError("Database operation failed")
+
+
 @asynccontextmanager
 async def get_db_connection(
     db_path: Path | str,
@@ -38,20 +76,27 @@ async def get_db_connection(
     last_error = None
 
     # Retry loop for connection setup
+    db = None
     for attempt in range(max_retries):
         try:
-            async with aiosqlite.connect(db_path, timeout=timeout) as db:
-                # Enable WAL mode for better concurrent access
-                await db.execute("PRAGMA journal_mode=WAL")
-                # Set busy timeout to handle locks automatically (in milliseconds)
-                # Increased to 10 seconds to handle contentious locks
-                await db.execute("PRAGMA busy_timeout=10000")
-                yield db
-            return
+            db = await aiosqlite.connect(db_path, timeout=timeout)
+            # Enable WAL mode for better concurrent access
+            await db.execute("PRAGMA journal_mode=WAL")
+            # Set busy timeout to handle locks automatically (in milliseconds)
+            # Increased to 30 seconds to handle contentious locks with many concurrent operations
+            await db.execute("PRAGMA busy_timeout=30000")
+            # Connection setup succeeded, break out of retry loop
+            break
         except aiosqlite.OperationalError as e:
             if "database is locked" not in str(e):
                 raise
             last_error = e
+            if db is not None:
+                try:
+                    await db.close()
+                except Exception:
+                    pass
+                db = None
             if attempt < max_retries - 1:
                 # Exponential backoff: 0.1s, 0.2s, 0.4s
                 wait_time = 0.1 * (2 ** attempt)
@@ -62,6 +107,15 @@ async def get_db_connection(
             else:
                 logger.error(f"Failed to acquire database connection after {max_retries} retries")
                 raise
+
+    # If connection setup succeeded, yield it (no retry logic here)
+    if db is None:
+        raise RuntimeError("Failed to establish database connection")
+
+    try:
+        yield db
+    finally:
+        await db.close()
     
 
 async def init_database(db_path: Path | str) -> None:

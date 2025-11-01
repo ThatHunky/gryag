@@ -1,4 +1,8 @@
 # Changelog
+
+## 2025-11-01
+- Moved three root-level documentation files into `docs/archived_root_docs/` to tidy the repository root: `README_INTEGRATION.md`, `IMPLEMENTATION_INDEX.md`, `IMPLEMENTATION_STATUS_COMPARISON.md`.
+# Changelog
 <!-- markdownlint-disable -->
 
 All notable changes to gryag's memory, context, and learning systems.

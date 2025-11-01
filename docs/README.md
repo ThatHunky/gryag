@@ -16,6 +16,8 @@ Structure recommended:
 
 ## Recent Changes
 
+**2025-11-01**: Moved three root-level documentation files into `docs/archived_root_docs/` to tidy the repository root: `README_INTEGRATION.md`, `IMPLEMENTATION_INDEX.md`, `IMPLEMENTATION_STATUS_COMPARISON.md`. Verification: `ls docs/archived_root_docs/`
+
 **October 30, 2025**: **🛠️ C++ Tools & Admin Slice** — Weather, currency, polls, web/search, memory, and Gemini image tools now work in `cpp/`, along with admin/profile handlers and Redis-backed locks. Verification: `.venv/bin/cmake -S cpp -B cpp/build && .venv/bin/cmake --build cpp/build -j`
 **October 30, 2025**: **⚙️ C++ Bot Scaffold** — Added `cpp/` subproject with tgbot-cpp runtime, Gemini client, context store, persona loader, and tool registry scaffolding. Verification: `cmake -S cpp -B cpp/build && cmake --build cpp/build -j`
 

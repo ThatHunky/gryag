@@ -44,6 +44,10 @@ from app.services.tools import (
     FORGET_ALL_MEMORIES_DEFINITION,
     SET_PRONOUNS_DEFINITION,
 )
+from app.services.tools.moderation_tools import (
+    build_tool_definitions as build_moderation_tool_definitions,
+    build_tool_callbacks as build_moderation_tool_callbacks,
+)
 from app.handlers.chat_tools import (
     build_tool_definitions as build_tool_definitions_registry,
     build_tool_callbacks as build_tool_callbacks_registry,
@@ -67,6 +71,7 @@ from app.services.context import (
     HybridSearchEngine,
     EpisodicMemoryStore,
 )
+from app.services.telegram_service import TelegramService
 from app.services.bot_profile import BotProfileStore
 from app.services.bot_learning import BotLearningEngine
 from app.services.rate_limiter import RateLimiter
@@ -1353,6 +1358,7 @@ async def handle_group_message(
     memory_repo: MemoryRepository | None = None,
     chat_profile_store: Any | None = None,
     donation_scheduler: Any | None = None,
+    telegram_service: TelegramService | None = None,
     data: dict[str, Any] | None = None,
 ):
     if message.from_user is None or message.from_user.is_bot:
@@ -1427,11 +1433,11 @@ async def handle_group_message(
 
     # Check admin status first (admins bypass rate limiting and processing locks)
     is_admin = user_id in settings.admin_user_ids_list
+    lock_key = (chat_id, user_id)
 
     # Processing lock: Check if already processing a message from this user
     # (Skip for admins)
     if not is_admin:
-        lock_key = (chat_id, user_id)
 
         # Check if processing (via middleware data)
         processing_check = data.get("_processing_lock_check")
@@ -1489,6 +1495,7 @@ async def handle_group_message(
                 image_gen_service=image_gen_service,
                 donation_scheduler=donation_scheduler,
                 memory_repo=memory_repo,
+                telegram_service=telegram_service,
                 bot_username=bot_username,
                 bot_id=bot_id,
                 is_admin=is_admin,
@@ -1499,8 +1506,7 @@ async def handle_group_message(
             )
         except Exception as handler_exc:
             LOGGER.critical(
-                f"Message handler crashed unexpectedly: {handler_exc}",
-                exc_info=True
+                f"Message handler crashed unexpectedly: {handler_exc}", exc_info=True
             )
             # Try to notify user of the error
             try:
@@ -1511,7 +1517,7 @@ async def handle_group_message(
             except Exception as notify_exc:
                 LOGGER.error(
                     f"Failed to send error notification to user: {notify_exc}",
-                    exc_info=True
+                    exc_info=True,
                 )
     finally:
         # Release lock
@@ -1549,6 +1555,7 @@ async def _handle_bot_message_locked(
     image_gen_service: ImageGenerationService | None,
     donation_scheduler: Any,
     memory_repo: MemoryRepository,
+    telegram_service: TelegramService | None,
     bot_username: str,
     bot_id: int | None,
     is_admin: bool,
@@ -1560,7 +1567,7 @@ async def _handle_bot_message_locked(
     """Handle bot-addressed message with processing lock acquired."""
 
     # Rate limiting (skip for admins)
-    if not is_admin and rate_limiter is not None:
+    if not is_admin and rate_limiter is not None and message.from_user:
         allowed, remaining, retry_after = await rate_limiter.check_and_increment(
             user_id=message.from_user.id
         )
@@ -1786,6 +1793,7 @@ async def _handle_bot_message_locked(
         key = (reply.chat.id, reply.message_thread_id)
         stored_queue = _RECENT_CONTEXT.get(key)
         if stored_queue:
+            for item in reversed(stored_queue):
             for item in reversed(stored_queue):
                 if item.get("message_id") == reply.message_id:
                     reply_context = item
@@ -2017,11 +2025,13 @@ async def _handle_bot_message_locked(
     # Centralized tool definitions (registry) with caching
     # Note: Memory tools are already included in build_tool_definitions_registry
     global _TOOL_DEFINITIONS_CACHE, _TOOL_DEFINITIONS_SETTINGS_CACHE
-    if '_TOOL_DEFINITIONS_CACHE' not in globals():
+    if "_TOOL_DEFINITIONS_CACHE" not in globals():
         _TOOL_DEFINITIONS_CACHE = None
         _TOOL_DEFINITIONS_SETTINGS_CACHE = None
     if _TOOL_DEFINITIONS_CACHE is None or _TOOL_DEFINITIONS_SETTINGS_CACHE != settings:
-        tool_definitions: list[dict[str, Any]] = build_tool_definitions_registry(settings)
+        tool_definitions: list[dict[str, Any]] = build_tool_definitions_registry(
+            settings
+        )
         _TOOL_DEFINITIONS_CACHE = tool_definitions
         _TOOL_DEFINITIONS_SETTINGS_CACHE = settings
     else:
@@ -2055,7 +2065,7 @@ async def _handle_bot_message_locked(
 
     # System prompt caching (static persona only, dynamic persona disables cache)
     global _SYSTEM_PROMPT_CACHE, _SYSTEM_PROMPT_PERSONA_LOADER_CACHE, _SYSTEM_PROMPT_CHAT_ID_CACHE
-    if '_SYSTEM_PROMPT_CACHE' not in globals():
+    if "_SYSTEM_PROMPT_CACHE" not in globals():
         _SYSTEM_PROMPT_CACHE = None
         _SYSTEM_PROMPT_PERSONA_LOADER_CACHE = None
         _SYSTEM_PROMPT_CHAT_ID_CACHE = None
@@ -2084,7 +2094,9 @@ async def _handle_bot_message_locked(
                         f"scope={custom_prompt.scope}, chat_id={custom_prompt.chat_id}"
                     )
             except Exception as e:
-                LOGGER.warning(f"Failed to fetch custom system prompt, using default: {e}")
+                LOGGER.warning(
+                    f"Failed to fetch custom system prompt, using default: {e}"
+                )
         if cacheable:
             _SYSTEM_PROMPT_CACHE = base_system_prompt
             _SYSTEM_PROMPT_PERSONA_LOADER_CACHE = persona_loader
@@ -2951,8 +2963,16 @@ async def _handle_bot_message_locked(
         tool_description_detected = False
         if original_reply and original_reply != reply_text:
             lower_original = original_reply.lower()
-            tool_keywords = ["tool_call", "function_call", "generate_image", "edit_image", "search_web"]
-            tool_description_detected = any(kw in lower_original for kw in tool_keywords)
+            tool_keywords = [
+                "tool_call",
+                "function_call",
+                "generate_image",
+                "edit_image",
+                "search_web",
+            ]
+            tool_description_detected = any(
+                kw in lower_original for kw in tool_keywords
+            )
 
         if (
             settings.enable_image_generation
@@ -3116,7 +3136,7 @@ async def _handle_bot_message_locked(
             except Exception as exc:
                 LOGGER.error(
                     f"Failed to send response message to chat {chat_id}: {exc}",
-                    exc_info=True
+                    exc_info=True,
                 )
                 response_message = None
 

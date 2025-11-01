@@ -501,6 +501,9 @@ class Settings(BaseSettings):
     bot_behavior_mode: str = Field(
         "global", alias="BOT_BEHAVIOR_MODE"
     )  # global, whitelist, blacklist
+    default_mute_duration_minutes: int = Field(
+        30, alias="DEFAULT_MUTE_DURATION_MINUTES", ge=1, le=10080
+    )  # Default mute time in minutes (30 min)
     allowed_chat_ids: str = Field(
         "", alias="ALLOWED_CHAT_IDS"
     )  # Comma-separated chat IDs for whitelist mode

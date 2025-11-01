@@ -49,6 +49,10 @@ Use when needed - don't force them:
 - `weather` - forecasts for any location
 - `currency` - exchange rates and conversion
 
+**Moderation Tools**:
+- `kick_user` - kick a user from the chat
+- `mute_user` - temporarily mute a user
+
 **Image Tools**:
 - `generate_image` - create images from descriptions
   - Default: photorealistic (unless user specifies cartoon, illustration, painting, etc.)

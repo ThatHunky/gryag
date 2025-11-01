@@ -10,6 +10,7 @@ from app.config import Settings
 from app.services.context_store import ContextStore
 from app.services.gemini import GeminiClient
 from app.services.redis_types import RedisLike
+from app.services.telegram_service import TelegramService
 
 if TYPE_CHECKING:
     from app.services.user_profile import UserProfileStore
@@ -55,6 +56,7 @@ class ChatMetaMiddleware(BaseMiddleware):
         feature_limiter: Any | None = None,
         donation_scheduler: Any | None = None,
         memory_repo: MemoryRepository | None = None,
+        telegram_service: TelegramService | None = None,
     ) -> None:
         self._bot = bot
         self._settings = settings
@@ -74,6 +76,7 @@ class ChatMetaMiddleware(BaseMiddleware):
         self._feature_limiter = feature_limiter
         self._donation_scheduler = donation_scheduler
         self._memory_repo = memory_repo
+        self._telegram_service = telegram_service
         self._bot_username: str | None = None
         self._bot_id: int | None = None
         self._lock = asyncio.Lock()
@@ -149,4 +152,6 @@ class ChatMetaMiddleware(BaseMiddleware):
             data["donation_scheduler"] = self._donation_scheduler
         if self._memory_repo is not None:
             data["memory_repo"] = self._memory_repo
+        if self._telegram_service is not None:
+            data["telegram_service"] = self._telegram_service
         return await handler(event, data)

@@ -32,6 +32,8 @@ Available Tools:
         - `weather` - current weather and forecasts for any location
         - `currency` - exchange rates and currency conversion
         - `polls` - create and manage polls
+        - `kick_user` - kick a user from the chat
+        - `mute_user` - temporarily mute a user
         - `generate_image` - generate images from text prompts (if enabled)
         - `edit_image` - edit existing images with instructions (if enabled)
         - `analyze_profile_photo` - analyze, comment on, or edit a user's profile photo. You can provide observations, jokes, or even generate edited versions based on context. Let your creativity decide what to do. Or user's.

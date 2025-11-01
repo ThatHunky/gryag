@@ -57,6 +57,7 @@ from app.services.context.episode_summarizer import EpisodeSummarizer
 from app.services.bot_profile import BotProfileStore
 from app.services.bot_learning import BotLearningEngine
 from app.repositories.memory_repository import MemoryRepository
+from app.services.telegram_service import TelegramService
 
 
 async def get_public_ip() -> str:
@@ -386,6 +387,10 @@ async def main() -> None:
 
     redis_client = await init_redis_client(settings)
 
+    # Initialize Telegram service for moderation actions
+    telegram_service = TelegramService(bot=bot, settings=settings)
+    logging.info("Telegram service initialized for moderation actions.")
+
     chat_meta_middleware = ChatMetaMiddleware(
         bot,
         settings,
@@ -405,6 +410,7 @@ async def main() -> None:
         feature_limiter=feature_limiter,
         donation_scheduler=donation_scheduler,
         memory_repo=memory_repo,
+        telegram_service=telegram_service,
     )
 
     dispatcher.message.middleware(chat_meta_middleware)

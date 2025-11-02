@@ -1794,7 +1794,6 @@ async def _handle_bot_message_locked(
         stored_queue = _RECENT_CONTEXT.get(key)
         if stored_queue:
             for item in reversed(stored_queue):
-            for item in reversed(stored_queue):
                 if item.get("message_id") == reply.message_id:
                     reply_context = item
                     if item.get("media_parts"):
@@ -2024,18 +2023,10 @@ async def _handle_bot_message_locked(
 
     # Centralized tool definitions (registry) with caching
     # Note: Memory tools are already included in build_tool_definitions_registry
-    global _TOOL_DEFINITIONS_CACHE, _TOOL_DEFINITIONS_SETTINGS_CACHE
-    if "_TOOL_DEFINITIONS_CACHE" not in globals():
-        _TOOL_DEFINITIONS_CACHE = None
-        _TOOL_DEFINITIONS_SETTINGS_CACHE = None
-    if _TOOL_DEFINITIONS_CACHE is None or _TOOL_DEFINITIONS_SETTINGS_CACHE != settings:
-        tool_definitions: list[dict[str, Any]] = build_tool_definitions_registry(
-            settings
-        )
-        _TOOL_DEFINITIONS_CACHE = tool_definitions
-        _TOOL_DEFINITIONS_SETTINGS_CACHE = settings
-    else:
-        tool_definitions: list[dict[str, Any]] = _TOOL_DEFINITIONS_CACHE
+    # Note: Admin status affects moderation tool availability, so we don't cache across different admin statuses
+    tool_definitions: list[dict[str, Any]] = build_tool_definitions_registry(
+        settings, is_admin=is_admin
+    )
 
     # Enrich with user profile context
     # Note: If using multi-level context, profile is already included
@@ -2607,6 +2598,8 @@ async def _handle_bot_message_locked(
         message=message,
         image_gen_service=image_gen_service,
         feature_limiter=feature_limiter,
+        is_admin=is_admin,
+        telegram_service=telegram_service,
     )
     # Web search, image tools, and memory tool callbacks are provided by registry
 

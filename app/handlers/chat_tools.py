@@ -53,6 +53,10 @@ from app.repositories.memory_repository import MemoryRepository
 from app.config import Settings
 from app.services.media import collect_media_parts
 from app.services.profile_photo_tool import get_user_profile_photo
+from app.services.tools.moderation_tools import (
+    build_tool_definitions as build_moderation_tool_definitions,
+    build_tool_callbacks as build_moderation_tool_callbacks,
+)
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import BufferedInputFile
 
@@ -152,12 +156,13 @@ def get_search_messages_definition() -> dict[str, Any]:
     }
 
 
-def build_tool_definitions(settings: Settings) -> list[dict[str, Any]]:
+def build_tool_definitions(settings: Settings, is_admin: bool = False) -> list[dict[str, Any]]:
     """
     Build the complete list of tool definitions based on settings.
 
     Args:
         settings: Application settings
+        is_admin: Whether the user is an admin (for moderation tools)
 
     Returns:
         List of tool definitions in Gemini function calling format
@@ -195,6 +200,12 @@ def build_tool_definitions(settings: Settings) -> list[dict[str, Any]]:
         tool_definitions.append(FORGET_MEMORY_DEFINITION)
         tool_definitions.append(FORGET_ALL_MEMORIES_DEFINITION)
         tool_definitions.append(SET_PRONOUNS_DEFINITION)
+
+    # Moderation tools - always include, bot will use autonomously
+    # Telegram API will enforce if bot has actual permission to execute
+    logger.debug("Adding moderation tool definitions (bot can use autonomously)")
+    moderation_defs = build_moderation_tool_definitions()
+    tool_definitions.append(moderation_defs)
 
     # Media analysis helpers (always available; use reply/current message media)
     tool_definitions.append(
@@ -334,6 +345,8 @@ def build_tool_callbacks(
     message: Any | None = None,
     image_gen_service: Any | None = None,
     feature_limiter: Any | None = None,
+    is_admin: bool = False,
+    telegram_service: Any | None = None,
 ) -> dict[str, Callable[[dict[str, Any]], Awaitable[str]]]:
     """
     Build the complete dictionary of tool callbacks.
@@ -349,6 +362,12 @@ def build_tool_callbacks(
         message_id: Current message ID
         tools_used_tracker: Optional list to track which tools are called
         feature_limiter: Feature rate limiter for throttling (optional)
+        user_id: User ID (optional, for user-specific tools)
+        bot: Aiogram bot instance (optional, for bot commands)
+        message: Telegram message object (optional, for message context)
+        image_gen_service: Image generation service (optional)
+        is_admin: Whether the user is an admin (for moderation tools)
+        telegram_service: Telegram service instance (optional, needed for moderation tools)
 
     Returns:
         Dictionary mapping tool names to callback functions
@@ -1045,6 +1064,16 @@ def build_tool_callbacks(
                 )
 
         callbacks["analyze_profile_photo"] = analyze_profile_photo_tool
+
+    # Moderation tools - always include if telegram_service available
+    # Bot can use autonomously; Telegram API enforces actual permissions
+    if telegram_service is not None:
+        logger.debug(f"Building moderation tool callbacks (bot can use autonomously)")
+        moderation_callbacks = build_moderation_tool_callbacks(telegram_service)
+        callbacks.update(moderation_callbacks)
+        logger.debug(f"Added {len(moderation_callbacks)} moderation callbacks")
+    else:
+        logger.warning(f"telegram_service is None - moderation tools not available")
 
     logger.info(f"Built {len(callbacks)} tool callbacks: {', '.join(callbacks.keys())}")
     return callbacks

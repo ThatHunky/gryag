@@ -19,7 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
+import asyncpg
+from app.infrastructure.query_converter import convert_query_to_postgres
 
 from app.config import Settings
 from app.infrastructure.db_utils import get_db_connection
@@ -73,7 +74,7 @@ class HybridSearchEngine:
         settings: Settings,
         gemini_client: Any,
     ):
-        self.db_path = Path(db_path)
+        self.database_url = str(db_path)  # Accept database_url string
         self.settings = settings
         self.gemini = gemini_client
 
@@ -221,10 +222,18 @@ class HybridSearchEngine:
             """
             params.append(min(limit, self.settings.max_search_candidates))
 
-            async with get_db_connection(self.db_path) as db:
-                db.row_factory = aiosqlite.Row
-                async with db.execute(query_sql, params) as cursor:
-                    rows = await cursor.fetchall()
+            # Convert ? to $1, $2, etc.
+            param_count = 0
+            query_pg = ""
+            for char in query_sql:
+                if char == "?":
+                    param_count += 1
+                    query_pg += f"${param_count}"
+                else:
+                    query_pg += char
+            
+            async with get_db_connection(self.database_url) as conn:
+                rows = await conn.fetch(query_pg, *params)
 
             # Calculate similarities
             results = []
@@ -327,10 +336,18 @@ class HybridSearchEngine:
             """
             params.append(limit)
 
-            async with get_db_connection(self.db_path) as db:
-                db.row_factory = aiosqlite.Row
-                async with db.execute(query_sql, params) as cursor:
-                    rows = await cursor.fetchall()
+            # Convert ? to $1, $2, etc.
+            param_count = 0
+            query_pg = ""
+            for char in query_sql:
+                if char == "?":
+                    param_count += 1
+                    query_pg += f"${param_count}"
+                else:
+                    query_pg += char
+            
+            async with get_db_connection(self.database_url) as conn:
+                rows = await conn.fetch(query_pg, *params)
 
             # Build results
             results = []

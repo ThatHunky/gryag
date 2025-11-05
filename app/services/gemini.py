@@ -933,6 +933,18 @@ class GeminiClient:
                 finish_reason = getattr(candidate, "finish_reason", None)
                 if finish_reason:
                     self._logger.info(f"Candidate finish_reason: {finish_reason}")
+                    
+                    # Check if content was blocked due to safety filters
+                    if "PROHIBITED_CONTENT" in str(finish_reason):
+                        safety_ratings = getattr(candidate, "safety_ratings", None)
+                        self._logger.warning(
+                            f"Content blocked by Gemini safety filters: finish_reason={finish_reason}, safety_ratings={safety_ratings}"
+                        )
+                        raise GeminiContentBlockedError(
+                            "Content blocked due to policy violation",
+                            block_reason=str(finish_reason),
+                            safety_ratings=safety_ratings,
+                        )
 
                 content = getattr(candidate, "content", None)
                 if not content:

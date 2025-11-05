@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
 
 from app.config import Settings
 
@@ -89,11 +88,11 @@ class EpisodeBoundaryDetector:
 
     def __init__(
         self,
-        db_path: Path | str,
+        database_url: str,
         settings: Settings,
         gemini_client: Any,
     ):
-        self.db_path = Path(db_path)
+        self.database_url = str(database_url)
         self.settings = settings
         self.gemini = gemini_client
         self._init_lock = asyncio.Lock()

@@ -31,7 +31,13 @@ async def _download(bot: Bot, file_id: str) -> bytes:
     """Download a file from Telegram servers."""
     # Resolve file path first (may raise) and then perform HTTP GET with retries
     try:
-        file = await bot.get_file(file_id)
+        # Add timeout to bot.get_file() call (15 seconds)
+        file = await asyncio.wait_for(bot.get_file(file_id), timeout=15.0)
+    except asyncio.TimeoutError:
+        LOGGER.warning(
+            "Timed out fetching file metadata for %s (timeout: 15s)", file_id
+        )
+        return b""
     except Exception as exc:  # network or API error fetching file metadata
         LOGGER.warning(
             "Failed to fetch file metadata for %s: %s", file_id, exc, exc_info=True
@@ -43,10 +49,11 @@ async def _download(bot: Bot, file_id: str) -> bytes:
         return b""
 
     url = f"https://api.telegram.org/file/bot{bot.token}/{quote(file_path)}"
-    timeout = aiohttp.ClientTimeout(total=60, connect=10)  # keep existing timeout
+    timeout = aiohttp.ClientTimeout(total=15, connect=5)  # Reduced from 60s to 15s
 
     # Retry loop for transient network errors (DNS, TCP resets, timeouts)
-    max_attempts = 3
+    # Reduced from 3 to 1 attempt to fail fast
+    max_attempts = 1
     for attempt in range(1, max_attempts + 1):
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:

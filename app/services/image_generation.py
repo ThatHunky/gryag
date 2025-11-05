@@ -10,13 +10,15 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-import sqlite3
 import time
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+import asyncpg
+from app.infrastructure.query_converter import convert_query_to_postgres
+from app.infrastructure.db_utils import get_db_connection
 from google import genai
 from google.genai import types
 from PIL import Image
@@ -44,7 +46,7 @@ class ImageGenerationService:
     def __init__(
         self,
         api_key: str,
-        db_path: Path | str,
+        database_url: str,
         daily_limit: int = 3,
         admin_user_ids: list[int] | None = None,
     ):
@@ -53,48 +55,29 @@ class ImageGenerationService:
 
         Args:
             api_key: Google Gemini API key
-            db_path: Path to SQLite database
+            database_url: PostgreSQL connection string
             daily_limit: Maximum images per user per day (default: 3)
             admin_user_ids: List of admin user IDs who bypass limits
         """
         self.client = genai.Client(api_key=api_key)
         self.model = "gemini-2.5-flash-image"
-        self.db_path = Path(db_path)
+        self.database_url = str(database_url)
         self.daily_limit = daily_limit
         self.admin_user_ids = set(admin_user_ids or [])
         self.logger = logging.getLogger(f"{__name__}.ImageGenerationService")
-        self._init_db()
 
-    def _init_db(self) -> None:
+    async def _init_db(self) -> None:
         """Initialize database connection and ensure schema exists."""
-        # Schema is applied via db/schema.sql on startup
+        # Schema is applied via db/schema_postgresql.sql on startup
         # This just verifies the table exists
-        conn = sqlite3.connect(self.db_path)
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT name FROM sqlite_master 
-                WHERE type='table' AND name='image_quotas'
-                """
-            )
-            if not cursor.fetchone():
-                self.logger.warning("image_quotas table not found - creating it")
-                cursor.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS image_quotas (
-                        user_id INTEGER NOT NULL,
-                        chat_id INTEGER NOT NULL,
-                        generation_date TEXT NOT NULL,
-                        images_generated INTEGER DEFAULT 0,
-                        last_generation_ts INTEGER,
-                        PRIMARY KEY (user_id, chat_id, generation_date)
-                    )
-                    """
+        async with get_db_connection(self.database_url) as conn:
+            try:
+                await conn.execute("SELECT 1 FROM image_quotas LIMIT 1")
+                self.logger.info("image_quotas table exists")
+            except asyncpg.PostgresError:
+                self.logger.warning(
+                    "image_quotas table missing, it will be created on next schema migration"
                 )
-                conn.commit()
-        finally:
-            conn.close()
 
     def _get_today_date(self) -> str:
         """Get today's date in YYYY-MM-DD format (UTC)."""
@@ -124,26 +107,19 @@ class ImageGenerationService:
 
         today = self._get_today_date()
 
-        def _check() -> tuple[int, int]:
-            conn = sqlite3.connect(self.db_path)
-            try:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT images_generated FROM image_quotas
-                    WHERE user_id = ? AND chat_id = ? AND generation_date = ?
-                    """,
-                    (user_id, chat_id, today),
-                )
-                row = cursor.fetchone()
-                used = row[0] if row else 0
-                return used, self.daily_limit
-            finally:
-                conn.close()
-
-        used, limit = await asyncio.to_thread(_check)
-        has_quota = used < limit
-        return has_quota, used, limit
+        query, params = convert_query_to_postgres(
+            """
+            SELECT images_generated FROM image_quotas
+            WHERE user_id = $1 AND chat_id = $2 AND generation_date = $3
+            """,
+            (user_id, chat_id, today),
+        )
+        async with get_db_connection(self.database_url) as conn:
+            row = await conn.fetchrow(query, *params)
+            used = row["images_generated"] if row else 0
+            limit = self.daily_limit
+            has_quota = used < limit
+            return has_quota, used, limit
 
     async def increment_quota(self, user_id: int, chat_id: int) -> None:
         """
@@ -159,27 +135,20 @@ class ImageGenerationService:
         today = self._get_today_date()
         now = int(time.time())
 
-        def _increment() -> None:
-            conn = sqlite3.connect(self.db_path)
-            try:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    INSERT INTO image_quotas 
-                        (user_id, chat_id, generation_date, images_generated, last_generation_ts)
-                    VALUES (?, ?, ?, 1, ?)
-                    ON CONFLICT(user_id, chat_id, generation_date) 
-                    DO UPDATE SET 
-                        images_generated = images_generated + 1,
-                        last_generation_ts = ?
-                    """,
-                    (user_id, chat_id, today, now, now),
-                )
-                conn.commit()
-            finally:
-                conn.close()
-
-        await asyncio.to_thread(_increment)
+        # Use PostgreSQL's INSERT ... ON CONFLICT for atomic upsert
+        query, params = convert_query_to_postgres(
+            """
+            INSERT INTO image_quotas (user_id, chat_id, generation_date, images_generated, last_generation_ts)
+            VALUES ($1, $2, $3, 1, $4)
+            ON CONFLICT (user_id, chat_id, generation_date)
+            DO UPDATE SET
+                images_generated = image_quotas.images_generated + 1,
+                last_generation_ts = $4
+            """,
+            (user_id, chat_id, today, now),
+        )
+        async with get_db_connection(self.database_url) as conn:
+            await conn.execute(query, *params)
 
     async def generate_image(
         self,
@@ -353,35 +322,30 @@ class ImageGenerationService:
             True if quota was reset successfully (even if no records were deleted)
         """
 
-        def _reset() -> bool:
-            today = self._get_today_date()
-            conn = sqlite3.connect(self.db_path)
-            try:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    DELETE FROM image_quotas
-                    WHERE user_id = ? AND chat_id = ? AND generation_date = ?
-                    """,
-                    (user_id, chat_id, today),
-                )
-                conn.commit()
-                deleted = cursor.rowcount if cursor.rowcount is not None else 0
+        today = self._get_today_date()
+        
+        query, params = convert_query_to_postgres(
+            """
+            DELETE FROM image_quotas
+            WHERE user_id = $1 AND chat_id = $2 AND generation_date = $3
+            """,
+            (user_id, chat_id, today),
+        )
+        try:
+            async with get_db_connection(self.database_url) as conn:
+                result = await conn.execute(query, *params)
+                deleted = int(result.split()[-1]) if result.split()[-1].isdigit() else 0
                 self.logger.info(
                     f"Reset image quota for user {user_id} in chat {chat_id} (deleted {deleted} record(s))"
                 )
                 # Return True regardless of whether records were deleted
                 # (no records = quota already reset)
                 return True
-            except Exception as e:
-                self.logger.error(
-                    f"Failed to reset image quota for user {user_id}: {e}"
-                )
-                return False
-            finally:
-                conn.close()
-
-        return await asyncio.to_thread(_reset)
+        except Exception as e:
+            self.logger.error(
+                f"Failed to reset image quota for user {user_id}: {e}"
+            )
+            return False
 
     async def reset_chat_quotas(self, chat_id: int) -> int:
         """
@@ -394,33 +358,28 @@ class ImageGenerationService:
             Number of quota records deleted (0 if none existed)
         """
 
-        def _reset() -> int:
-            today = self._get_today_date()
-            conn = sqlite3.connect(self.db_path)
-            try:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    DELETE FROM image_quotas
-                    WHERE chat_id = ? AND generation_date = ?
-                    """,
-                    (chat_id, today),
-                )
-                conn.commit()
-                deleted = cursor.rowcount if cursor.rowcount is not None else 0
+        today = self._get_today_date()
+        
+        query, params = convert_query_to_postgres(
+            """
+            DELETE FROM image_quotas
+            WHERE chat_id = $1 AND generation_date = $2
+            """,
+            (chat_id, today),
+        )
+        try:
+            async with get_db_connection(self.database_url) as conn:
+                result = await conn.execute(query, *params)
+                deleted = int(result.split()[-1]) if result.split()[-1].isdigit() else 0
                 self.logger.info(
                     f"Reset image quotas for {deleted} user(s) in chat {chat_id}"
                 )
                 return deleted
-            except Exception as e:
-                self.logger.error(
-                    f"Failed to reset image quotas for chat {chat_id}: {e}"
-                )
-                return 0
-            finally:
-                conn.close()
-
-        return await asyncio.to_thread(_reset)
+        except Exception as e:
+            self.logger.error(
+                f"Failed to reset image quotas for chat {chat_id}: {e}"
+            )
+            return 0
 
 
 # Tool definition for Gemini function calling

@@ -140,7 +140,7 @@ async def process_potential_reaction(
         recent_messages = await store.recent(
             chat_id=chat_id,
             thread_id=thread_id,
-            max_turns=10,  # Look at last 10 turns
+            max_messages=20,  # Look at last 20 messages
         )
 
         # Find most recent bot message

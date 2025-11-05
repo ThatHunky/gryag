@@ -1,14 +1,15 @@
-"""Database connection utilities for SQLite with proper concurrency handling."""
+"""Database connection utilities for PostgreSQL with connection pooling."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import AsyncIterator
 
-import aiosqlite
+import asyncpg
+
+from app.infrastructure.postgres import get_db_connection as get_pg_connection, close_pool
 
 logger = logging.getLogger(__name__)
 
@@ -18,118 +19,113 @@ async def execute_with_retry(
     max_retries: int = 5,
     initial_delay: float = 0.1,
     max_delay: float = 2.0,
+    operation_name: str = "database operation",
 ) -> None:
     """
-    Execute an async operation with exponential backoff retry for database locks.
+    Execute an async operation with exponential backoff retry for database errors.
 
     Args:
         coro_func: Async function to execute
         max_retries: Maximum number of attempts
         initial_delay: Initial delay in seconds for retry
         max_delay: Maximum delay cap for backoff
+        operation_name: Name of operation for logging (helps identify bottlenecks)
     """
-    import aiosqlite
-
+    import time as time_module
+    
     last_error = None
+    operation_start = time_module.time()
+    
     for attempt in range(max_retries):
         try:
-            return await coro_func()
-        except aiosqlite.OperationalError as e:
-            if "database is locked" not in str(e):
-                raise
+            result = await coro_func()
+            operation_time = int((time_module.time() - operation_start) * 1000)
+            
+            # Log slow operations (>500ms) to identify bottlenecks
+            if operation_time > 500:
+                logger.info(
+                    f"Slow {operation_name}: {operation_time}ms (attempt {attempt + 1})"
+                )
+            
+            return result
+        except (asyncpg.PostgresConnectionError, asyncpg.InterfaceError) as e:
             last_error = e
             if attempt < max_retries - 1:
                 delay = min(initial_delay * (2 ** attempt), max_delay)
                 logger.warning(
-                    f"Database locked, retrying in {delay:.2f}s (attempt {attempt + 1}/{max_retries})"
+                    f"Database connection error in {operation_name}, retrying in {delay:.2f}s "
+                    f"(attempt {attempt + 1}/{max_retries}): {e}"
                 )
                 await asyncio.sleep(delay)
 
     if last_error:
-        logger.error(f"Failed after {max_retries} retries: {last_error}")
+        operation_time = int((time_module.time() - operation_start) * 1000)
+        logger.error(
+            f"{operation_name} failed after {max_retries} retries "
+            f"(total time: {operation_time}ms): {last_error}"
+        )
         raise last_error
     raise RuntimeError("Database operation failed")
 
 
 @asynccontextmanager
 async def get_db_connection(
-    db_path: Path | str,
+    database_url: str,
     timeout: float = 30.0,
     max_retries: int = 3,
-) -> AsyncIterator[aiosqlite.Connection]:
+) -> AsyncIterator[asyncpg.Connection]:
     """
-    Get a database connection with proper WAL mode and timeout settings.
+    Get a database connection from PostgreSQL connection pool.
 
     Args:
-        db_path: Path to SQLite database file
-        timeout: Connection timeout in seconds (default: 30.0)
-        max_retries: Maximum number of retries for connection setup errors (default: 3)
+        database_url: PostgreSQL connection string (postgresql://user:pass@host:port/dbname)
+        timeout: Connection timeout in seconds (default: 30.0) - unused for pool
+        max_retries: Maximum number of retries for connection setup errors (default: 3) - unused for pool
 
     Yields:
-        aiosqlite.Connection with WAL mode enabled
+        asyncpg.Connection from connection pool
 
     This context manager:
-    - Enables WAL (Write-Ahead Logging) mode for better concurrency
-    - Sets a reasonable busy timeout to handle database locks automatically
-    - Retries on connection setup errors
+    - Uses connection pooling for efficient connection reuse
+    - Automatically handles connection acquisition and release
+    - No manual connection management needed
     """
-    last_error = None
-
-    # Retry loop for connection setup
-    db = None
-    for attempt in range(max_retries):
-        try:
-            db = await aiosqlite.connect(db_path, timeout=timeout)
-            # Enable WAL mode for better concurrent access
-            await db.execute("PRAGMA journal_mode=WAL")
-            # Set busy timeout to handle locks automatically (in milliseconds)
-            # Increased to 30 seconds to handle contentious locks with many concurrent operations
-            await db.execute("PRAGMA busy_timeout=30000")
-            # Connection setup succeeded, break out of retry loop
-            break
-        except aiosqlite.OperationalError as e:
-            if "database is locked" not in str(e):
-                raise
-            last_error = e
-            if db is not None:
-                try:
-                    await db.close()
-                except Exception:
-                    pass
-                db = None
-            if attempt < max_retries - 1:
-                # Exponential backoff: 0.1s, 0.2s, 0.4s
-                wait_time = 0.1 * (2 ** attempt)
-                logger.warning(
-                    f"Database locked during connection setup, retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})"
-                )
-                await asyncio.sleep(wait_time)
-            else:
-                logger.error(f"Failed to acquire database connection after {max_retries} retries")
-                raise
-
-    # If connection setup succeeded, yield it (no retry logic here)
-    if db is None:
-        raise RuntimeError("Failed to establish database connection")
-
-    try:
-        yield db
-    finally:
-        await db.close()
+    async with get_pg_connection(database_url) as conn:
+        yield conn
     
 
-async def init_database(db_path: Path | str) -> None:
+async def init_database(database_url: str) -> None:
     """
-    Initialize database with WAL mode and optimal settings.
+    Initialize PostgreSQL database by running schema migrations.
     
     Args:
-        db_path: Path to SQLite database file
+        database_url: PostgreSQL connection string
     """
-    async with get_db_connection(db_path) as db:
-        # WAL mode is already set by get_db_connection
-        # Set some additional optimizations
-        await db.execute("PRAGMA synchronous=NORMAL")  # Faster than FULL, still safe with WAL
-        await db.execute("PRAGMA cache_size=-64000")   # 64MB cache
-        await db.execute("PRAGMA temp_store=MEMORY")   # Store temp tables in memory
-        await db.commit()
-        logger.info(f"Database initialized with WAL mode at {db_path}")
+    from pathlib import Path
+    
+    # Read PostgreSQL schema
+    schema_path = Path(__file__).resolve().parents[2] / "db" / "schema_postgresql.sql"
+    if not schema_path.exists():
+        # Fallback to legacy location
+        schema_path = Path(__file__).resolve().parent.parent / "db" / "schema_postgresql.sql"
+    
+    if not schema_path.exists():
+        logger.warning(f"PostgreSQL schema not found at {schema_path}, skipping initialization")
+        return
+    
+    async with get_db_connection(database_url) as conn:
+        schema_sql = schema_path.read_text(encoding="utf-8")
+        # Execute schema in a transaction
+        # Use DO block to handle errors gracefully for idempotent schema
+        try:
+            async with conn.transaction():
+                await conn.execute(schema_sql)
+            logger.info(f"PostgreSQL database initialized from {schema_path}")
+        except Exception as e:
+            # If schema already exists, that's okay - just log it
+            error_msg = str(e).lower()
+            if "already exists" in error_msg or "duplicate" in error_msg:
+                logger.info(f"PostgreSQL schema already initialized (some objects already exist): {e}")
+            else:
+                logger.error(f"Failed to initialize PostgreSQL database: {e}")
+                raise

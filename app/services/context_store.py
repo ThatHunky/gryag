@@ -9,11 +9,15 @@ from pathlib import Path
 from typing import Any, Iterable
 import math
 
-import aiosqlite
+import asyncpg
+from app.infrastructure.query_converter import convert_query_to_postgres
 
 from app.infrastructure.db_utils import get_db_connection
+from app.services.context_cache import ContextCache
+from app.services.redis_types import RedisLike
 
 logger = logging.getLogger(__name__)
+
 
 # Determine the location of the project root dynamically.
 # context_store.py lives at: <project_root>/app/services/context_store.py
@@ -60,11 +64,16 @@ SPEAKER_ALLOWED_ROLES = {"user", "assistant", "system", "tool"}
 
 
 @dataclass(slots=True)
-class TurnSender:
+class MessageSender:
+    """Sender information for a message (replaces old TurnSender)."""
     role: str | None = None
     name: str | None = None
     username: str | None = None
     is_bot: bool | None = None
+
+
+# Backward compatibility alias
+TurnSender = MessageSender
 
 
 def _sanitize_header_value(value: str) -> str:
@@ -208,145 +217,42 @@ def _chunked(seq: list[int], size: int) -> Iterable[list[int]]:
 
 
 class ContextStore:
-    """SQLite-backed storage for chat history and per-user quotas."""
+    """PostgreSQL-backed storage for chat history and per-user quotas."""
 
-    def __init__(self, db_path: Path | str) -> None:
-        self._db_path = Path(db_path)
+    def __init__(
+        self, database_url: str, redis_client: RedisLike | None = None
+    ) -> None:
+        """
+        Initialize context store.
+
+        Args:
+            database_url: PostgreSQL connection string
+            redis_client: Optional Redis client for caching
+        """
+        self._database_url = database_url
         self._init_lock = asyncio.Lock()
         self._initialized = False
         self._prune_lock = asyncio.Lock()
         self._last_prune_ts = 0
         self._prune_interval = 900  # seconds between automatic pruning tasks
+        self._context_cache = (
+            ContextCache(redis_client, ttl_seconds=60) if redis_client else None
+        )
+        self._redis = redis_client  # Store for ban caching
 
     async def init(self) -> None:
+        """Initialize PostgreSQL connection (schema already applied by init_database)."""
         async with self._init_lock:
             if self._initialized:
                 return
-            self._db_path.parent.mkdir(parents=True, exist_ok=True)
-            if not SCHEMA_PATH.exists():  # early clear error
-                raise FileNotFoundError(
-                    f"SQLite schema file not found at {SCHEMA_PATH}. Ensure 'db/schema.sql' exists in project root and is mounted into the container."
-                )
-            async with get_db_connection(self._db_path) as db:
-                # Preflight migration for legacy DBs: ensure external_* columns exist
-                try:
-                    async with db.execute(
-                        "SELECT name FROM sqlite_master WHERE type='table' AND name='messages'"
-                    ) as cursor:
-                        row = await cursor.fetchone()
-                    if row:  # messages table exists, check columns
-                        cols: set[str] = set()
-                        async with db.execute("PRAGMA table_info(messages)") as cur2:
-                            for r in await cur2.fetchall():
-                                # PRAGMA table_info returns: cid, name, type, notnull, dflt_value, pk
-                                cols.add(r[1])
-                        # Add missing columns (idempotent)
-                        if "embedding" not in cols:
-                            await db.execute(
-                                "ALTER TABLE messages ADD COLUMN embedding TEXT"
-                            )
-                        if "external_message_id" not in cols:
-                            await db.execute(
-                                "ALTER TABLE messages ADD COLUMN external_message_id TEXT"
-                            )
-                        if "external_user_id" not in cols:
-                            await db.execute(
-                                "ALTER TABLE messages ADD COLUMN external_user_id TEXT"
-                            )
-                        if "reply_to_external_message_id" not in cols:
-                            await db.execute(
-                                "ALTER TABLE messages ADD COLUMN reply_to_external_message_id TEXT"
-                            )
-                        if "reply_to_external_user_id" not in cols:
-                            await db.execute(
-                                "ALTER TABLE messages ADD COLUMN reply_to_external_user_id TEXT"
-                            )
-                        if "sender_role" not in cols:
-                            await db.execute(
-                                "ALTER TABLE messages ADD COLUMN sender_role TEXT"
-                            )
-                        if "sender_name" not in cols:
-                            await db.execute(
-                                "ALTER TABLE messages ADD COLUMN sender_name TEXT"
-                            )
-                        if "sender_username" not in cols:
-                            await db.execute(
-                                "ALTER TABLE messages ADD COLUMN sender_username TEXT"
-                            )
-                        if "sender_is_bot" not in cols:
-                            await db.execute(
-                                "ALTER TABLE messages ADD COLUMN sender_is_bot INTEGER DEFAULT 0"
-                            )
-                        await db.commit()
-                except Exception as e:
-                    # Best-effort; proceed to full schema application
-                    logger.warning(f"Preflight migration check encountered error: {e}", exc_info=True)
-
-                # Apply (or re-apply) full schema — safe due to IF NOT EXISTS
-                with SCHEMA_PATH.open("r", encoding="utf-8") as fh:
-                    await db.executescript(fh.read())
-                try:
-                    await db.execute("ALTER TABLE messages ADD COLUMN embedding TEXT")
-                except aiosqlite.OperationalError:
-                    logger.debug("Column embedding already exists")
-                # Ensure external ID text columns exist for robustness (idempotent)
-                try:
-                    await db.execute(
-                        "ALTER TABLE messages ADD COLUMN external_message_id TEXT"
-                    )
-                except aiosqlite.OperationalError:
-                    logger.debug("Column external_message_id already exists")
-                try:
-                    await db.execute(
-                        "ALTER TABLE messages ADD COLUMN external_user_id TEXT"
-                    )
-                except aiosqlite.OperationalError:
-                    logger.debug("Column external_user_id already exists")
-                try:
-                    await db.execute(
-                        "ALTER TABLE messages ADD COLUMN reply_to_external_message_id TEXT"
-                    )
-                except aiosqlite.OperationalError:
-                    logger.debug("Column reply_to_external_message_id already exists")
-                try:
-                    await db.execute(
-                        "ALTER TABLE messages ADD COLUMN reply_to_external_user_id TEXT"
-                    )
-                except aiosqlite.OperationalError:
-                    logger.debug("Column reply_to_external_user_id already exists")
-                try:
-                    await db.execute("ALTER TABLE messages ADD COLUMN sender_role TEXT")
-                except aiosqlite.OperationalError:
-                    logger.debug("Column sender_role already exists")
-                try:
-                    await db.execute("ALTER TABLE messages ADD COLUMN sender_name TEXT")
-                except aiosqlite.OperationalError:
-                    logger.debug("Column sender_name already exists")
-                try:
-                    await db.execute(
-                        "ALTER TABLE messages ADD COLUMN sender_username TEXT"
-                    )
-                except aiosqlite.OperationalError:
-                    logger.debug("Column sender_username already exists")
-                try:
-                    await db.execute(
-                        "ALTER TABLE messages ADD COLUMN sender_is_bot INTEGER DEFAULT 0"
-                    )
-                except aiosqlite.OperationalError:
-                    logger.debug("Column sender_is_bot already exists")
-
-                # Add last_notice_time column to bans table for throttled ban notices
-                try:
-                    await db.execute(
-                        "ALTER TABLE bans ADD COLUMN last_notice_time INTEGER"
-                    )
-                except aiosqlite.OperationalError:
-                    logger.debug("Column last_notice_time already exists")
-
-                await db.commit()
+            # For PostgreSQL, schema is applied via init_database() in main.py
+            # Just verify connection works
+            async with get_db_connection(self._database_url) as conn:
+                await conn.execute("SELECT 1")
             self._initialized = True
+            logger.info("ContextStore initialized with PostgreSQL")
 
-    async def add_turn(
+    async def add_message(
         self,
         chat_id: int,
         thread_id: int | None,
@@ -358,7 +264,7 @@ class ContextStore:
         embedding: list[float] | None = None,
         retention_days: int | None = None,
         *,
-        sender: TurnSender | None = None,
+        sender: MessageSender | None = None,
     ) -> int:
         await self.init()
         ts = int(time.time())
@@ -399,15 +305,16 @@ class ContextStore:
 
         async def insert_message():
             nonlocal message_id
-            async with get_db_connection(self._db_path) as db:
-                cursor = await db.execute(
+            async with get_db_connection(self._database_url) as conn:
+                query, params = convert_query_to_postgres(
                     """
                     INSERT INTO messages (
                         chat_id, thread_id, user_id, role, text, media, embedding, ts,
                         external_message_id, external_user_id, reply_to_external_message_id, reply_to_external_user_id,
                         sender_role, sender_name, sender_username, sender_is_bot
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                    RETURNING id
                     """,
                     (
                         chat_id,
@@ -428,12 +335,21 @@ class ContextStore:
                         sender_is_bot,
                     ),
                 )
-                await db.commit()
-                message_id = cursor.lastrowid or 0
+                row = await conn.fetchrow(query, *params)
+                message_id = row["id"] if row else 0
 
-        await execute_with_retry(insert_message, max_retries=5)
+        await execute_with_retry(
+            insert_message, 
+            max_retries=5,
+            operation_name="add_message (insert_message)"
+        )
         # NOTE: Retention pruning moved to background task in main.py to avoid blocking message processing
         # Previously: if retention_days: await self._maybe_prune(retention_days)
+
+        # Invalidate cache when new message is added
+        if self._context_cache is not None:
+            await self._context_cache.invalidate(chat_id, thread_id)
+
         return int(message_id)
 
     async def update_message_embedding(
@@ -445,14 +361,12 @@ class ContextStore:
             message_id: Primary key of the message in `messages` table
             embedding: Vector to store (JSON) or None to clear
         """
-        from app.infrastructure.db_utils import get_db_connection
-
-        async with get_db_connection(self._db_path) as db:
-            await db.execute(
-                "UPDATE messages SET embedding = ? WHERE id = ?",
-                (json.dumps(embedding) if embedding else None, message_id),
-            )
-            await db.commit()
+        query, params = convert_query_to_postgres(
+            "UPDATE messages SET embedding = $1 WHERE id = $2",
+            (json.dumps(embedding) if embedding else None, message_id),
+        )
+        async with get_db_connection(self._database_url) as conn:
+            await conn.execute(query, *params)
 
     async def _maybe_prune(self, retention_days: int) -> None:
         now = int(time.time())
@@ -470,46 +384,59 @@ class ContextStore:
     async def ban_user(self, chat_id: int, user_id: int) -> None:
         await self.init()
         ts = int(time.time())
-        async with get_db_connection(self._db_path) as db:
-            await db.execute(
-                "INSERT OR REPLACE INTO bans (chat_id, user_id, ts, last_notice_time) VALUES (?, ?, ?, NULL)",
-                (chat_id, user_id, ts),
-            )
-            await db.commit()
+        query, params = convert_query_to_postgres(
+            """
+            INSERT INTO bans (chat_id, user_id, ts, last_notice_time)
+            VALUES ($1, $2, $3, NULL)
+            ON CONFLICT (chat_id, user_id) DO UPDATE SET ts = $3
+            """,
+            (chat_id, user_id, ts),
+        )
+        async with get_db_connection(self._database_url) as conn:
+            await conn.execute(query, *params)
+
+        # Invalidate cache
+        if self._redis is not None:
+            try:
+                cache_key = f"ban:chat:{chat_id}:user:{user_id}"
+                await self._redis.delete(cache_key)
+            except Exception as exc:
+                logger.warning(f"Redis ban cache invalidate failed: {exc}")
 
     async def delete_user_messages(self, chat_id: int, user_id: int) -> int:
         """Remove all stored messages for a user within a chat."""
         await self.init()
-        async with get_db_connection(self._db_path) as db:
-            cursor = await db.execute(
-                "SELECT id FROM messages WHERE chat_id = ? AND user_id = ?",
+        async with get_db_connection(self._database_url) as conn:
+            query, params = convert_query_to_postgres(
+                "SELECT id FROM messages WHERE chat_id = $1 AND user_id = $2",
                 (chat_id, user_id),
             )
-            rows = await cursor.fetchall()
-            message_ids = [row[0] for row in rows]
+            rows = await conn.fetch(query, *params)
+            message_ids = [row["id"] for row in rows]
 
             if not message_ids:
                 return 0
 
             for chunk in _chunked(message_ids, 500):
-                placeholders = ",".join("?" * len(chunk))
-                await db.execute(
+                placeholders = ",".join(f"${i+1}" for i in range(len(chunk)))
+                await conn.execute(
                     f"DELETE FROM message_metadata WHERE message_id IN ({placeholders})",
-                    chunk,
+                    *chunk,
                 )
-                await db.execute(
+                await conn.execute(
                     f"DELETE FROM messages WHERE id IN ({placeholders})",
-                    chunk,
+                    *chunk,
                 )
 
             # Clear derived aggregates that may still reference removed messages
-            await db.execute(
-                "DELETE FROM conversation_windows WHERE chat_id = ?", (chat_id,)
+            query, params = convert_query_to_postgres(
+                "DELETE FROM conversation_windows WHERE chat_id = $1", (chat_id,)
             )
-            await db.execute(
-                "DELETE FROM proactive_events WHERE chat_id = ?", (chat_id,)
+            await conn.execute(query, *params)
+            query, params = convert_query_to_postgres(
+                "DELETE FROM proactive_events WHERE chat_id = $1", (chat_id,)
             )
-            await db.commit()
+            await conn.execute(query, *params)
 
         return len(message_ids)
 
@@ -518,53 +445,94 @@ class ContextStore:
     ) -> bool:
         """Remove a stored message by its original Telegram message ID."""
         await self.init()
-        async with get_db_connection(self._db_path) as db:
+        async with get_db_connection(self._database_url) as conn:
             # Try matching dedicated external column first (stringified)
-            cursor = await db.execute(
-                "SELECT id FROM messages WHERE chat_id = ? AND external_message_id = ? LIMIT 1",
+            query, params = convert_query_to_postgres(
+                "SELECT id FROM messages WHERE chat_id = $1 AND external_message_id = $2 LIMIT 1",
                 (chat_id, str(external_message_id)),
             )
-            row = await cursor.fetchone()
+            row = await conn.fetchrow(query, *params)
             if not row:
-                # Fallback to legacy JSON meta lookup (may be numeric or string)
-                cursor = await db.execute(
+                # Fallback to legacy JSON meta lookup (PostgreSQL JSONB)
+                # Note: media is TEXT, so we need to cast it to jsonb for JSON operations
+                # We check for NULL/empty media first to avoid casting errors
+                query, params = convert_query_to_postgres(
                     """
-                    SELECT id FROM messages 
-                    WHERE chat_id = ? AND CAST(json_extract(media, '$.meta.message_id') AS TEXT) = ? LIMIT 1
+                    SELECT id FROM messages
+                    WHERE chat_id = $1 
+                      AND media IS NOT NULL 
+                      AND media != ''
+                      AND (media::jsonb->'meta'->>'message_id') = $2 
+                    LIMIT 1
                     """,
                     (chat_id, str(external_message_id)),
                 )
-                row = await cursor.fetchone()
+                row = await conn.fetchrow(query, *params)
             if not row:
                 return False
 
-            internal_id = row[0]
-            await db.execute(
-                "DELETE FROM message_metadata WHERE message_id = ?",
+            internal_id = row["id"]
+            query, params = convert_query_to_postgres(
+                "DELETE FROM message_metadata WHERE message_id = $1",
                 (internal_id,),
             )
-            await db.execute("DELETE FROM messages WHERE id = ?", (internal_id,))
-            await db.commit()
+            await conn.execute(query, *params)
+            query, params = convert_query_to_postgres(
+                "DELETE FROM messages WHERE id = $1",
+                (internal_id,),
+            )
+            await conn.execute(query, *params)
             return True
 
     async def unban_user(self, chat_id: int, user_id: int) -> None:
         await self.init()
-        async with get_db_connection(self._db_path) as db:
-            await db.execute(
-                "DELETE FROM bans WHERE chat_id = ? AND user_id = ?",
-                (chat_id, user_id),
-            )
-            await db.commit()
+        query, params = convert_query_to_postgres(
+            "DELETE FROM bans WHERE chat_id = $1 AND user_id = $2",
+            (chat_id, user_id),
+        )
+        async with get_db_connection(self._database_url) as conn:
+            await conn.execute(query, *params)
+
+        # Invalidate cache
+        if self._redis is not None:
+            try:
+                cache_key = f"ban:chat:{chat_id}:user:{user_id}"
+                await self._redis.delete(cache_key)
+            except Exception as exc:
+                logger.warning(f"Redis ban cache invalidate failed: {exc}")
 
     async def is_banned(self, chat_id: int, user_id: int) -> bool:
         await self.init()
-        async with get_db_connection(self._db_path) as db:
-            async with db.execute(
-                "SELECT 1 FROM bans WHERE chat_id = ? AND user_id = ? LIMIT 1",
-                (chat_id, user_id),
-            ) as cursor:
-                row = await cursor.fetchone()
-                return row is not None
+
+        # Try Redis cache first
+        if self._redis is not None:
+            try:
+                cache_key = f"ban:chat:{chat_id}:user:{user_id}"
+                cached = await self._redis.get(cache_key)
+                if cached is not None:
+                    # Cache hit - return cached value
+                    return cached == b"1" or cached == "1"
+            except Exception as exc:
+                logger.warning(f"Redis ban cache get failed: {exc}")
+
+        # Query database
+        query, params = convert_query_to_postgres(
+            "SELECT 1 FROM bans WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
+            (chat_id, user_id),
+        )
+        async with get_db_connection(self._database_url) as conn:
+            row = await conn.fetchrow(query, *params)
+            is_banned = row is not None
+
+            # Cache the result (TTL: 5 minutes)
+            if self._redis is not None:
+                try:
+                    cache_key = f"ban:chat:{chat_id}:user:{user_id}"
+                    await self._redis.set(cache_key, "1" if is_banned else "0", ex=300)
+                except Exception as exc:
+                    logger.warning(f"Redis ban cache set failed: {exc}")
+
+            return is_banned
 
     async def should_send_ban_notice(
         self, chat_id: int, user_id: int, cooldown_seconds: int = 1800
@@ -577,58 +545,65 @@ class ContextStore:
         await self.init()
         current_time = int(time.time())
 
-        async with get_db_connection(self._db_path) as db:
+        async with get_db_connection(self._database_url) as conn:
             # Check last ban notice time
-            async with db.execute(
-                "SELECT last_notice_time FROM bans WHERE chat_id = ? AND user_id = ?",
+            query, params = convert_query_to_postgres(
+                "SELECT last_notice_time FROM bans WHERE chat_id = $1 AND user_id = $2",
                 (chat_id, user_id),
-            ) as cursor:
-                row = await cursor.fetchone()
+            )
+            row = await conn.fetchrow(query, *params)
 
-                if row is None:
-                    # Not banned
-                    return False
-
-                last_notice = row[0]
-                if last_notice is None:
-                    # First time - send notice and update timestamp
-                    await db.execute(
-                        "UPDATE bans SET last_notice_time = ? WHERE chat_id = ? AND user_id = ?",
-                        (current_time, chat_id, user_id),
-                    )
-                    await db.commit()
-                    return True
-
-                # Check if cooldown has passed
-                if current_time - last_notice >= cooldown_seconds:
-                    # Update timestamp
-                    await db.execute(
-                        "UPDATE bans SET last_notice_time = ? WHERE chat_id = ? AND user_id = ?",
-                        (current_time, chat_id, user_id),
-                    )
-                    await db.commit()
-                    return True
-
+            if row is None:
+                # Not banned
                 return False
+
+            last_notice = row["last_notice_time"]
+            if last_notice is None:
+                # First time - send notice and update timestamp
+                query, params = convert_query_to_postgres(
+                    "UPDATE bans SET last_notice_time = $1 WHERE chat_id = $2 AND user_id = $3",
+                    (current_time, chat_id, user_id),
+                )
+                await conn.execute(query, *params)
+                return True
+
+            # Check if cooldown has passed
+            if current_time - last_notice >= cooldown_seconds:
+                # Update timestamp
+                query, params = convert_query_to_postgres(
+                    "UPDATE bans SET last_notice_time = $1 WHERE chat_id = $2 AND user_id = $3",
+                    (current_time, chat_id, user_id),
+                )
+                await conn.execute(query, *params)
+                return True
+
+            return False
 
     async def recent(
         self,
         chat_id: int,
         thread_id: int | None,
-        max_turns: int,
+        max_messages: int,
     ) -> list[dict[str, Any]]:
         await self.init()
-        # Each turn = 1 user message + 1 bot response = 2 messages
-        # So we need to fetch max_turns * 2 to get the full conversation history
-        message_limit = max_turns * 2
+
+        # Try Redis cache first
+        if self._context_cache is not None:
+            cached_context = await self._context_cache.get(chat_id, thread_id, max_messages)
+            if cached_context is not None:
+                # Return cached data (already limited to max_messages)
+                return cached_context[:max_messages] if len(cached_context) > max_messages else cached_context
+
+        # Use max_messages directly (no multiplication needed)
+        message_limit = max_messages
 
         if thread_id is None:
             query = (
                 "SELECT role, text, media, external_user_id, user_id, "
                 "sender_role, sender_name, sender_username, sender_is_bot "
                 "FROM messages "
-                "WHERE chat_id = ? AND thread_id IS NULL "
-                "ORDER BY id DESC LIMIT ?"
+                "WHERE chat_id = $1 AND thread_id IS NULL "
+                "ORDER BY id DESC LIMIT $2"
             )
             params: tuple[Any, ...] = (chat_id, message_limit)
         else:
@@ -636,15 +611,13 @@ class ContextStore:
                 "SELECT role, text, media, external_user_id, user_id, "
                 "sender_role, sender_name, sender_username, sender_is_bot "
                 "FROM messages "
-                "WHERE chat_id = ? AND thread_id = ? "
-                "ORDER BY id DESC LIMIT ?"
+                "WHERE chat_id = $1 AND thread_id = $2 "
+                "ORDER BY id DESC LIMIT $3"
             )
             params = (chat_id, thread_id, message_limit)
 
-        async with get_db_connection(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(query, params) as cursor:
-                rows = list(await cursor.fetchall())  # list for reversed()
+        async with get_db_connection(self._database_url) as conn:
+            rows = await conn.fetch(query, *params)
 
         history: list[dict[str, Any]] = []
         for row in reversed(rows):
@@ -720,9 +693,15 @@ class ContextStore:
                     parts.append({"text": meta_text})
             if text:
                 parts.append({"text": text})
-            if stored_media:
-                parts.extend(stored_media)
+            # Media from recent context is disabled - only current message and replied-to message include media
+            # if stored_media:
+            #     parts.extend(stored_media)
             history.append({"role": row["role"], "parts": parts or [{"text": ""}]})
+
+        # Cache the result for future requests
+        if self._context_cache is not None:
+            await self._context_cache.set(chat_id, thread_id, history)
+
         return history
 
     @staticmethod
@@ -764,12 +743,11 @@ class ContextStore:
             )
             params = (chat_id, thread_id, candidate_cap)
 
-        async with get_db_connection(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(query, params) as cursor:
-                rows = await cursor.fetchall()
+        query_pg, params_pg = convert_query_to_postgres(query, params)
+        async with get_db_connection(self._database_url) as conn:
+            rows = await conn.fetch(query_pg, *params_pg)
 
-        scored: list[tuple[float, aiosqlite.Row]] = []
+        scored: list[tuple[float, asyncpg.Record]] = []
         for row in rows:
             embedding_json = row["embedding"]
             if not embedding_json:
@@ -826,17 +804,16 @@ class ContextStore:
         cutoff = int(time.time()) - int(retention_days) * 86400
 
         deleted_total = 0
-        async with get_db_connection(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
-
+        async with get_db_connection(self._database_url) as conn:
             # Build list of candidate message ids that are older than cutoff
             # and are NOT referenced by episodes or protected by message_importance
+            # PostgreSQL uses jsonb_array_elements instead of json_each
             query = """
             SELECT id FROM messages m
-            WHERE m.ts < ?
+            WHERE m.ts < $1
               AND NOT EXISTS (
-                SELECT 1 FROM episodes e, json_each(e.message_ids) je
-                WHERE CAST(je.value AS INTEGER) = m.id LIMIT 1
+                SELECT 1 FROM episodes e, jsonb_array_elements_text(e.message_ids::jsonb) je
+                WHERE je::bigint = m.id LIMIT 1
               )
               AND NOT EXISTS (
                 SELECT 1 FROM message_importance mi
@@ -845,9 +822,8 @@ class ContextStore:
             ORDER BY id ASC
             """
 
-            cursor = await db.execute(query, (cutoff,))
-            rows = await cursor.fetchall()
-            candidate_ids = [row[0] for row in rows]
+            rows = await conn.fetch(query, cutoff)
+            candidate_ids = [row["id"] for row in rows]
 
             if not candidate_ids:
                 self._last_prune_ts = int(time.time())
@@ -858,38 +834,39 @@ class ContextStore:
             chunk_size = 100
             for chunk_idx, chunk in enumerate(_chunked(candidate_ids, chunk_size)):
                 try:
-                    placeholders = ",".join("?" * len(chunk))
+                    placeholders = ",".join(f"${i+1}" for i in range(len(chunk)))
                     # Remove metadata first
-                    await db.execute(
+                    await conn.execute(
                         f"DELETE FROM message_metadata WHERE message_id IN ({placeholders})",
-                        chunk,
+                        *chunk,
                     )
                     # Remove any message_importance records referencing these messages
-                    await db.execute(
+                    await conn.execute(
                         f"DELETE FROM message_importance WHERE message_id IN ({placeholders})",
-                        chunk,
+                        *chunk,
                     )
                     # Finally remove messages
-                    await db.execute(
+                    await conn.execute(
                         f"DELETE FROM messages WHERE id IN ({placeholders})",
-                        chunk,
+                        *chunk,
                     )
-                    await db.commit()
                     deleted_total += len(chunk)
 
                     # Add small delay between chunks to allow other operations to proceed
                     # Only delay if there are more chunks to process
-                    if chunk_idx < (len(candidate_ids) + chunk_size - 1) // chunk_size - 1:
+                    if (
+                        chunk_idx
+                        < (len(candidate_ids) + chunk_size - 1) // chunk_size - 1
+                    ):
                         await asyncio.sleep(0.05)  # 50ms delay between chunks
-                except aiosqlite.OperationalError as e:
-                    if "database is locked" in str(e):
-                        logger.warning(
-                            f"Pruning operation hit database lock, continuing with remaining chunks: {e}",
-                            extra={"deleted_so_far": deleted_total},
-                        )
-                        # Continue with next chunk rather than failing completely
-                        continue
-                    raise
+                except asyncpg.PostgresError as e:
+                    logger.warning(
+                        f"Pruning operation hit database lock, continuing with remaining chunks: {e}",
+                        extra={"deleted_so_far": deleted_total},
+                    )
+                    # Continue with next chunk rather than failing completely
+                    continue
+                raise
 
         self._last_prune_ts = int(time.time())
         return deleted_total
@@ -917,42 +894,43 @@ class ContextStore:
         window_seconds = 3600
         window_start = current_ts - (current_ts % window_seconds)
 
-        async with get_db_connection(self._db_path) as db:
+        async with get_db_connection(self._database_url) as conn:
             # Drop very old windows (older than previous hour) to keep table small
-            await db.execute(
-                "DELETE FROM rate_limits WHERE window_start < ?",
+            query, params = convert_query_to_postgres(
+                "DELETE FROM rate_limits WHERE window_start < $1",
                 (window_start - window_seconds,),
             )
+            await conn.execute(query, *params)
 
             # Upsert current window counter
-            async with db.execute(
+            query, params = convert_query_to_postgres(
                 """
                 SELECT request_count FROM rate_limits
-                WHERE user_id = ? AND window_start = ?
+                WHERE user_id = $1 AND window_start = $2
                 """,
                 (user_id, window_start),
-            ) as cursor:
-                row = await cursor.fetchone()
+            )
+            row = await conn.fetchrow(query, *params)
 
             if row:
-                await db.execute(
+                query, params = convert_query_to_postgres(
                     """
                     UPDATE rate_limits
-                    SET request_count = request_count + 1, last_seen = ?
-                    WHERE user_id = ? AND window_start = ?
+                    SET request_count = request_count + 1, last_seen = $1
+                    WHERE user_id = $2 AND window_start = $3
                     """,
                     (current_ts, user_id, window_start),
                 )
+                await conn.execute(query, *params)
             else:
-                await db.execute(
+                query, params = convert_query_to_postgres(
                     """
                     INSERT INTO rate_limits (user_id, window_start, request_count, last_seen)
-                    VALUES (?, ?, 1, ?)
+                    VALUES ($1, $2, 1, $3)
                     """,
                     (user_id, window_start, current_ts),
                 )
-
-            await db.commit()
+                await conn.execute(query, *params)
 
     async def count_requests_last_hour(
         self, chat_id: int, user_id: int, now: int | None = None
@@ -973,19 +951,19 @@ class ContextStore:
         window_seconds = 3600
         cutoff = current_ts - window_seconds
 
-        async with get_db_connection(self._db_path) as db:
-            async with db.execute(
+        async with get_db_connection(self._database_url) as conn:
+            query, params = convert_query_to_postgres(
                 """
-                SELECT COALESCE(SUM(request_count), 0)
+                SELECT COALESCE(SUM(request_count), 0) as total
                 FROM rate_limits
-                WHERE user_id = ? AND window_start >= ?
+                WHERE user_id = $1 AND window_start >= $2
                 """,
                 (user_id, cutoff - (cutoff % window_seconds)),
-            ) as cursor:
-                row = await cursor.fetchone()
-                if not row or row[0] is None:
-                    return 0
-                return int(row[0])
+            )
+            row = await conn.fetchrow(query, *params)
+            if not row or row["total"] is None:
+                return 0
+            return int(row["total"])
 
     async def reset_quotas(self, chat_id: int) -> int:
         """
@@ -1000,10 +978,10 @@ class ContextStore:
             Number of rows deleted
         """
         await self.init()
-        async with get_db_connection(self._db_path) as db:
-            cursor = await db.execute("DELETE FROM rate_limits")
-            await db.commit()
-            return cursor.rowcount or 0
+        async with get_db_connection(self._database_url) as conn:
+            result = await conn.execute("DELETE FROM rate_limits")
+            deleted = int(result.split()[-1]) if result.split()[-1].isdigit() else 0
+            return deleted
 
 
 async def run_retention_pruning_task(
@@ -1014,7 +992,7 @@ async def run_retention_pruning_task(
     """Background task for pruning old messages based on retention policy.
 
     This task runs periodically to remove messages older than the configured
-    retention period.
+    retention period. Includes CPU-aware throttling to avoid impacting performance.
 
     Args:
         store: The ContextStore instance to use for pruning
@@ -1022,9 +1000,23 @@ async def run_retention_pruning_task(
         prune_interval_seconds: Interval between pruning runs in seconds
     """
     logger = logging.getLogger(__name__)
+    import psutil
 
     while True:
         try:
+            # Check CPU usage before running
+            try:
+                cpu_percent = psutil.cpu_percent(interval=0.1)
+                if cpu_percent > 80:
+                    logger.info(
+                        f"Retention pruning: skipping run due to high CPU ({cpu_percent:.1f}%)"
+                    )
+                    await asyncio.sleep(prune_interval_seconds)
+                    continue
+            except Exception:
+                # psutil not available or failed, continue anyway
+                pass
+
             logger.info("Retention pruning: starting run")
             try:
                 deleted = await store.prune_old(retention_days)

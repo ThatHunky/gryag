@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import logging
-import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import asyncpg
+from app.infrastructure.query_converter import convert_query_to_postgres
+from app.infrastructure.db_utils import get_db_connection
 
 logger = logging.getLogger(__name__)
 
@@ -40,38 +43,30 @@ class SystemPromptManager:
     - Prompt caching for token efficiency
     """
 
-    def __init__(self, db_path: str | Path):
+    def __init__(self, database_url: str):
         """Initialize manager.
 
         Args:
-            db_path: Path to SQLite database
+            database_url: PostgreSQL connection string
         """
-        self.db_path = Path(db_path)
+        self.database_url = str(database_url)
 
         # Cache for assembled prompts (reduces token overhead)
         self._prompt_cache: dict[int | None, tuple[SystemPrompt | None, float]] = {}
         self._cache_ttl = 3600  # 1 hour cache TTL
         self._last_cache_hit = False
 
-    def _get_connection(self) -> sqlite3.Connection:
-        """Get database connection."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
-
     async def init(self) -> None:
         """Initialize database tables (idempotent)."""
-        # Schema is created in db/schema.sql, but ensure it exists
-        conn = self._get_connection()
-        try:
-            conn.execute("SELECT 1 FROM system_prompts LIMIT 1")
-            logger.info("system_prompts table exists")
-        except sqlite3.OperationalError:
-            logger.warning(
-                "system_prompts table missing, it will be created on next schema migration"
-            )
-        finally:
-            conn.close()
+        # Schema is created in db/schema_postgresql.sql, but ensure it exists
+        async with get_db_connection(self.database_url) as conn:
+            try:
+                await conn.execute("SELECT 1 FROM system_prompts LIMIT 1")
+                logger.info("system_prompts table exists")
+            except asyncpg.PostgresError:
+                logger.warning(
+                    "system_prompts table missing, it will be created on next schema migration"
+                )
 
     async def get_active_prompt(
         self, chat_id: int | None = None
@@ -114,33 +109,33 @@ class SystemPromptManager:
 
         self._last_cache_hit = False
 
-        conn = self._get_connection()
-        try:
+        async with get_db_connection(self.database_url) as conn:
             if chat_id is not None:
-                cursor = conn.execute(
+                query, params = convert_query_to_postgres(
                     """
                     SELECT * FROM system_prompts
-                    WHERE chat_id = ? AND is_active = 1 AND scope = 'chat'
+                    WHERE chat_id = $1 AND is_active = 1 AND scope = 'chat'
                     ORDER BY activated_at DESC
                     LIMIT 1
                     """,
                     (chat_id,),
                 )
-                row = cursor.fetchone()
+                row = await conn.fetchrow(query, *params)
                 if row:
                     prompt = self._row_to_prompt(row)
                     self._cache_prompt(chat_id, prompt)
                     return prompt
 
-            cursor = conn.execute(
+            query, params = convert_query_to_postgres(
                 """
                 SELECT * FROM system_prompts
                 WHERE chat_id IS NULL AND is_active = 1 AND scope = 'global'
                 ORDER BY activated_at DESC
                 LIMIT 1
-                """
+                """,
+                (),
             )
-            row = cursor.fetchone()
+            row = await conn.fetchrow(query, *params)
             if row:
                 prompt = self._row_to_prompt(row)
                 # Cache for global key and requesting chat (if any)
@@ -152,8 +147,6 @@ class SystemPromptManager:
             # No active prompts found; cache sentinel for this chat
             self._cache_prompt(chat_id, None)
             return None
-        finally:
-            conn.close()
 
     async def set_prompt(
         self,
@@ -184,39 +177,41 @@ class SystemPromptManager:
         if scope == "global":
             chat_id = None  # Enforce NULL for global
 
-        conn = self._get_connection()
         now = int(time.time())
 
-        try:
+        async with get_db_connection(self.database_url) as conn:
             # Deactivate existing active prompts for this scope/chat
-            conn.execute(
+            query, params = convert_query_to_postgres(
                 """
                 UPDATE system_prompts
-                SET is_active = 0, updated_at = ?
-                WHERE chat_id IS ? AND scope = ? AND is_active = 1
+                SET is_active = 0, updated_at = $1
+                WHERE chat_id IS NOT DISTINCT FROM $2 AND scope = $3 AND is_active = 1
                 """,
                 (now, chat_id, scope),
             )
+            await conn.execute(query, *params)
 
             # Get next version number
-            cursor = conn.execute(
+            query, params = convert_query_to_postgres(
                 """
                 SELECT COALESCE(MAX(version), 0) + 1 as next_version
                 FROM system_prompts
-                WHERE chat_id IS ? AND scope = ?
+                WHERE chat_id IS NOT DISTINCT FROM $1 AND scope = $2
                 """,
                 (chat_id, scope),
             )
-            next_version = cursor.fetchone()["next_version"]
+            row = await conn.fetchrow(query, *params)
+            next_version = row["next_version"] if row else 1
 
             # Insert new active prompt
-            cursor = conn.execute(
+            query, params = convert_query_to_postgres(
                 """
                 INSERT INTO system_prompts (
                     admin_id, chat_id, scope, prompt_text,
                     is_active, version, notes,
                     created_at, updated_at, activated_at
-                ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                ) VALUES ($1, $2, $3, $4, 1, $5, $6, $7, $8, $9)
+                RETURNING id
                 """,
                 (
                     admin_id,
@@ -230,9 +225,8 @@ class SystemPromptManager:
                     now,
                 ),
             )
-
-            prompt_id = cursor.lastrowid
-            conn.commit()
+            row = await conn.fetchrow(query, *params)
+            prompt_id = row["id"] if row else 0
 
             logger.info(
                 f"Set system prompt: admin={admin_id}, scope={scope}, "
@@ -240,10 +234,13 @@ class SystemPromptManager:
             )
 
             # Fetch and return created prompt
-            cursor = conn.execute(
-                "SELECT * FROM system_prompts WHERE id = ?", (prompt_id,)
+            query, params = convert_query_to_postgres(
+                "SELECT * FROM system_prompts WHERE id = $1", (prompt_id,)
             )
-            prompt = self._row_to_prompt(cursor.fetchone())
+            row = await conn.fetchrow(query, *params)
+            if not row:
+                raise RuntimeError(f"Failed to fetch created prompt {prompt_id}")
+            prompt = self._row_to_prompt(row)
             if scope == "global":
                 self._invalidate_cache()
                 self._cache_prompt(None, prompt)
@@ -251,9 +248,6 @@ class SystemPromptManager:
                 self._invalidate_cache(chat_id)
                 self._cache_prompt(chat_id, prompt)
             return prompt
-
-        finally:
-            conn.close()
 
     async def reset_to_default(
         self, admin_id: int, chat_id: int | None = None, scope: str = "global"
@@ -271,20 +265,19 @@ class SystemPromptManager:
         if scope == "global":
             chat_id = None
 
-        conn = self._get_connection()
         now = int(time.time())
 
-        try:
-            cursor = conn.execute(
+        async with get_db_connection(self.database_url) as conn:
+            query, params = convert_query_to_postgres(
                 """
                 UPDATE system_prompts
-                SET is_active = 0, updated_at = ?
-                WHERE chat_id IS ? AND scope = ? AND is_active = 1
+                SET is_active = 0, updated_at = $1
+                WHERE chat_id IS NOT DISTINCT FROM $2 AND scope = $3 AND is_active = 1
                 """,
                 (now, chat_id, scope),
             )
-            count = cursor.rowcount
-            conn.commit()
+            result = await conn.execute(query, *params)
+            count = int(result.split()[-1]) if result.split()[-1].isdigit() else 0
 
             if count > 0:
                 logger.info(
@@ -297,9 +290,6 @@ class SystemPromptManager:
                     self._invalidate_cache(chat_id)
 
             return count > 0
-
-        finally:
-            conn.close()
 
     async def get_prompt_history(
         self, chat_id: int | None = None, scope: str = "global", limit: int = 10
@@ -317,20 +307,18 @@ class SystemPromptManager:
         if scope == "global":
             chat_id = None
 
-        conn = self._get_connection()
-        try:
-            cursor = conn.execute(
-                """
-                SELECT * FROM system_prompts
-                WHERE chat_id IS ? AND scope = ?
-                ORDER BY version DESC
-                LIMIT ?
-                """,
-                (chat_id, scope, limit),
-            )
-            return [self._row_to_prompt(row) for row in cursor.fetchall()]
-        finally:
-            conn.close()
+        query, params = convert_query_to_postgres(
+            """
+            SELECT * FROM system_prompts
+            WHERE chat_id IS NOT DISTINCT FROM $1 AND scope = $2
+            ORDER BY version DESC
+            LIMIT $3
+            """,
+            (chat_id, scope, limit),
+        )
+        async with get_db_connection(self.database_url) as conn:
+            rows = await conn.fetch(query, *params)
+            return [self._row_to_prompt(row) for row in rows]
 
     async def activate_version(
         self,
@@ -353,44 +341,43 @@ class SystemPromptManager:
         if scope == "global":
             chat_id = None
 
-        conn = self._get_connection()
         now = int(time.time())
 
-        try:
+        async with get_db_connection(self.database_url) as conn:
             # Find the target version
-            cursor = conn.execute(
+            query, params = convert_query_to_postgres(
                 """
                 SELECT * FROM system_prompts
-                WHERE chat_id IS ? AND scope = ? AND version = ?
+                WHERE chat_id IS NOT DISTINCT FROM $1 AND scope = $2 AND version = $3
                 """,
                 (chat_id, scope, version),
             )
-            target_row = cursor.fetchone()
+            target_row = await conn.fetchrow(query, *params)
 
             if not target_row:
                 return None
 
             # Deactivate current active prompts
-            conn.execute(
+            query, params = convert_query_to_postgres(
                 """
                 UPDATE system_prompts
-                SET is_active = 0, updated_at = ?
-                WHERE chat_id IS ? AND scope = ? AND is_active = 1
+                SET is_active = 0, updated_at = $1
+                WHERE chat_id IS NOT DISTINCT FROM $2 AND scope = $3 AND is_active = 1
                 """,
                 (now, chat_id, scope),
             )
+            await conn.execute(query, *params)
 
             # Activate target version
-            conn.execute(
+            query, params = convert_query_to_postgres(
                 """
                 UPDATE system_prompts
-                SET is_active = 1, updated_at = ?, activated_at = ?
-                WHERE id = ?
+                SET is_active = 1, updated_at = $1, activated_at = $2
+                WHERE id = $3
                 """,
                 (now, now, target_row["id"]),
             )
-
-            conn.commit()
+            await conn.execute(query, *params)
 
             logger.info(
                 f"Activated version {version}: admin={admin_id}, scope={scope}, "
@@ -398,10 +385,13 @@ class SystemPromptManager:
             )
 
             # Return updated prompt
-            cursor = conn.execute(
-                "SELECT * FROM system_prompts WHERE id = ?", (target_row["id"],)
+            query, params = convert_query_to_postgres(
+                "SELECT * FROM system_prompts WHERE id = $1", (target_row["id"],)
             )
-            prompt = self._row_to_prompt(cursor.fetchone())
+            row = await conn.fetchrow(query, *params)
+            if not row:
+                raise RuntimeError(f"Failed to fetch prompt {target_row['id']}")
+            prompt = self._row_to_prompt(row)
             if scope == "global":
                 self._invalidate_cache()
                 self._cache_prompt(None, prompt)
@@ -410,10 +400,7 @@ class SystemPromptManager:
                 self._cache_prompt(chat_id, prompt)
             return prompt
 
-        finally:
-            conn.close()
-
-    def _row_to_prompt(self, row: sqlite3.Row) -> SystemPrompt:
+    def _row_to_prompt(self, row: asyncpg.Record) -> SystemPrompt:
         """Convert database row to SystemPrompt."""
         return SystemPrompt(
             id=row["id"],

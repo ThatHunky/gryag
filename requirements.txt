@@ -1,6 +1,7 @@
 aiogram>=3.5
 google-genai>=0.2.0
-aiosqlite>=0.20
+asyncpg>=0.29.0
+aiosqlite>=0.20  # Still needed for legacy services (embedding_cache, user_profile, etc.)
 pydantic>=2.6
 pydantic-settings>=2.2
 redis>=5.0

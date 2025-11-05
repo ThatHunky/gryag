@@ -1,22 +1,44 @@
 services:
-  # Redis disabled for LOW CPU MODE (no background processing or distributed locks needed)
-  # Uncomment to re-enable Redis:
-  # redis:
-  #   image: redis:7-alpine
-  #   restart: unless-stopped
-  #   ports:
-  #     - "6379:6379"
-  #   command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
-  #   volumes:
-  #     - ./redis-data:/data
-  #   healthcheck:
-  #     test: ["CMD", "redis-cli", "ping"]
-  #     interval: 30s
-  #     timeout: 10s
-  #     retries: 3
-  #   networks:
-  #     default:
-  #       ipv4_address: 172.20.0.10
+  # PostgreSQL 18 database (non-standard port 5433)
+  postgres:
+    image: postgres:18-alpine
+    container_name: gryag-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gryag
+      POSTGRES_PASSWORD: gryag
+      POSTGRES_DB: gryag
+    ports:
+      - "5433:5432"  # Non-standard port as requested
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/schema_postgresql.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gryag"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      default:
+        ipv4_address: 172.20.0.11
+
+  redis:
+    image: redis:7-alpine
+    container_name: gryag-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      default:
+        ipv4_address: 172.20.0.10
 
   warp:
     build:
@@ -39,9 +61,8 @@ services:
       timeout: 5s
       retries: 12
     restart: unless-stopped
-    # Redis extra_hosts disabled (LOW CPU MODE)
-    # extra_hosts:
-    #   - "redis:172.20.0.10"
+    extra_hosts:
+      - "redis:172.20.0.10"
 
   bot:
     build:
@@ -55,16 +76,17 @@ services:
       - ./models:/app/models # Persistent volume for local models stored in codebase
     restart: unless-stopped
     depends_on:
-      # Redis dependency removed (LOW CPU MODE)
-      # redis:
-      #   condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
       warp:
         condition: service_healthy
     network_mode: "service:warp"
-    # Redis environment variables removed (LOW CPU MODE - controlled by .env)
-    # environment:
-    #   - USE_REDIS=true
-    #   - REDIS_URL=redis://redis:6379/0
+    # PostgreSQL connection (use postgres service IP)
+    environment:
+      - DATABASE_URL=postgresql://gryag:gryag@172.20.0.11:5432/gryag
+      - REDIS_URL=redis://172.20.0.10:6379/0
 # Note: Models are stored in local folder (./models)
 # Redis data folder (./redis-data) preserved for future use
 
@@ -77,3 +99,5 @@ networks:
 
 volumes:
   warp-state:
+  postgres-data:
+  redis-data:

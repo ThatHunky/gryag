@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
 
 from app.config import Settings
 from app.services import telemetry
@@ -111,7 +110,7 @@ class MultiLevelContextManager:
         episode_store: Any | None = None,
         gemini_client: Any | None = None,
     ):
-        self.db_path = Path(db_path)
+        self.database_url = str(db_path)  # Accept database_url string
         self.settings = settings
         self.context_store = context_store
         self.profile_store = profile_store
@@ -376,8 +375,8 @@ class MultiLevelContextManager:
                 token_count=tokens,
             )
 
-        # Fetch recent messages
-        limit = (self.settings.immediate_context_size + 1) // 2
+        # Fetch recent messages (use message count directly)
+        limit = self.settings.immediate_context_size
         messages = await self.context_store.recent(chat_id, thread_id, limit)
         messages = self._filter_history(messages)
 
@@ -434,9 +433,8 @@ class MultiLevelContextManager:
 
         Returns messages from active conversation window.
         """
-        # recent_context_size is in messages, but recent() expects turns (pairs)
-        # Convert message count to turn count (divide by 2, round up)
-        limit = (self.settings.recent_context_size + 1) // 2
+        # Use message count directly (no conversion needed)
+        limit = self.settings.recent_context_size
 
         # Get recent messages beyond immediate
         all_recent = await self.context_store.recent(chat_id, thread_id, limit)

@@ -37,10 +37,14 @@ class Settings(BaseSettings):
     thinking_budget_tokens: int = Field(
         1024, alias="THINKING_BUDGET_TOKENS", ge=64, le=4096
     )
-    db_path: Path = Field(Path("./gryag.db"), alias="DB_PATH")
-    max_turns: int = Field(
-        20, alias="MAX_TURNS", ge=1
-    )  # Reduced from 50 to prevent token overflow
+    # PostgreSQL connection (replaces SQLite db_path)
+    database_url: str = Field(
+        "postgresql://gryag:gryag@localhost:5433/gryag",
+        alias="DATABASE_URL"
+    )
+    max_messages: int = Field(
+        40, alias="MAX_MESSAGES", ge=1
+    )  # Maximum number of messages to retrieve for context (replaces old MAX_TURNS)
     per_user_per_hour: int = Field(5, alias="PER_USER_PER_HOUR", ge=1)
     context_summary_threshold: int = Field(30, alias="CONTEXT_SUMMARY_THRESHOLD", ge=5)
 
@@ -72,14 +76,14 @@ class Settings(BaseSettings):
         300, alias="PROCESSING_LOCK_TTL_SECONDS", ge=30, le=3600
     )  # Lock timeout (safety)
 
-    use_redis: bool = Field(False, alias="USE_REDIS")
-    redis_url: str | None = Field("redis://localhost:6379/0", alias="REDIS_URL")
+    use_redis: bool = Field(True, alias="USE_REDIS")
+    redis_url: str | None = Field("redis://redis:6379/0", alias="REDIS_URL")
     admin_user_ids: str = Field("", alias="ADMIN_USER_IDS")
     retention_days: int = Field(7, alias="RETENTION_DAYS", ge=1)
     # Pruning configuration
     retention_enabled: bool = Field(True, alias="RETENTION_ENABLED")
     retention_prune_interval_seconds: int = Field(
-        86400, alias="RETENTION_PRUNE_INTERVAL_SECONDS", ge=60
+        172800, alias="RETENTION_PRUNE_INTERVAL_SECONDS", ge=60  # Default: 2 days (was 1 day)
     )  # Default: run once per day
     enable_web_search: bool = Field(False, alias="ENABLE_WEB_SEARCH")
 
@@ -289,11 +293,22 @@ class Settings(BaseSettings):
         1800, alias="EPISODE_WINDOW_TIMEOUT", ge=300, le=7200
     )  # Seconds before window closes (30 minutes)
     episode_window_max_messages: int = Field(
-        50, alias="EPISODE_WINDOW_MAX_MESSAGES", ge=10, le=200
+        200, alias="EPISODE_WINDOW_MAX_MESSAGES", ge=10, le=500
     )  # Max messages per window
     episode_monitor_interval: int = Field(
         300, alias="EPISODE_MONITOR_INTERVAL", ge=60, le=3600
     )  # Background check interval (5 minutes)
+    
+    # Episode Summarization (CPU optimization)
+    enable_episode_gemini_summarization: bool = Field(
+        False, alias="ENABLE_EPISODE_GEMINI_SUMMARIZATION"
+    )  # Use Gemini for episode summaries (default: false to reduce CPU usage)
+    episode_summarization_rate_limit: int = Field(
+        1, alias="EPISODE_SUMMARIZATION_RATE_LIMIT", ge=1, le=10
+    )  # Max Gemini calls per minute for episode summaries
+    episode_monitor_batch_delay_ms: int = Field(
+        100, alias="EPISODE_MONITOR_BATCH_DELAY_MS", ge=0, le=1000
+    )  # Delay between window checks in milliseconds (reduces CPU spikes)
 
     # Fact Graphs
     enable_fact_graphs: bool = Field(True, alias="ENABLE_FACT_GRAPHS")
@@ -548,7 +563,8 @@ class Settings(BaseSettings):
 
     @property
     def db_path_str(self) -> str:
-        return str(self.db_path)
+        """Legacy property for backward compatibility - returns database_url."""
+        return self.database_url
 
     @property
     def admin_user_ids_list(self) -> list[int]:
@@ -768,10 +784,10 @@ class Settings(BaseSettings):
                 "Consider using at least 1."
             )
 
-        if self.max_turns > 100:
+        if self.max_messages > 200:
             warnings.append(
-                f"MAX_TURNS is {self.max_turns}, which may cause high token usage. "
-                "Consider reducing to 50-70 for better performance."
+                f"MAX_MESSAGES is {self.max_messages}, which may cause high token usage. "
+                "Consider reducing to 100-150 for better performance."
             )
 
         if self.context_token_budget > 30000:

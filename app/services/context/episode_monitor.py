@@ -198,32 +198,51 @@ class EpisodeMonitor:
 
     async def _check_all_windows(self) -> None:
         """Check all active windows for boundaries or expiration."""
+        batch_delay_ms = getattr(
+            self.settings, "episode_monitor_batch_delay_ms", 100
+        )
+        batch_delay = batch_delay_ms / 1000.0  # Convert to seconds
+        
         async with self._lock:
             keys_to_remove = []
+            windows_to_check = list(self.windows.items())
 
-            for key, window in list(self.windows.items()):
-                try:
-                    # Check if window expired
-                    if window.is_expired(self.window_timeout):
-                        LOGGER.info(
-                            f"Window expired for chat {key[0]}, thread {key[1]}"
-                        )
-                        await self._create_episode_from_window(window, "timeout")
-                        keys_to_remove.append(key)
-                        continue
+        # Process windows sequentially with delays to reduce CPU spikes
+        for idx, (key, window) in enumerate(windows_to_check):
+            try:
+                # Add delay between window checks (except first one)
+                if idx > 0 and batch_delay > 0:
+                    await asyncio.sleep(batch_delay)
 
-                    # Check for boundaries in active windows
-                    await self._check_window_boundary(key, window, auto_close=False)
-
-                except Exception as e:
-                    LOGGER.error(
-                        f"Error checking window {key}: {e}",
-                        exc_info=True,
+                # Check if window expired
+                if window.is_expired(self.window_timeout):
+                    LOGGER.info(
+                        f"Window expired for chat {key[0]}, thread {key[1]}"
                     )
+                    await self._create_episode_from_window(window, "timeout")
+                    
+                    async with self._lock:
+                        if key in self.windows:
+                            del self.windows[key]
+                    continue
 
-            # Remove closed windows
-            for key in keys_to_remove:
-                del self.windows[key]
+                # Skip boundary detection for very small or very new windows
+                # (reduces unnecessary API calls)
+                window_age = int(time.time()) - window.last_activity
+                if (
+                    len(window.messages) < self.min_messages_for_episode
+                    or window_age < 60  # Skip if window is less than 1 minute old
+                ):
+                    continue
+
+                # Check for boundaries in active windows
+                await self._check_window_boundary(key, window, auto_close=False)
+
+            except Exception as e:
+                LOGGER.error(
+                    f"Error checking window {key}: {e}",
+                    exc_info=True,
+                )
 
     async def _check_window_boundary(
         self,
@@ -309,34 +328,47 @@ class EpisodeMonitor:
                 LOGGER.warning("No participants in window")
                 return None
 
-            # Phase 4.2.1: Try full Gemini summarization if available
-            topic = None
-            summary = None
+            # CPU optimization: Use heuristics immediately (fast, no API calls)
+            # Gemini summarization can be enabled but is optional and rate-limited
+            topic = await self._generate_topic(window)
+            summary = await self._generate_summary(window)
             emotional_valence = "neutral"
             tags = [reason]
 
-            if self.summarizer:
+            # Optionally try Gemini summarization in background (non-blocking)
+            # Only if enabled and rate limit allows
+            if self.summarizer and getattr(
+                self.settings, "enable_episode_gemini_summarization", False
+            ):
+                # Try to get Gemini summary, but don't block if rate limited
                 try:
                     result = await self.summarizer.summarize_episode(
                         window.messages, window.participant_ids
                     )
                     if result:
-                        topic = result.get("topic")
-                        summary = result.get("summary")
-                        emotional_valence = result.get("emotional_valence", "neutral")
-                        # Combine Gemini tags with creation reason
+                        # Use Gemini results if available (they're better quality)
+                        gemini_topic = result.get("topic")
+                        gemini_summary = result.get("summary")
+                        gemini_valence = result.get("emotional_valence", "neutral")
                         gemini_tags = result.get("tags", [])
-                        tags = [reason] + gemini_tags
+                        
+                        if gemini_topic:
+                            topic = gemini_topic
+                        if gemini_summary:
+                            summary = gemini_summary
+                        if gemini_valence != "neutral":
+                            emotional_valence = gemini_valence
+                        if gemini_tags:
+                            tags = [reason] + gemini_tags[:4]  # Limit tags
+                            
+                        LOGGER.debug(
+                            f"Enhanced episode with Gemini summary (topic: {topic[:50]})"
+                        )
                 except Exception as e:
-                    LOGGER.warning(
-                        f"Gemini full summarization failed, using fallback: {e}"
+                    # Silent fallback - heuristics already provided values
+                    LOGGER.debug(
+                        f"Gemini summarization skipped (rate limited or failed): {e}"
                     )
-
-            # Fallback to heuristic methods if Gemini unavailable or failed
-            if not topic:
-                topic = await self._generate_topic(window)
-            if not summary:
-                summary = await self._generate_summary(window)
 
             # Calculate importance (basic heuristic for now)
             importance = self._calculate_importance(window)
@@ -371,18 +403,9 @@ class EpisodeMonitor:
         """
         Generate a topic for the episode.
 
-        Phase 4.2.1: Uses Gemini-based summarizer if available, falls back to heuristic.
+        Uses fast heuristics by default. Gemini can be enabled optionally.
         """
-        # Try Gemini-based topic generation if summarizer available
-        if self.summarizer:
-            try:
-                topic = await self.summarizer.generate_topic_only(window.messages)
-                if topic and topic != "Conversation":
-                    return topic
-            except Exception as e:
-                LOGGER.warning(f"Gemini topic generation failed, using fallback: {e}")
-
-        # Fallback: Simple heuristic using first message as topic seed
+        # Fast heuristic: use first message as topic seed (no API calls)
         if window.messages:
             first_text = window.messages[0].get("text", "")
             # Take first 50 chars as topic
@@ -397,20 +420,9 @@ class EpisodeMonitor:
         """
         Generate a summary for the episode.
 
-        Phase 4.2.1: Uses Gemini-based summarizer if available, falls back to heuristic.
+        Uses fast heuristics by default. Gemini can be enabled optionally.
         """
-        # Try Gemini-based summary generation if summarizer available
-        if self.summarizer:
-            try:
-                result = await self.summarizer.summarize_episode(
-                    window.messages, window.participant_ids  # Already a set
-                )
-                if result and result.get("summary"):
-                    return result["summary"]
-            except Exception as e:
-                LOGGER.warning(f"Gemini summary generation failed, using fallback: {e}")
-
-        # Fallback: Simple heuristic counting messages and participants
+        # Fast heuristic: simple message/participant count (no API calls)
         msg_count = len(window.messages)
         participant_count = len(window.participant_ids)
 

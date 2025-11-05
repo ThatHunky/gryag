@@ -19,6 +19,7 @@ async def execute_with_retry(
     max_retries: int = 5,
     initial_delay: float = 0.1,
     max_delay: float = 2.0,
+    operation_name: str = "database operation",
 ) -> None:
     """
     Execute an async operation with exponential backoff retry for database errors.
@@ -28,22 +29,41 @@ async def execute_with_retry(
         max_retries: Maximum number of attempts
         initial_delay: Initial delay in seconds for retry
         max_delay: Maximum delay cap for backoff
+        operation_name: Name of operation for logging (helps identify bottlenecks)
     """
+    import time as time_module
+    
     last_error = None
+    operation_start = time_module.time()
+    
     for attempt in range(max_retries):
         try:
-            return await coro_func()
+            result = await coro_func()
+            operation_time = int((time_module.time() - operation_start) * 1000)
+            
+            # Log slow operations (>500ms) to identify bottlenecks
+            if operation_time > 500:
+                logger.info(
+                    f"Slow {operation_name}: {operation_time}ms (attempt {attempt + 1})"
+                )
+            
+            return result
         except (asyncpg.PostgresConnectionError, asyncpg.InterfaceError) as e:
             last_error = e
             if attempt < max_retries - 1:
                 delay = min(initial_delay * (2 ** attempt), max_delay)
                 logger.warning(
-                    f"Database connection error, retrying in {delay:.2f}s (attempt {attempt + 1}/{max_retries})"
+                    f"Database connection error in {operation_name}, retrying in {delay:.2f}s "
+                    f"(attempt {attempt + 1}/{max_retries}): {e}"
                 )
                 await asyncio.sleep(delay)
 
     if last_error:
-        logger.error(f"Failed after {max_retries} retries: {last_error}")
+        operation_time = int((time_module.time() - operation_start) * 1000)
+        logger.error(
+            f"{operation_name} failed after {max_retries} retries "
+            f"(total time: {operation_time}ms): {last_error}"
+        )
         raise last_error
     raise RuntimeError("Database operation failed")
 

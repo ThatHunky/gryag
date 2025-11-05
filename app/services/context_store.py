@@ -64,11 +64,16 @@ SPEAKER_ALLOWED_ROLES = {"user", "assistant", "system", "tool"}
 
 
 @dataclass(slots=True)
-class TurnSender:
+class MessageSender:
+    """Sender information for a message (replaces old TurnSender)."""
     role: str | None = None
     name: str | None = None
     username: str | None = None
     is_bot: bool | None = None
+
+
+# Backward compatibility alias
+TurnSender = MessageSender
 
 
 def _sanitize_header_value(value: str) -> str:
@@ -247,7 +252,7 @@ class ContextStore:
             self._initialized = True
             logger.info("ContextStore initialized with PostgreSQL")
 
-    async def add_turn(
+    async def add_message(
         self,
         chat_id: int,
         thread_id: int | None,
@@ -259,7 +264,7 @@ class ContextStore:
         embedding: list[float] | None = None,
         retention_days: int | None = None,
         *,
-        sender: TurnSender | None = None,
+        sender: MessageSender | None = None,
     ) -> int:
         await self.init()
         ts = int(time.time())
@@ -333,7 +338,11 @@ class ContextStore:
                 row = await conn.fetchrow(query, *params)
                 message_id = row["id"] if row else 0
 
-        await execute_with_retry(insert_message, max_retries=5)
+        await execute_with_retry(
+            insert_message, 
+            max_retries=5,
+            operation_name="add_message (insert_message)"
+        )
         # NOTE: Retention pruning moved to background task in main.py to avoid blocking message processing
         # Previously: if retention_days: await self._maybe_prune(retention_days)
 
@@ -574,20 +583,19 @@ class ContextStore:
         self,
         chat_id: int,
         thread_id: int | None,
-        max_turns: int,
+        max_messages: int,
     ) -> list[dict[str, Any]]:
         await self.init()
 
         # Try Redis cache first
         if self._context_cache is not None:
-            cached_context = await self._context_cache.get(chat_id, thread_id, max_turns)
+            cached_context = await self._context_cache.get(chat_id, thread_id, max_messages)
             if cached_context is not None:
-                # Return cached data (already limited to max_turns)
-                return cached_context[:max_turns] if len(cached_context) > max_turns else cached_context
+                # Return cached data (already limited to max_messages)
+                return cached_context[:max_messages] if len(cached_context) > max_messages else cached_context
 
-        # Each turn = 1 user message + 1 bot response = 2 messages
-        # So we need to fetch max_turns * 2 to get the full conversation history
-        message_limit = max_turns * 2
+        # Use max_messages directly (no multiplication needed)
+        message_limit = max_messages
 
         if thread_id is None:
             query = (

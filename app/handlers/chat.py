@@ -55,7 +55,8 @@ from app.handlers.chat_tools import (
 )
 from app.services.context_store import (
     ContextStore,
-    TurnSender,
+    MessageSender,
+    TurnSender,  # Backward compatibility alias
     format_metadata,
     format_speaker_header,
 )
@@ -101,12 +102,20 @@ def _safe_html_payload(
     wrap: tuple[str, str] | None = None,
     limit: int = 4096,
     ellipsis: bool = False,
+    already_html: bool = False,
 ) -> str:
     """
     Escape text for Telegram HTML mode while respecting the length limit.
 
     Optionally wraps the escaped text and appends an ellipsis when truncation
     is required.
+
+    Args:
+        text: Text to format
+        wrap: Optional prefix/suffix tuple to wrap the text
+        limit: Maximum length for the payload
+        ellipsis: Whether to append "..." when truncating
+        already_html: If True, skip HTML escaping (text is already HTML-formatted)
     """
     prefix, suffix = wrap or ("", "")
     available = max(limit - len(prefix) - len(suffix), 0)
@@ -117,7 +126,12 @@ def _safe_html_payload(
         truncated = truncated[: len(truncated) - len(ellipsis_str)]
 
     while True:
-        escaped = escape(truncated)
+        if already_html:
+            # Text is already HTML-formatted, just truncate if needed
+            escaped = truncated
+        else:
+            escaped = escape(truncated)
+            # Telegram HTML mode handles newlines automatically - no need to convert
         candidate_body = escaped + ellipsis_str
         candidate = f"{prefix}{candidate_body}{suffix}"
         if len(candidate) <= limit:
@@ -705,7 +719,7 @@ async def _remember_context_message(
         }
 
         # Store in database for later retrieval
-        await store.add_turn(
+        await store.add_message(
             chat_id=message.chat.id,
             thread_id=message.message_thread_id,
             user_id=message.from_user.id,
@@ -715,7 +729,7 @@ async def _remember_context_message(
             metadata=user_meta,
             embedding=user_embedding,
             retention_days=settings.retention_days,
-            sender=TurnSender(
+            sender=MessageSender(
                 role="user",
                 name=from_user.full_name if from_user else None,
                 username=_normalize_username(from_user.username) if from_user else None,
@@ -824,7 +838,7 @@ def _build_model_metadata(
     meta: dict[str, Any] = {
         "chat_id": str(chat_id),
         "thread_id": str(thread_id) if thread_id is not None else None,
-        "message_id": str(response.message_id),
+        "message_id": str(response.message_id) if response is not None else None,
         "user_id": None,
         "name": "gryag",
         "username": _normalize_username(bot_username),
@@ -900,8 +914,11 @@ def _clean_response_text(text: str) -> str:
     while "[meta]" in cleaned:
         cleaned = cleaned.replace("[meta]", "").strip()
 
-    # Clean up multiple consecutive spaces
-    cleaned = " ".join(cleaned.split())
+    # Clean up multiple consecutive spaces while preserving newlines
+    # Process each line separately to maintain line breaks
+    lines = cleaned.split("\n")
+    cleaned_lines = [" ".join(line.split()) for line in lines]
+    cleaned = "\n".join(cleaned_lines)
 
     return cleaned
 
@@ -929,18 +946,18 @@ async def _get_video_description_from_history(
     """
     try:
         # Get recent conversation history
-        turns = await store.recent(
+        messages = await store.recent(
             chat_id=chat_id,
             thread_id=thread_id,
-            max_turns=20,  # Check last 20 messages
+            max_messages=20,  # Check last 20 messages
         )
 
         # Find the video message and the bot's response after it
         found_video_msg = False
-        for turn in turns:
-            metadata = turn.get("metadata", "")
-            text = turn.get("text", "")
-            role = turn.get("role", "")
+        for message_item in messages:
+            metadata = message_item.get("metadata", "")
+            text = message_item.get("text", "")
+            role = message_item.get("role", "")
 
             # Check if this is the video message we're looking for
             if not found_video_msg and f"message_id={message_id}" in metadata:
@@ -1699,6 +1716,10 @@ async def _handle_bot_message_locked(
         # Always return early for banned users (no processing)
         return
 
+    # Start timing for performance monitoring
+    processing_start_time = time.time()
+    perf_timings: dict[str, int] = {}  # Track performance timings for summary
+
     # Build multi-level context if services are available
     context_manager = multi_level_context_manager
     use_multi_level = settings.enable_multi_level_context and (
@@ -1725,6 +1746,7 @@ async def _handle_bot_message_locked(
         text_content = (message.text or message.caption or "").strip()
 
         # Build multi-level context
+        context_build_start = time.time()
         try:
             context_assembly = await context_manager.build_context(
                 chat_id=chat_id,
@@ -1733,6 +1755,8 @@ async def _handle_bot_message_locked(
                 query_text=text_content or "conversation",
                 max_tokens=settings.context_token_budget,
             )
+            context_build_time = int((time.time() - context_build_start) * 1000)
+            perf_timings["context_build_time_ms"] = context_build_time
 
             LOGGER.info(
                 "Multi-level context assembled",
@@ -1756,6 +1780,7 @@ async def _handle_bot_message_locked(
                         if context_assembly.episodes
                         else 0
                     ),
+                    "build_time_ms": context_build_time,
                 },
             )
         except Exception as e:
@@ -1771,10 +1796,22 @@ async def _handle_bot_message_locked(
 
     if not use_multi_level:
         # Fallback: Use simple history retrieval
+        context_build_start = time.time()
         history = await store.recent(
             chat_id=chat_id,
             thread_id=thread_id,
-            max_turns=settings.max_turns,
+            max_messages=settings.max_messages,
+        )
+        context_build_time = int((time.time() - context_build_start) * 1000)
+        perf_timings["context_build_time_ms"] = context_build_time
+        LOGGER.info(
+            "Simple history retrieved",
+            extra={
+                "chat_id": chat_id,
+                "thread_id": thread_id,
+                "history_count": len(history),
+                "build_time_ms": context_build_time,
+            },
         )
 
         # Apply token-based truncation to prevent overflow
@@ -1799,7 +1836,20 @@ async def _handle_bot_message_locked(
     use_system_context_block = settings.enable_system_context_block
 
     # Collect media from message (photos, videos, audio, etc.)
+    media_collect_start = time.time()
     media_raw = await collect_media_parts(bot, message)
+    media_collect_time = int((time.time() - media_collect_start) * 1000)
+    perf_timings["media_collect_time_ms"] = media_collect_time
+    if media_collect_time > 1000:  # Log if takes more than 1 second
+        LOGGER.info(
+            "Media collection completed",
+            extra={
+                "chat_id": chat_id,
+                "message_id": message.message_id,
+                "media_count": len(media_raw),
+                "collect_time_ms": media_collect_time,
+            },
+        )
 
     raw_text = (message.text or message.caption or "").strip()
 
@@ -1971,14 +2021,12 @@ async def _handle_bot_message_locked(
             if (settings.system_context_block_thread_only and thread_id is not None)
             else None
         )
-        max_turns_for_block = max(
-            1, math.ceil(settings.system_context_block_max_messages / 2)
-        )
+        max_messages_for_block = settings.system_context_block_max_messages
         try:
             history_messages_for_block = await store.recent(
                 chat_id=chat_id,
                 thread_id=target_thread_for_block,
-                max_turns=max_turns_for_block,
+                max_messages=max_messages_for_block,
             )
         except Exception:
             LOGGER.exception("Failed to load history for system context block")
@@ -2057,10 +2105,14 @@ async def _handle_bot_message_locked(
 
     text_content = raw_text or media_summary or fallback_text or ""
 
+    embedding_start = time.time()
     user_embedding = await gemini_client.embed_text(text_content)
+    embedding_time = int((time.time() - embedding_start) * 1000)
+    perf_timings["embedding_time_ms"] = embedding_time
 
     from_user = message.from_user
-    await store.add_turn(
+    db_add_start = time.time()
+    await store.add_message(
         chat_id=chat_id,
         thread_id=thread_id,
         user_id=user_id,
@@ -2070,13 +2122,25 @@ async def _handle_bot_message_locked(
         metadata=user_meta,
         embedding=user_embedding,
         retention_days=settings.retention_days,
-        sender=TurnSender(
+        sender=MessageSender(
             role="user",
             name=from_user.full_name if from_user else None,
             username=_normalize_username(from_user.username) if from_user else None,
             is_bot=from_user.is_bot if from_user else None,
         ),
     )
+    db_add_time = int((time.time() - db_add_start) * 1000)
+    perf_timings["db_add_time_ms"] = db_add_time
+    if db_add_time > 500:  # Log if DB operation takes more than 500ms
+        LOGGER.info(
+            "Database add_message completed",
+            extra={
+                "chat_id": chat_id,
+                "thread_id": thread_id,
+                "user_id": user_id,
+                "db_time_ms": db_add_time,
+            },
+        )
 
     # Phase 4.2: Track message for episode creation
     if settings.auto_create_episodes and episode_monitor is not None:
@@ -2803,7 +2867,7 @@ async def _handle_bot_message_locked(
                                 reply_confirm
                             )
 
-                            await store.add_turn(
+                            await store.add_message(
                                 chat_id=chat_id,
                                 thread_id=thread_id,
                                 user_id=None,
@@ -2813,7 +2877,7 @@ async def _handle_bot_message_locked(
                                 metadata=model_meta,
                                 embedding=model_embedding,
                                 retention_days=settings.retention_days,
-                                sender=TurnSender(
+                                sender=MessageSender(
                                     role="assistant",
                                     name=bot_display_name,
                                     username=_normalize_username(bot_username),
@@ -2872,6 +2936,7 @@ async def _handle_bot_message_locked(
                 # Placeholder sent; response generation will continue without blocking
 
         try:
+            gemini_start = time.time()
             response_data = await gemini_client.generate(
                 system_prompt=system_prompt_with_profile,
                 history=history,
@@ -2879,14 +2944,27 @@ async def _handle_bot_message_locked(
                 tools=tool_definitions,
                 tool_callbacks=tracked_tool_callbacks,  # type: ignore[arg-type]
             )
+            gemini_time = int((time.time() - gemini_start) * 1000)
+            perf_timings["gemini_time_ms"] = gemini_time
             reply_text = response_data.get("text", "")
             thinking_text = (response_data.get("thinking", "") or "").strip()
+            
+            LOGGER.info(
+                "Gemini API call completed",
+                extra={
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "gemini_time_ms": gemini_time,
+                    "response_length": len(reply_text),
+                },
+            )
 
             # If Gemini returned only thinking content, retry without thinking enabled
             if (not reply_text or reply_text.isspace()) and thinking_text:
                 LOGGER.info(
                     "Gemini returned reasoning without final text; retrying without thinking output"
                 )
+                gemini_retry_start = time.time()
                 response_data = await gemini_client.generate(
                     system_prompt=system_prompt_with_profile,
                     history=history,
@@ -2895,8 +2973,21 @@ async def _handle_bot_message_locked(
                     tool_callbacks=tracked_tool_callbacks,  # type: ignore[arg-type]
                     include_thinking=False,
                 )
+                gemini_retry_time = int((time.time() - gemini_retry_start) * 1000)
+                gemini_time += gemini_retry_time  # Add retry time to total
+                perf_timings["gemini_time_ms"] = gemini_time  # Update with total
                 reply_text = response_data.get("text", "")
                 thinking_text = (response_data.get("thinking", "") or "").strip()
+                
+                LOGGER.info(
+                    "Gemini API retry completed",
+                    extra={
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "gemini_retry_time_ms": gemini_retry_time,
+                        "total_gemini_time_ms": gemini_time,
+                    },
+                )
 
             # Handle responses with thinking content (show reasoning process)
             show_thinking = settings.show_thinking_to_users and bool(thinking_text)
@@ -3179,7 +3270,10 @@ async def _handle_bot_message_locked(
             )
 
         reply_trimmed = reply_text[:4096]
-        reply_payload = _safe_html_payload(reply_trimmed)
+        # Convert markdown to HTML (handles bold, italic, strikethrough, spoilers)
+        formatted = _format_for_telegram(reply_trimmed)
+        # Telegram HTML mode handles newlines automatically - no br tags needed
+        reply_payload = _safe_html_payload(formatted, already_html=True)
 
         response_message: Message | None = None
 
@@ -3235,9 +3329,12 @@ async def _handle_bot_message_locked(
         )
         bot_display_name = model_meta.get("name") or "gryag"
 
+        model_embedding_start = time.time()
         model_embedding = await gemini_client.embed_text(reply_trimmed)
+        model_embedding_time = int((time.time() - model_embedding_start) * 1000)
 
-        await store.add_turn(
+        db_save_start = time.time()
+        await store.add_message(
             chat_id=chat_id,
             thread_id=thread_id,
             user_id=None,
@@ -3247,13 +3344,29 @@ async def _handle_bot_message_locked(
             metadata=model_meta,
             embedding=model_embedding,
             retention_days=settings.retention_days,
-            sender=TurnSender(
+            sender=MessageSender(
                 role="assistant",
                 name=bot_display_name,
                 username=_normalize_username(bot_username),
                 is_bot=True,
             ),
         )
+        db_save_time = int((time.time() - db_save_start) * 1000)
+        perf_timings["db_save_time_ms"] = db_save_time
+
+    # Log total processing time with breakdown
+    total_processing_time = int((time.time() - processing_start_time) * 1000)
+    perf_summary = {
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "message_id": message.message_id,
+        "total_time_ms": total_processing_time,
+        **perf_timings,  # Include all collected timing metrics
+    }
+    LOGGER.info(
+        "Message processing completed",
+        extra=perf_summary,
+    )
 
     # Bot Self-Learning: Track this interaction for learning
     if (

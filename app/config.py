@@ -42,9 +42,9 @@ class Settings(BaseSettings):
         "postgresql://gryag:gryag@localhost:5433/gryag",
         alias="DATABASE_URL"
     )
-    max_turns: int = Field(
-        20, alias="MAX_TURNS", ge=1
-    )  # Reduced from 50 to prevent token overflow
+    max_messages: int = Field(
+        40, alias="MAX_MESSAGES", ge=1
+    )  # Maximum number of messages to retrieve for context (replaces old MAX_TURNS)
     per_user_per_hour: int = Field(5, alias="PER_USER_PER_HOUR", ge=1)
     context_summary_threshold: int = Field(30, alias="CONTEXT_SUMMARY_THRESHOLD", ge=5)
 
@@ -293,11 +293,22 @@ class Settings(BaseSettings):
         1800, alias="EPISODE_WINDOW_TIMEOUT", ge=300, le=7200
     )  # Seconds before window closes (30 minutes)
     episode_window_max_messages: int = Field(
-        50, alias="EPISODE_WINDOW_MAX_MESSAGES", ge=10, le=200
+        200, alias="EPISODE_WINDOW_MAX_MESSAGES", ge=10, le=500
     )  # Max messages per window
     episode_monitor_interval: int = Field(
         300, alias="EPISODE_MONITOR_INTERVAL", ge=60, le=3600
     )  # Background check interval (5 minutes)
+    
+    # Episode Summarization (CPU optimization)
+    enable_episode_gemini_summarization: bool = Field(
+        False, alias="ENABLE_EPISODE_GEMINI_SUMMARIZATION"
+    )  # Use Gemini for episode summaries (default: false to reduce CPU usage)
+    episode_summarization_rate_limit: int = Field(
+        1, alias="EPISODE_SUMMARIZATION_RATE_LIMIT", ge=1, le=10
+    )  # Max Gemini calls per minute for episode summaries
+    episode_monitor_batch_delay_ms: int = Field(
+        100, alias="EPISODE_MONITOR_BATCH_DELAY_MS", ge=0, le=1000
+    )  # Delay between window checks in milliseconds (reduces CPU spikes)
 
     # Fact Graphs
     enable_fact_graphs: bool = Field(True, alias="ENABLE_FACT_GRAPHS")
@@ -773,10 +784,10 @@ class Settings(BaseSettings):
                 "Consider using at least 1."
             )
 
-        if self.max_turns > 100:
+        if self.max_messages > 200:
             warnings.append(
-                f"MAX_TURNS is {self.max_turns}, which may cause high token usage. "
-                "Consider reducing to 50-70 for better performance."
+                f"MAX_MESSAGES is {self.max_messages}, which may cause high token usage. "
+                "Consider reducing to 100-150 for better performance."
             )
 
         if self.context_token_budget > 30000:

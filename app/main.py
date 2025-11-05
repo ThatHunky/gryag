@@ -232,6 +232,7 @@ async def main() -> None:
         )
     else:
         # Create a minimal donation scheduler instance without starting it
+        # Still initialize database table for on-demand sends via /gryagdonate command
         donation_scheduler = DonationScheduler(
             bot=bot,
             db_path=settings.database_url,
@@ -239,7 +240,8 @@ async def main() -> None:
             target_chat_ids=[],
             ignored_chat_ids=[],
         )
-        logging.info("Donation scheduler disabled (ENABLE_DONATION_SCHEDULER=false)")
+        await donation_scheduler.init()  # Initialize table even when scheduler is disabled
+        logging.info("Donation scheduler disabled (ENABLE_DONATION_SCHEDULER=false), but table initialized for on-demand sends")
 
     # Phase 3: Initialize hybrid search and episodic memory
     hybrid_search = HybridSearchEngine(

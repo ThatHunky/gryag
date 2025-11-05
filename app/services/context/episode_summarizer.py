@@ -7,7 +7,10 @@ emotional valence, and tags from conversation windows.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
+from collections import deque
 from typing import Any
 
 from app.config import Settings
@@ -17,7 +20,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 class EpisodeSummarizer:
-    """Generate intelligent episode metadata using Gemini."""
+    """Generate intelligent episode metadata using Gemini with rate limiting."""
 
     def __init__(
         self,
@@ -26,6 +29,51 @@ class EpisodeSummarizer:
     ):
         self.settings = settings
         self.gemini = gemini_client
+        
+        # Rate limiting: track timestamps of recent API calls
+        self.rate_limit = getattr(settings, "episode_summarization_rate_limit", 1)
+        self._rate_limit_window = 60.0  # 1 minute window
+        self._recent_calls: deque[float] = deque()
+        self._rate_limit_lock = asyncio.Lock()
+
+    async def _check_rate_limit(self) -> bool:
+        """
+        Check if we can make a Gemini API call based on rate limit.
+        
+        Returns:
+            True if call is allowed, False if rate limited
+        """
+        async with self._rate_limit_lock:
+            now = time.time()
+            # Remove calls outside the window
+            while self._recent_calls and (now - self._recent_calls[0]) > self._rate_limit_window:
+                self._recent_calls.popleft()
+            
+            # Check if we're at the limit
+            if len(self._recent_calls) >= self.rate_limit:
+                return False
+            
+            # Record this call
+            self._recent_calls.append(now)
+            return True
+    
+    async def _wait_for_rate_limit(self) -> None:
+        """Wait until rate limit allows another call."""
+        async with self._rate_limit_lock:
+            if not self._recent_calls:
+                return
+            
+            now = time.time()
+            # Remove old calls
+            while self._recent_calls and (now - self._recent_calls[0]) > self._rate_limit_window:
+                self._recent_calls.popleft()
+            
+            # If still at limit, wait for oldest call to expire
+            if len(self._recent_calls) >= self.rate_limit:
+                oldest_call = self._recent_calls[0]
+                wait_time = self._rate_limit_window - (now - oldest_call) + 0.1  # Small buffer
+                if wait_time > 0:
+                    await asyncio.sleep(wait_time)
 
     async def summarize_episode(
         self,
@@ -49,6 +97,22 @@ class EpisodeSummarizer:
         """
         if not messages:
             return self._empty_summary()
+
+        # Check if Gemini summarization is enabled
+        if not getattr(self.settings, "enable_episode_gemini_summarization", False):
+            # Use heuristics immediately (no API calls)
+            return self._fallback_summary(messages, participants)
+
+        # Check rate limit before making API call
+        if not await self._check_rate_limit():
+            LOGGER.debug(
+                "Episode summarization rate limited, using fallback heuristics",
+                extra={
+                    "messages": len(messages),
+                    "rate_limit": self.rate_limit,
+                },
+            )
+            return self._fallback_summary(messages, participants)
 
         # Build conversation context for Gemini
         conversation_text = self._format_messages_for_analysis(messages)
@@ -278,6 +342,18 @@ Be concise, accurate, and objective. Focus on the content and themes rather than
         """
         if not messages:
             return "Empty conversation"
+
+        # Check if Gemini summarization is enabled
+        if not getattr(self.settings, "enable_episode_gemini_summarization", False):
+            # Use heuristic fallback
+            first_text = messages[0].get("text", "Conversation")
+            return first_text[:50] + ("..." if len(first_text) > 50 else "")
+
+        # Check rate limit
+        if not await self._check_rate_limit():
+            # Fallback to first message
+            first_text = messages[0].get("text", "Conversation")
+            return first_text[:50] + ("..." if len(first_text) > 50 else "")
 
         conversation_text = self._format_messages_for_analysis(
             messages[:5]  # Use first 5 messages for topic

@@ -674,3 +674,13 @@ AFTER INSERT ON user_request_history
 FOR EACH ROW
 EXECUTE FUNCTION cleanup_old_request_history();
 
+-- Donation Scheduler
+CREATE TABLE IF NOT EXISTS donation_sends (
+    chat_id BIGINT PRIMARY KEY,
+    last_send_ts BIGINT NOT NULL,
+    send_count INTEGER DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_donation_sends_last_send
+    ON donation_sends(last_send_ts);
+

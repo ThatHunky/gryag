@@ -43,7 +43,7 @@ class ContextCache:
         self,
         chat_id: int,
         thread_id: int | None,
-        max_turns: int,
+        max_messages: int,
     ) -> list[dict[str, Any]] | None:
         """
         Get cached context from Redis.
@@ -51,7 +51,7 @@ class ContextCache:
         Args:
             chat_id: Chat ID
             thread_id: Thread ID (None for main thread)
-            max_turns: Maximum number of turns requested
+            max_messages: Maximum number of messages requested
 
         Returns:
             Cached context list if found and valid, None otherwise
@@ -72,8 +72,8 @@ class ContextCache:
 
             data = json.loads(cached_data)
 
-            # Validate cached data has enough turns
-            if isinstance(data, list) and len(data) >= max_turns:
+            # Validate cached data has enough messages
+            if isinstance(data, list) and len(data) >= max_messages:
                 return data
 
             return None

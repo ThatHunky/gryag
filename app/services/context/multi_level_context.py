@@ -375,8 +375,8 @@ class MultiLevelContextManager:
                 token_count=tokens,
             )
 
-        # Fetch recent messages
-        limit = (self.settings.immediate_context_size + 1) // 2
+        # Fetch recent messages (use message count directly)
+        limit = self.settings.immediate_context_size
         messages = await self.context_store.recent(chat_id, thread_id, limit)
         messages = self._filter_history(messages)
 
@@ -433,9 +433,8 @@ class MultiLevelContextManager:
 
         Returns messages from active conversation window.
         """
-        # recent_context_size is in messages, but recent() expects turns (pairs)
-        # Convert message count to turn count (divide by 2, round up)
-        limit = (self.settings.recent_context_size + 1) // 2
+        # Use message count directly (no conversion needed)
+        limit = self.settings.recent_context_size
 
         # Get recent messages beyond immediate
         all_recent = await self.context_store.recent(chat_id, thread_id, limit)

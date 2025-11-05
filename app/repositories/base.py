@@ -6,10 +6,9 @@ Provides common CRUD operations for all repositories.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from pathlib import Path
 from typing import Any, Dict, Generic, List, Optional, TypeVar
 
-import aiosqlite
+import asyncpg
 
 from app.core.exceptions import DatabaseError
 from app.infrastructure.db_utils import get_db_connection
@@ -31,55 +30,57 @@ class Repository(ABC, Generic[T]):
         ...         # implementation
     """
 
-    def __init__(self, db_path: str | Path):
+    def __init__(self, database_url: str):
         """Initialize repository.
 
         Args:
-            db_path: Path to SQLite database file (str or Path object)
+            database_url: PostgreSQL connection string (postgresql://user:pass@host:port/dbname)
         """
-        self.db_path = str(db_path) if isinstance(db_path, Path) else db_path
+        self.database_url = database_url
 
     def _get_connection(self):
-        """Get database connection manager with proper timeout and WAL configuration.
+        """Get database connection manager from PostgreSQL pool.
 
         Returns:
             Async context manager for database connection
 
         Note:
-            This uses get_db_connection() which ensures:
-            - 30-second busy timeout for concurrent access
-            - WAL mode enabled for better concurrency
-            - Proper error handling and retries
+            This uses get_db_connection() which provides:
+            - Connection pooling for efficient connection reuse
+            - Automatic connection management
+            - Proper error handling
         """
-        return get_db_connection(self.db_path)
+        return get_db_connection(self.database_url)
+    
 
     async def _execute(
         self,
         query: str,
         params: tuple | Dict[str, Any] | None = None,
-    ) -> aiosqlite.Cursor:
-        """Execute query and return cursor.
+    ) -> str:
+        """Execute query and return result.
 
         Args:
-            query: SQL query string
+            query: SQL query string (use $1, $2, etc. for parameters)
             params: Query parameters (tuple or dict)
 
         Returns:
-            Cursor with query results
+            Result status string (e.g., "INSERT 0 1")
 
         Raises:
             DatabaseError: If query execution fails
         """
         try:
-            async with self._get_connection() as db:
-                db.row_factory = aiosqlite.Row
+            async with self._get_connection() as conn:
                 if params:
-                    cursor = await db.execute(query, params)
+                    if isinstance(params, dict):
+                        result = await conn.execute(query, **params)
+                    else:
+                        result = await conn.execute(query, *params)
                 else:
-                    cursor = await db.execute(query)
-                await db.commit()
-                return cursor
-        except aiosqlite.Error as e:
+                    result = await conn.execute(query)
+                return result
+        except asyncpg.PostgresError as e:
             raise DatabaseError(
                 "Query execution failed",
                 context={"query": query[:100], "params": str(params)[:100]},
@@ -90,28 +91,30 @@ class Repository(ABC, Generic[T]):
         self,
         query: str,
         params: tuple | Dict[str, Any] | None = None,
-    ) -> Optional[aiosqlite.Row]:
+    ) -> Optional[asyncpg.Record]:
         """Fetch single row from query.
 
         Args:
-            query: SQL query string
+            query: SQL query string (use $1, $2, etc. for parameters)
             params: Query parameters
 
         Returns:
-            Single row or None if not found
+            Single row record or None if not found
 
         Raises:
             DatabaseError: If query fails
         """
         try:
-            async with self._get_connection() as db:
-                db.row_factory = aiosqlite.Row
+            async with self._get_connection() as conn:
                 if params:
-                    cursor = await db.execute(query, params)
+                    if isinstance(params, dict):
+                        row = await conn.fetchrow(query, **params)
+                    else:
+                        row = await conn.fetchrow(query, *params)
                 else:
-                    cursor = await db.execute(query)
-                return await cursor.fetchone()
-        except aiosqlite.Error as e:
+                    row = await conn.fetchrow(query)
+                return row
+        except asyncpg.PostgresError as e:
             raise DatabaseError(
                 "Failed to fetch row",
                 context={"query": query[:100]},
@@ -122,28 +125,30 @@ class Repository(ABC, Generic[T]):
         self,
         query: str,
         params: tuple | Dict[str, Any] | None = None,
-    ) -> List[aiosqlite.Row]:
+    ) -> List[asyncpg.Record]:
         """Fetch all rows from query.
 
         Args:
-            query: SQL query string
+            query: SQL query string (use $1, $2, etc. for parameters)
             params: Query parameters
 
         Returns:
-            List of rows (may be empty)
+            List of row records (may be empty)
 
         Raises:
             DatabaseError: If query fails
         """
         try:
-            async with self._get_connection() as db:
-                db.row_factory = aiosqlite.Row
+            async with self._get_connection() as conn:
                 if params:
-                    cursor = await db.execute(query, params)
+                    if isinstance(params, dict):
+                        rows = await conn.fetch(query, **params)
+                    else:
+                        rows = await conn.fetch(query, *params)
                 else:
-                    cursor = await db.execute(query)
-                return list(await cursor.fetchall())
-        except aiosqlite.Error as e:
+                    rows = await conn.fetch(query)
+                return list(rows)
+        except asyncpg.PostgresError as e:
             raise DatabaseError(
                 "Failed to fetch rows",
                 context={"query": query[:100]},

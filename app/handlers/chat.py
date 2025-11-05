@@ -1417,15 +1417,102 @@ async def handle_group_message(
         return
 
     telemetry.increment_counter("chat.addressed")
+    user_id = message.from_user.id
+
+    # Check if there's an unanswered trigger message from THIS USER before this one
+    # If the bot didn't respond to the first trigger from this user, don't respond to subsequent ones
+    # This prevents the bot from "catching up" and responding to messages it missed
+    # This check is per-user: if user A's trigger wasn't answered, only user A's next triggers are skipped
+    # Only block if the unanswered trigger is recent (within last 2 minutes) to allow reset after time passes
+    # NOTE: This check runs BEFORE storing the current message, so we check the PREVIOUS message
+    from app.infrastructure.db_utils import get_db_connection
+    import time
+
+    current_ts = int(time.time())
+    unanswered_threshold_seconds = (
+        120  # 2 minutes - after this, allow responses again (reduced from 5 min)
+    )
+
+    async with get_db_connection(store._database_url) as conn:
+        # Query for the most recent message from this user in this chat/thread
+        # This will be the PREVIOUS message (before the current one being processed)
+        if thread_id is None:
+            query = """
+                SELECT id, role, user_id, external_user_id, ts
+                FROM messages
+                WHERE chat_id = $1 AND thread_id IS NULL AND user_id = $2
+                ORDER BY id DESC
+                LIMIT 1
+            """
+            params = (chat_id, user_id)
+        else:
+            query = """
+                SELECT id, role, user_id, external_user_id, ts
+                FROM messages
+                WHERE chat_id = $1 AND thread_id = $2 AND user_id = $3
+                ORDER BY id DESC
+                LIMIT 1
+            """
+            params = (chat_id, thread_id, user_id)
+
+        user_last_row = await conn.fetchrow(query, *params)
+
+        if user_last_row and user_last_row["role"] == "user":
+            # Check if the unanswered trigger is recent enough to still block
+            trigger_age = current_ts - user_last_row["ts"]
+            if trigger_age > unanswered_threshold_seconds:
+                # Trigger is old enough - allow responses again (reset)
+                LOGGER.debug(
+                    f"Previous trigger from user {user_id} is old ({trigger_age}s), allowing response"
+                )
+            else:
+                # Found a recent user message from this user - check if there's a bot response after it
+                # Query for the next message after this user's message (in the same chat/thread)
+                if thread_id is None:
+                    next_query = """
+                        SELECT role FROM messages
+                        WHERE chat_id = $1 AND thread_id IS NULL AND id > $2
+                        ORDER BY id ASC
+                        LIMIT 1
+                    """
+                    next_params = (chat_id, user_last_row["id"])
+                else:
+                    next_query = """
+                        SELECT role FROM messages
+                        WHERE chat_id = $1 AND thread_id = $2 AND id > $3
+                        ORDER BY id ASC
+                        LIMIT 1
+                    """
+                    next_params = (chat_id, thread_id, user_last_row["id"])
+
+                next_row = await conn.fetchrow(next_query, *next_params)
+
+                # If there's no next message or the next message is not from the bot (role != 'model'),
+                # that means the user's trigger wasn't answered (and it's recent)
+                if next_row is None or next_row["role"] != "model":
+                    LOGGER.info(
+                        "Skipping trigger message - previous trigger from this user was not answered (recent)",
+                        extra={
+                            "chat_id": message.chat.id,
+                            "message_id": message.message_id,
+                            "user_id": user_id,
+                            "previous_trigger_id": user_last_row["id"],
+                            "trigger_age_seconds": trigger_age,
+                        },
+                    )
+                    telemetry.increment_counter("chat.skipped_unanswered_trigger")
+                    # Do NOT store this message - it would create a blocking chain
+                    # Only the first unanswered trigger should block subsequent ones
+                    return
+
     LOGGER.info(
         "Message addressed to bot - processing",
         extra={
             "chat_id": message.chat.id,
             "message_id": message.message_id,
-            "user_id": message.from_user.id,
+            "user_id": user_id,
         },
     )
-    user_id = message.from_user.id
 
     # Ensure data dict exists
     if data is None:
@@ -2923,10 +3010,10 @@ async def _handle_bot_message_locked(
                 chat_id,
                 user_id,
             )
-            # Provide a user-friendly message
+            # Provide a user-friendly message that's more helpful
             reply_text = (
-                "Я не можу обробити це медіа — модерація API заблокувала контент. "
-                "Спробуй інше зображення чи відео."
+                "Вибач, але мої фільтри безпеки не дозволили мені обробити це повідомлення. "
+                "Спробуй переформулювати або відправити інше повідомлення."
             )
         except GeminiError:
             telemetry.increment_counter("chat.reply_failure")

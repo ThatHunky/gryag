@@ -17,7 +17,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import aiosqlite
+import asyncpg
+from app.infrastructure.query_converter import convert_query_to_postgres
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -71,7 +72,7 @@ class DonationScheduler:
             ignored_chat_ids: List of chat IDs to never send donation messages to
         """
         self.bot = bot
-        self.db_path = Path(db_path)
+        self.database_url = str(db_path)  # Accept database_url string
         self.context_store = context_store
         self.target_chat_ids = target_chat_ids or []
         self.ignored_chat_ids = set(ignored_chat_ids or [])
@@ -81,17 +82,9 @@ class DonationScheduler:
 
     async def init(self) -> None:
         """Initialize database table for tracking send timestamps."""
-        async with get_db_connection(self.db_path) as db:
-            await db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS donation_sends (
-                    chat_id INTEGER PRIMARY KEY,
-                    last_send_ts INTEGER NOT NULL,
-                    send_count INTEGER DEFAULT 1
-                )
-                """
-            )
-            await db.commit()
+        # Schema is managed by schema_postgresql.sql
+        async with get_db_connection(self.database_url) as conn:
+            await conn.execute("SELECT 1")  # Verify connection
         logger.info("Donation scheduler database initialized")
 
     async def start(self) -> None:
@@ -277,16 +270,16 @@ class DonationScheduler:
 
         try:
             # Query context store for recent bot messages (role='model')
-            async with get_db_connection(self.db_path) as db:
-                cursor = await db.execute(
-                    """
-                    SELECT COUNT(*) FROM messages
-                    WHERE chat_id = ? AND role = 'model' AND ts >= ?
-                    """,
-                    (chat_id, activity_cutoff),
-                )
-                row = await cursor.fetchone()
-                count = row[0] if row else 0
+            query, params = convert_query_to_postgres(
+                """
+                SELECT COUNT(*) as count FROM messages
+                WHERE chat_id = $1 AND role = 'model' AND ts >= $2
+                """,
+                (chat_id, activity_cutoff),
+            )
+            async with get_db_connection(self.database_url) as conn:
+                row = await conn.fetchrow(query, *params)
+                count = row['count'] if row else 0
 
                 return count > 0
 
@@ -312,18 +305,18 @@ class DonationScheduler:
             True if we should send, False otherwise
         """
         try:
-            async with get_db_connection(self.db_path) as db:
-                cursor = await db.execute(
-                    "SELECT last_send_ts FROM donation_sends WHERE chat_id = ?",
-                    (chat_id,),
-                )
-                row = await cursor.fetchone()
+            query, params = convert_query_to_postgres(
+                "SELECT last_send_ts FROM donation_sends WHERE chat_id = $1",
+                (chat_id,),
+            )
+            async with get_db_connection(self.database_url) as conn:
+                row = await conn.fetchrow(query, *params)
 
                 if not row:
                     # Never sent before, should send
                     return True
 
-                last_send_ts = row[0]
+                last_send_ts = row['last_send_ts']
                 time_since_last = current_ts - last_send_ts
 
                 # Check if enough time has passed based on the interval
@@ -356,18 +349,18 @@ class DonationScheduler:
 
         # Update database tracking
         try:
-            async with get_db_connection(self.db_path) as db:
-                await db.execute(
-                    """
-                    INSERT INTO donation_sends (chat_id, last_send_ts, send_count)
-                    VALUES (?, ?, 1)
-                    ON CONFLICT(chat_id) DO UPDATE SET
-                        last_send_ts = excluded.last_send_ts,
-                        send_count = send_count + 1
-                    """,
-                    (chat_id, current_ts),
-                )
-                await db.commit()
+            query, params = convert_query_to_postgres(
+                """
+                INSERT INTO donation_sends (chat_id, last_send_ts, send_count)
+                VALUES ($1, $2, 1)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    last_send_ts = excluded.last_send_ts,
+                    send_count = send_count + 1
+                """,
+                (chat_id, current_ts),
+            )
+            async with get_db_connection(self.database_url) as conn:
+                await conn.execute(query, *params)
         except Exception as e:
             logger.error(
                 f"Failed to update donation send database for chat {chat_id}: {e}",

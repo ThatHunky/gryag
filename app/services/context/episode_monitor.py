@@ -77,14 +77,14 @@ class EpisodeMonitor:
 
     def __init__(
         self,
-        db_path: Path | str,
+        database_url: str,
         settings: Settings,
         gemini_client: Any,
         episodic_memory: EpisodicMemoryStore,
         boundary_detector: EpisodeBoundaryDetector,
         summarizer: EpisodeSummarizer | None = None,
     ):
-        self.db_path = Path(db_path)
+        self.database_url = str(database_url)
         self.settings = settings
         self.gemini = gemini_client
         self.episodic_memory = episodic_memory

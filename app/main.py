@@ -143,19 +143,28 @@ async def main() -> None:
     )
     dispatcher = Dispatcher()
 
-    # Initialize database with WAL mode for better concurrency
+    # Initialize PostgreSQL database
     from app.infrastructure.db_utils import init_database
 
-    await init_database(settings.db_path)
+    await init_database(settings.database_url)
 
-    store = ContextStore(settings.db_path)
+    store = ContextStore(settings.database_url)
     await store.init()
 
-    rate_limiter = RateLimiter(settings.db_path, settings.per_user_per_hour)
+    # Initialize Redis early for rate limiters
+    redis_client = await init_redis_client(settings)
+
+    rate_limiter = RateLimiter(
+        settings.database_url, settings.per_user_per_hour, redis_client=redis_client
+    )
     await rate_limiter.init()
 
     # Initialize feature-level rate limiter for command throttling
-    feature_limiter = FeatureRateLimiter(settings.db_path, settings.admin_user_ids_list)
+    feature_limiter = FeatureRateLimiter(
+        settings.database_url,
+        settings.admin_user_ids_list,
+        redis_client=redis_client,
+    )
     await feature_limiter.init()
     logging.info("Feature rate limiter initialized (command throttling: 1 per 5 min)")
 
@@ -171,11 +180,11 @@ async def main() -> None:
     )
 
     # Initialize user profiling system
-    profile_store = UserProfileStoreAdapter(settings.db_path)
+    profile_store = UserProfileStoreAdapter(settings.database_url, redis_client=redis_client)
     await profile_store.init()
 
     # Initialize the new memory repository
-    memory_repo = MemoryRepository(db_path=settings.db_path)
+    memory_repo = MemoryRepository(database_url=settings.database_url)
     await memory_repo.init()
     logging.info("MemoryRepository initialized for simple memory storage.")
 
@@ -183,7 +192,7 @@ async def main() -> None:
     chat_profile_store: ChatProfileRepository | None = None
 
     if settings.enable_chat_memory:
-        chat_profile_store = ChatProfileRepository(db_path=settings.db_path)
+        chat_profile_store = ChatProfileRepository(database_url=settings.database_url)
 
         logging.info(
             "Chat public memory initialized",
@@ -212,7 +221,7 @@ async def main() -> None:
         )
         donation_scheduler = DonationScheduler(
             bot=bot,
-            db_path=settings.db_path,
+            db_path=settings.database_url,
             context_store=store,
             target_chat_ids=donation_chat_ids,
             ignored_chat_ids=settings.donation_ignored_chat_ids_list,
@@ -225,7 +234,7 @@ async def main() -> None:
         # Create a minimal donation scheduler instance without starting it
         donation_scheduler = DonationScheduler(
             bot=bot,
-            db_path=settings.db_path,
+            db_path=settings.database_url,
             context_store=store,
             target_chat_ids=[],
             ignored_chat_ids=[],
@@ -234,13 +243,13 @@ async def main() -> None:
 
     # Phase 3: Initialize hybrid search and episodic memory
     hybrid_search = HybridSearchEngine(
-        db_path=settings.db_path,
+        db_path=settings.database_url,
         gemini_client=gemini_client,
         settings=settings,
     )
 
     episodic_memory = EpisodicMemoryStore(
-        db_path=settings.db_path,
+        db_path=settings.database_url,
         gemini_client=gemini_client,
         settings=settings,
     )
@@ -255,19 +264,19 @@ async def main() -> None:
     )
 
     # Initialize system prompt manager for admin configuration
-    prompt_manager = SystemPromptManager(db_path=settings.db_path)
+    prompt_manager = SystemPromptManager(database_url=settings.database_url)
     await prompt_manager.init()
     logging.info("System prompt manager initialized")
 
     # Phase 4: Initialize episode boundary detector and monitor
     episode_boundary_detector = EpisodeBoundaryDetector(
-        db_path=settings.db_path,
+        database_url=settings.database_url,
         settings=settings,
         gemini_client=gemini_client,
     )
 
     episode_monitor = EpisodeMonitor(
-        db_path=settings.db_path,
+        database_url=settings.database_url,
         settings=settings,
         gemini_client=gemini_client,
         episodic_memory=episodic_memory,
@@ -292,7 +301,7 @@ async def main() -> None:
 
         image_gen_service = ImageGenerationService(
             api_key=image_api_key,
-            db_path=settings.db_path,
+            database_url=settings.database_url,
             daily_limit=settings.image_generation_daily_limit,
             admin_user_ids=settings.admin_user_ids_list,
         )
@@ -330,7 +339,7 @@ async def main() -> None:
         bot_id = me.id
 
         bot_profile = BotProfileStore(
-            db_path=settings.db_path_str,
+            db_path=settings.database_url,
             bot_id=bot_id,
             gemini_client=gemini_client,
             enable_temporal_decay=settings.enable_temporal_decay,
@@ -384,8 +393,6 @@ async def main() -> None:
                 settings.retention_prune_interval_seconds,
             )
         )
-
-    redis_client = await init_redis_client(settings)
 
     # Initialize Telegram service for moderation actions
     telegram_service = TelegramService(bot=bot, settings=settings)

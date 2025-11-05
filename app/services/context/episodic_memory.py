@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
+import asyncpg
+from app.infrastructure.query_converter import convert_query_to_postgres
 
 from app.config import Settings
 from app.infrastructure.db_utils import get_db_connection
@@ -74,7 +75,7 @@ class EpisodicMemoryStore:
         settings: Settings,
         gemini_client: Any,
     ):
-        self.db_path = Path(db_path)
+        self.database_url = str(db_path)  # Accept database_url string
         self.settings = settings
         self.gemini = gemini_client
         self._init_lock = asyncio.Lock()
@@ -122,30 +123,31 @@ class EpisodicMemoryStore:
         except Exception as e:
             LOGGER.warning(f"Failed to generate episode embedding: {e}")
 
-        async with get_db_connection(self.db_path) as db:
-            cursor = await db.execute(
-                """
-                INSERT INTO episodes 
-                (chat_id, thread_id, topic, summary, summary_embedding, importance, 
-                 emotional_valence, message_ids, participant_ids, tags, created_at, access_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
-                """,
-                (
-                    chat_id,
-                    thread_id,
-                    topic,
-                    summary,
-                    summary_embedding,
-                    importance,
-                    emotional_valence,
-                    json.dumps(messages),
-                    json.dumps(user_ids),
-                    json.dumps(tags),
-                    ts,
-                ),
-            )
-            episode_id = cursor.lastrowid or 0
-            await db.commit()
+        query, params = convert_query_to_postgres(
+            """
+            INSERT INTO episodes 
+            (chat_id, thread_id, topic, summary, summary_embedding, importance, 
+             emotional_valence, message_ids, participant_ids, tags, created_at, access_count)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0)
+            RETURNING id
+            """,
+            (
+                chat_id,
+                thread_id,
+                topic,
+                summary,
+                summary_embedding,
+                importance,
+                emotional_valence,
+                json.dumps(messages),
+                json.dumps(user_ids),
+                json.dumps(tags),
+                ts,
+            ),
+        )
+        async with get_db_connection(self.database_url) as conn:
+            row = await conn.fetchrow(query, *params)
+            episode_id = row["id"] if row else 0
 
         LOGGER.info(
             f"Created episode {episode_id} in chat {chat_id}: {topic}",
@@ -187,24 +189,24 @@ class EpisodicMemoryStore:
             LOGGER.warning(f"Failed to generate query embedding: {e}")
 
         # Fetch candidate episodes
-        async with get_db_connection(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                """
-                SELECT * FROM episodes 
-                WHERE chat_id = ? 
-                  AND importance >= ?
-                  AND EXISTS (
-                      SELECT 1
-                      FROM json_each(episodes.participant_ids)
-                      WHERE CAST(value AS INTEGER) = ?
-                  )
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (chat_id, min_importance, user_id, limit * 3),
-            ) as cursor:
-                rows = await cursor.fetchall()
+        # PostgreSQL: participant_ids is TEXT (JSON), need to cast to jsonb for array operations
+        query, params = convert_query_to_postgres(
+            """
+            SELECT * FROM episodes 
+            WHERE chat_id = $1 
+              AND importance >= $2
+              AND EXISTS (
+                  SELECT 1
+                  FROM jsonb_array_elements_text(CAST(participant_ids AS jsonb)) je
+                  WHERE je::bigint = $3
+              )
+            ORDER BY created_at DESC
+            LIMIT $4
+            """,
+            (chat_id, min_importance, user_id, limit * 3),
+        )
+        async with get_db_connection(self.database_url) as conn:
+            rows = await conn.fetch(query, *params)
 
         if not rows:
             return []
@@ -348,35 +350,34 @@ class EpisodicMemoryStore:
         """Record that an episode was accessed."""
         ts = int(time.time())
 
-        async with get_db_connection(self.db_path) as db:
+        async with get_db_connection(self.database_url) as conn:
             # Update episode
-            await db.execute(
+            query, params = convert_query_to_postgres(
                 """
                 UPDATE episodes 
-                SET last_accessed = ?, access_count = access_count + 1
-                WHERE id = ?
+                SET last_accessed = $1, access_count = access_count + 1
+                WHERE id = $2
                 """,
                 (ts, episode_id),
             )
+            await conn.execute(query, *params)
 
             # Log access
-            await db.execute(
-                "INSERT INTO episode_accesses (episode_id, accessed_at, access_type) VALUES (?, ?, ?)",
+            query, params = convert_query_to_postgres(
+                "INSERT INTO episode_accesses (episode_id, accessed_at, access_type) VALUES ($1, $2, $3)",
                 (episode_id, ts, "retrieval"),
             )
-
-            await db.commit()
+            await conn.execute(query, *params)
 
     async def get_episode(self, episode_id: int) -> Episode | None:
         """Get a specific episode by ID."""
         await self.init()
 
-        async with get_db_connection(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT * FROM episodes WHERE id = ?", (episode_id,)
-            ) as cursor:
-                row = await cursor.fetchone()
+        query, params = convert_query_to_postgres(
+            "SELECT * FROM episodes WHERE id = $1", (episode_id,)
+        )
+        async with get_db_connection(self.database_url) as conn:
+            row = await conn.fetchrow(query, *params)
 
         if not row:
             return None

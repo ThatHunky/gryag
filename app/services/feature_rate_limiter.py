@@ -34,7 +34,10 @@ from pathlib import Path
 from typing import Tuple
 
 from app.infrastructure.db_utils import get_db_connection
+from app.infrastructure.query_converter import convert_query_to_postgres
 from app.services import telemetry
+from app.services.redis_rate_limiter import RedisFeatureRateLimiter
+from app.services.redis_types import RedisLike
 
 
 class FeatureRateLimiter:
@@ -73,18 +76,27 @@ class FeatureRateLimiter:
     }
 
     def __init__(
-        self, db_path: str | Path, admin_user_ids: list[int] | None = None
+        self,
+        database_url: str,
+        admin_user_ids: list[int] | None = None,
+        redis_client: RedisLike | None = None,
     ) -> None:
         """
         Initialize the feature rate limiter.
 
         Args:
-            db_path: Path to SQLite database
+            database_url: PostgreSQL connection string
             admin_user_ids: List of admin user IDs (bypass all limits)
+            redis_client: Optional Redis client for high-performance rate limiting
         """
-        self._db_path = Path(db_path)
+        self._database_url = database_url
         self._admin_ids = set(admin_user_ids or [])
         self._lock = asyncio.Lock()
+        self._redis_limiter = (
+            RedisFeatureRateLimiter(redis_client, self.WINDOW_SECONDS)
+            if redis_client is not None
+            else None
+        )
 
         # Track when we last sent throttle error message to each user
         # Format: {user_id: {feature: last_error_ts}}
@@ -92,9 +104,9 @@ class FeatureRateLimiter:
         self._error_message_cooldown = 600  # 10 minutes
 
     async def init(self) -> None:
-        """Ensure database is reachable and create tables if needed."""
-        async with get_db_connection(self._db_path) as db:
-            await db.commit()
+        """Ensure database is reachable."""
+        async with get_db_connection(self._database_url) as conn:
+            await conn.execute("SELECT 1")
 
     def is_admin(self, user_id: int) -> bool:
         """Check if user is an admin (bypasses all limits)."""
@@ -166,26 +178,78 @@ class FeatureRateLimiter:
         reset_at = window_start + window_seconds
         retry_after = max(reset_at - current_ts, 0)
 
+        # Try Redis first if available
+        if self._redis_limiter is not None:
+            result = await self._redis_limiter.check_and_increment(
+                user_id, feature, limit_per_hour, window_seconds, current_ts
+            )
+            if result is not None:
+                # Redis succeeded
+                allowed, redis_retry_after = result
+                if not allowed:
+                    # Check if we should show error message (once per 10 min)
+                    should_show_error = self.should_send_error_message(user_id, feature)
+
+                    telemetry.increment_counter(
+                        "feature_rate_limiter.blocked",
+                        user_id=user_id,
+                        feature=feature,
+                        error_shown=str(should_show_error),
+                    )
+                    # Still record throttled request in PostgreSQL for analytics
+                    async with get_db_connection(self._database_url) as conn:
+                        query, params = convert_query_to_postgres(
+                            """
+                            INSERT INTO user_request_history
+                            (user_id, feature_name, requested_at, was_throttled, created_at)
+                            VALUES ($1, $2, $3, 1, $4)
+                            """,
+                            (user_id, feature, current_ts, current_ts),
+                        )
+                        await conn.execute(query, *params)
+                    return False, redis_retry_after, should_show_error
+
+                # Allowed - record successful request and return
+                async with get_db_connection(self._database_url) as conn:
+                    query, params = convert_query_to_postgres(
+                        """
+                        INSERT INTO user_request_history
+                        (user_id, feature_name, requested_at, was_throttled, created_at)
+                        VALUES ($1, $2, $3, 0, $4)
+                        """,
+                        (user_id, feature, current_ts, current_ts),
+                    )
+                    await conn.execute(query, *params)
+
+                telemetry.increment_counter(
+                    "feature_rate_limiter.allowed",
+                    user_id=user_id,
+                    feature=feature,
+                )
+                return True, redis_retry_after, False
+
+        # Fallback to PostgreSQL
         async with self._lock:
-            async with get_db_connection(self._db_path) as db:
+            async with get_db_connection(self._database_url) as conn:
                 # Clean up old records
-                await db.execute(
-                    "DELETE FROM feature_rate_limits WHERE window_start < ?",
+                query, params = convert_query_to_postgres(
+                    "DELETE FROM feature_rate_limits WHERE window_start < $1",
                     (window_start - window_seconds,),
                 )
+                await conn.execute(query, *params)
 
                 # Check current count
-                cursor = await db.execute(
+                query, params = convert_query_to_postgres(
                     """
                     SELECT request_count
                     FROM feature_rate_limits
-                    WHERE user_id = ? AND feature_name = ? AND window_start = ?
+                    WHERE user_id = $1 AND feature_name = $2 AND window_start = $3
                     """,
                     (user_id, feature, window_start),
                 )
-                row = await cursor.fetchone()
+                row = await conn.fetchrow(query, *params)
 
-                if row and row[0] >= limit_per_hour:
+                if row and row["request_count"] >= limit_per_hour:
                     # Check if we should show error message (once per 10 min)
                     should_show_error = self.should_send_error_message(user_id, feature)
 
@@ -196,48 +260,49 @@ class FeatureRateLimiter:
                         error_shown=str(should_show_error),
                     )
                     # Record throttled request
-                    await db.execute(
+                    query, params = convert_query_to_postgres(
                         """
                         INSERT INTO user_request_history
                         (user_id, feature_name, requested_at, was_throttled, created_at)
-                        VALUES (?, ?, ?, 1, ?)
+                        VALUES ($1, $2, $3, 1, $4)
                         """,
                         (user_id, feature, current_ts, current_ts),
                     )
-                    await db.commit()
+                    await conn.execute(query, *params)
                     return False, retry_after, should_show_error
 
                 # Increment count
                 if row:
-                    await db.execute(
+                    query, params = convert_query_to_postgres(
                         """
                         UPDATE feature_rate_limits
-                        SET request_count = request_count + 1, last_request = ?
-                        WHERE user_id = ? AND feature_name = ? AND window_start = ?
+                        SET request_count = request_count + 1, last_request = $1
+                        WHERE user_id = $2 AND feature_name = $3 AND window_start = $4
                         """,
                         (current_ts, user_id, feature, window_start),
                     )
+                    await conn.execute(query, *params)
                 else:
-                    await db.execute(
+                    query, params = convert_query_to_postgres(
                         """
                         INSERT INTO feature_rate_limits
                         (user_id, feature_name, window_start, request_count, last_request)
-                        VALUES (?, ?, ?, 1, ?)
+                        VALUES ($1, $2, $3, 1, $4)
                         """,
                         (user_id, feature, window_start, current_ts),
                     )
+                    await conn.execute(query, *params)
 
                 # Record successful request
-                await db.execute(
+                query, params = convert_query_to_postgres(
                     """
                     INSERT INTO user_request_history
                     (user_id, feature_name, requested_at, was_throttled, created_at)
-                    VALUES (?, ?, ?, 0, ?)
+                    VALUES ($1, $2, $3, 0, $4)
                     """,
                     (user_id, feature, current_ts, current_ts),
                 )
-
-                await db.commit()
+                await conn.execute(query, *params)
 
         telemetry.increment_counter(
             "feature_rate_limiter.allowed",
@@ -277,19 +342,20 @@ class FeatureRateLimiter:
         current_ts = int(time.time())
 
         async with self._lock:
-            async with get_db_connection(self._db_path) as db:
-                cursor = await db.execute(
+            async with get_db_connection(self._database_url) as conn:
+                query, params = convert_query_to_postgres(
                     """
                     SELECT last_used, cooldown_seconds
                     FROM feature_cooldowns
-                    WHERE user_id = ? AND feature_name = ?
+                    WHERE user_id = $1 AND feature_name = $2
                     """,
                     (user_id, feature),
                 )
-                row = await cursor.fetchone()
+                row = await conn.fetchrow(query, *params)
 
                 if row:
-                    last_used, stored_cooldown = row
+                    last_used = row["last_used"]
+                    stored_cooldown = row["cooldown_seconds"]
                     time_since_last = current_ts - last_used
                     retry_after = max(stored_cooldown - time_since_last, 0)
 
@@ -308,15 +374,17 @@ class FeatureRateLimiter:
                         return False, retry_after, should_show_error
 
                 # Update or insert cooldown record
-                await db.execute(
+                query, params = convert_query_to_postgres(
                     """
-                    INSERT OR REPLACE INTO feature_cooldowns
+                    INSERT INTO feature_cooldowns
                     (user_id, feature_name, last_used, cooldown_seconds)
-                    VALUES (?, ?, ?, ?)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (user_id, feature_name) DO UPDATE SET
+                        last_used = $3, cooldown_seconds = $4
                     """,
                     (user_id, feature, current_ts, cooldown_seconds),
                 )
-                await db.commit()
+                await conn.execute(query, *params)
 
         telemetry.increment_counter(
             "feature_rate_limiter.cooldown_allowed",
@@ -335,53 +403,64 @@ class FeatureRateLimiter:
         current_ts = int(time.time())
         window_start = current_ts - (current_ts % self.WINDOW_SECONDS)
 
-        async with get_db_connection(self._db_path) as db:
+        async with get_db_connection(self._database_url) as conn:
             # Get current rate limits
-            cursor = await db.execute(
+            query, params = convert_query_to_postgres(
                 """
                 SELECT feature_name, request_count, last_request
                 FROM feature_rate_limits
-                WHERE user_id = ? AND window_start = ?
+                WHERE user_id = $1 AND window_start = $2
                 """,
                 (user_id, window_start),
             )
+            rows = await conn.fetch(query, *params)
             rate_limits = {
-                row[0]: {"count": row[1], "last_request": row[2]}
-                for row in await cursor.fetchall()
+                row["feature_name"]: {
+                    "count": row["request_count"],
+                    "last_request": row["last_request"],
+                }
+                for row in rows
             }
 
             # Get active cooldowns
-            cursor = await db.execute(
+            query, params = convert_query_to_postgres(
                 """
                 SELECT feature_name, last_used, cooldown_seconds
                 FROM feature_cooldowns
-                WHERE user_id = ?
+                WHERE user_id = $1
                 """,
                 (user_id,),
             )
+            rows = await conn.fetch(query, *params)
             cooldowns = {
-                row[0]: {
-                    "last_used": row[1],
-                    "cooldown_seconds": row[2],
-                    "remaining": max(row[2] - (current_ts - row[1]), 0),
+                row["feature_name"]: {
+                    "last_used": row["last_used"],
+                    "cooldown_seconds": row["cooldown_seconds"],
+                    "remaining": max(
+                        row["cooldown_seconds"] - (current_ts - row["last_used"]), 0
+                    ),
                 }
-                for row in await cursor.fetchall()
+                for row in rows
             }
 
             # Get request history (last hour)
-            cursor = await db.execute(
+            query, params = convert_query_to_postgres(
                 """
                 SELECT feature_name, COUNT(*) as total,
                        SUM(CASE WHEN was_throttled = 1 THEN 1 ELSE 0 END) as throttled
                 FROM user_request_history
-                WHERE user_id = ? AND requested_at > ?
+                WHERE user_id = $1 AND requested_at > $2
                 GROUP BY feature_name
                 """,
                 (user_id, current_ts - 3600),
             )
+            rows = await conn.fetch(query, *params)
             history = {
-                row[0]: {"total": row[1], "throttled": row[2]}
-                for row in await cursor.fetchall()
+                row["feature_name"]: {
+                    "total": row["total"],
+                    "throttled": row["throttled"],
+                }
+                for row in rows
             }
 
         return {
@@ -404,21 +483,29 @@ class FeatureRateLimiter:
         Returns:
             Number of records deleted
         """
+        deleted = 0
+
+        # Reset in Redis if available
+        if self._redis_limiter is not None:
+            redis_deleted = await self._redis_limiter.reset_user(user_id, feature)
+            deleted += redis_deleted
+
+        # Also reset in PostgreSQL
         async with self._lock:
-            async with get_db_connection(self._db_path) as db:
+            async with get_db_connection(self._database_url) as conn:
                 if feature:
-                    cursor = await db.execute(
-                        "DELETE FROM feature_rate_limits WHERE user_id = ? AND feature_name = ?",
+                    query, params = convert_query_to_postgres(
+                        "DELETE FROM feature_rate_limits WHERE user_id = $1 AND feature_name = $2",
                         (user_id, feature),
                     )
                 else:
-                    cursor = await db.execute(
-                        "DELETE FROM feature_rate_limits WHERE user_id = ?",
+                    query, params = convert_query_to_postgres(
+                        "DELETE FROM feature_rate_limits WHERE user_id = $1",
                         (user_id,),
                     )
-
-                await db.commit()
-                deleted = cursor.rowcount or 0
+                result = await conn.execute(query, *params)
+                pg_deleted = int(result.split()[-1]) if result.split()[-1].isdigit() else 0
+                deleted += pg_deleted
 
         telemetry.increment_counter(
             "feature_rate_limiter.reset",
@@ -439,12 +526,12 @@ class FeatureRateLimiter:
         cutoff = current_ts - (2 * self.WINDOW_SECONDS)  # Keep last 2 hours
 
         async with self._lock:
-            async with get_db_connection(self._db_path) as db:
-                cursor = await db.execute(
-                    "DELETE FROM feature_rate_limits WHERE window_start < ?",
+            async with get_db_connection(self._database_url) as conn:
+                query, params = convert_query_to_postgres(
+                    "DELETE FROM feature_rate_limits WHERE window_start < $1",
                     (cutoff,),
                 )
-                await db.commit()
-                deleted = cursor.rowcount or 0
+                result = await conn.execute(query, *params)
+                deleted = int(result.split()[-1]) if result.split()[-1].isdigit() else 0
 
         return deleted

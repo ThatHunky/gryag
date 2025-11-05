@@ -37,7 +37,11 @@ class Settings(BaseSettings):
     thinking_budget_tokens: int = Field(
         1024, alias="THINKING_BUDGET_TOKENS", ge=64, le=4096
     )
-    db_path: Path = Field(Path("./gryag.db"), alias="DB_PATH")
+    # PostgreSQL connection (replaces SQLite db_path)
+    database_url: str = Field(
+        "postgresql://gryag:gryag@localhost:5433/gryag",
+        alias="DATABASE_URL"
+    )
     max_turns: int = Field(
         20, alias="MAX_TURNS", ge=1
     )  # Reduced from 50 to prevent token overflow
@@ -72,14 +76,14 @@ class Settings(BaseSettings):
         300, alias="PROCESSING_LOCK_TTL_SECONDS", ge=30, le=3600
     )  # Lock timeout (safety)
 
-    use_redis: bool = Field(False, alias="USE_REDIS")
-    redis_url: str | None = Field("redis://localhost:6379/0", alias="REDIS_URL")
+    use_redis: bool = Field(True, alias="USE_REDIS")
+    redis_url: str | None = Field("redis://redis:6379/0", alias="REDIS_URL")
     admin_user_ids: str = Field("", alias="ADMIN_USER_IDS")
     retention_days: int = Field(7, alias="RETENTION_DAYS", ge=1)
     # Pruning configuration
     retention_enabled: bool = Field(True, alias="RETENTION_ENABLED")
     retention_prune_interval_seconds: int = Field(
-        86400, alias="RETENTION_PRUNE_INTERVAL_SECONDS", ge=60
+        172800, alias="RETENTION_PRUNE_INTERVAL_SECONDS", ge=60  # Default: 2 days (was 1 day)
     )  # Default: run once per day
     enable_web_search: bool = Field(False, alias="ENABLE_WEB_SEARCH")
 
@@ -548,7 +552,8 @@ class Settings(BaseSettings):
 
     @property
     def db_path_str(self) -> str:
-        return str(self.db_path)
+        """Legacy property for backward compatibility - returns database_url."""
+        return self.database_url
 
     @property
     def admin_user_ids_list(self) -> list[int]:

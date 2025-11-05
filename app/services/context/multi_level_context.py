@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
 
 from app.config import Settings
 from app.services import telemetry
@@ -111,7 +110,7 @@ class MultiLevelContextManager:
         episode_store: Any | None = None,
         gemini_client: Any | None = None,
     ):
-        self.db_path = Path(db_path)
+        self.database_url = str(db_path)  # Accept database_url string
         self.settings = settings
         self.context_store = context_store
         self.profile_store = profile_store

@@ -2,22 +2,42 @@ from __future__ import annotations
 
 import asyncio
 import time
-from pathlib import Path
 from typing import Tuple
 
 from app.infrastructure.db_utils import get_db_connection
+from app.infrastructure.query_converter import convert_query_to_postgres
 from app.services import telemetry
+from app.services.redis_rate_limiter import RedisRateLimiter
+from app.services.redis_types import RedisLike
 
 
 class RateLimiter:
-    """Simple per-user rate limiter backed by SQLite."""
+    """Per-user rate limiter with Redis optimization and PostgreSQL fallback."""
 
     WINDOW_SECONDS = 3600
 
-    def __init__(self, db_path: str | Path, per_user_per_hour: int) -> None:
-        self._db_path = Path(db_path)
+    def __init__(
+        self,
+        database_url: str,
+        per_user_per_hour: int,
+        redis_client: RedisLike | None = None,
+    ) -> None:
+        """
+        Initialize rate limiter.
+
+        Args:
+            database_url: PostgreSQL connection string
+            per_user_per_hour: Maximum requests per hour per user
+            redis_client: Optional Redis client for high-performance rate limiting
+        """
+        self._database_url = database_url
         self._limit = per_user_per_hour
         self._lock = asyncio.Lock()
+        self._redis_limiter = (
+            RedisRateLimiter(redis_client, per_user_per_hour, self.WINDOW_SECONDS)
+            if redis_client is not None
+            else None
+        )
 
         # Track when we last sent throttle error message to each user
         # Format: {user_id: last_error_ts}
@@ -26,8 +46,8 @@ class RateLimiter:
 
     async def init(self) -> None:
         """Ensure database is reachable."""
-        async with get_db_connection(self._db_path) as db:
-            await db.commit()
+        async with get_db_connection(self._database_url) as conn:
+            await conn.execute("SELECT 1")
 
     def should_send_error_message(self, user_id: int) -> bool:
         """
@@ -59,6 +79,8 @@ class RateLimiter:
         """
         Check if the user is within the allowed rate and increment on success.
 
+        Uses Redis for high-performance rate limiting with PostgreSQL fallback.
+
         Args:
             user_id: Telegram user ID to rate limit.
             now: Optional override for current timestamp (seconds).
@@ -70,29 +92,50 @@ class RateLimiter:
             # Unlimited
             return True, -1, 0
 
+        # Try Redis first if available
+        if self._redis_limiter is not None:
+            result = await self._redis_limiter.check_and_increment(user_id, now)
+            if result is not None:
+                # Redis succeeded
+                allowed, remaining, retry_after = result
+                if allowed:
+                    telemetry.increment_counter(
+                        "rate_limiter.allowed",
+                        user_id=user_id,
+                        remaining=remaining,
+                    )
+                else:
+                    telemetry.increment_counter(
+                        "rate_limiter.blocked",
+                        user_id=user_id,
+                    )
+                return result
+
+        # Fallback to PostgreSQL
         current_ts = int(now or time.time())
         window_start = current_ts - (current_ts % self.WINDOW_SECONDS)
         reset_at = window_start + self.WINDOW_SECONDS
         retry_after = max(reset_at - current_ts, 0)
 
         async with self._lock:
-            async with get_db_connection(self._db_path) as db:
-                await db.execute(
-                    "DELETE FROM rate_limits WHERE window_start < ?",
-                    (window_start - self.WINDOW_SECONDS,),
+            async with get_db_connection(self._database_url) as conn:
+                query, params = convert_query_to_postgres(
+                    "DELETE FROM rate_limits WHERE window_start < $1",
+                    (window_start - self.WINDOW_SECONDS,)
                 )
+                await conn.execute(query, *params)
 
-                cursor = await db.execute(
+                query, params = convert_query_to_postgres(
                     """
                     SELECT request_count
                     FROM rate_limits
-                    WHERE user_id = ? AND window_start = ?
+                    WHERE user_id = $1 AND window_start = $2
                     """,
                     (user_id, window_start),
                 )
-                row = await cursor.fetchone()
+                row = await conn.fetchrow(query, *params)
 
-                if row and row[0] >= self._limit:
+                if row and row['request_count'] >= self._limit:
                     telemetry.increment_counter(
                         "rate_limiter.blocked",
                         user_id=user_id,
@@ -100,26 +143,26 @@ class RateLimiter:
                     return False, 0, retry_after
 
                 if row:
-                    await db.execute(
+                    query, params = convert_query_to_postgres(
                         """
                         UPDATE rate_limits
-                        SET request_count = request_count + 1, last_seen = ?
-                        WHERE user_id = ? AND window_start = ?
+                        SET request_count = request_count + 1, last_seen = $1
+                        WHERE user_id = $2 AND window_start = $3
                         """,
                         (current_ts, user_id, window_start),
                     )
-                    new_count = row[0] + 1
+                    await conn.execute(query, *params)
+                    new_count = row['request_count'] + 1
                 else:
-                    await db.execute(
+                    query, params = convert_query_to_postgres(
                         """
                         INSERT INTO rate_limits (user_id, window_start, request_count, last_seen)
-                        VALUES (?, ?, 1, ?)
+                        VALUES ($1, $2, 1, $3)
                         """,
                         (user_id, window_start, current_ts),
                     )
+                    await conn.execute(query, *params)
                     new_count = 1
-
-                await db.commit()
 
         remaining = max(self._limit - new_count, 0)
         telemetry.increment_counter(
@@ -139,11 +182,20 @@ class RateLimiter:
         Returns:
             Number of rate limit records deleted
         """
+        deleted = 0
+
+        # Reset in Redis if available
+        if self._redis_limiter is not None:
+            redis_deleted = await self._redis_limiter.reset_all()
+            deleted += redis_deleted
+
+        # Also reset in PostgreSQL
         async with self._lock:
-            async with get_db_connection(self._db_path) as db:
-                cursor = await db.execute("DELETE FROM rate_limits")
-                await db.commit()
-                deleted = cursor.rowcount or 0
+            async with get_db_connection(self._database_url) as conn:
+                result = await conn.execute("DELETE FROM rate_limits")
+                # Extract row count from result string like "DELETE 5"
+                pg_deleted = int(result.split()[-1]) if result.split()[-1].isdigit() else 0
+                deleted += pg_deleted
 
         telemetry.increment_counter(
             "rate_limiter.reset",
@@ -162,14 +214,23 @@ class RateLimiter:
         Returns:
             Number of rate limit records deleted
         """
+        deleted = 0
+
+        # Reset in Redis if available
+        if self._redis_limiter is not None:
+            redis_deleted = await self._redis_limiter.reset_user(user_id)
+            deleted += redis_deleted
+
+        # Also reset in PostgreSQL
         async with self._lock:
-            async with get_db_connection(self._db_path) as db:
-                cursor = await db.execute(
-                    "DELETE FROM rate_limits WHERE user_id = ?",
+            async with get_db_connection(self._database_url) as conn:
+                query, params = convert_query_to_postgres(
+                    "DELETE FROM rate_limits WHERE user_id = $1",
                     (user_id,),
                 )
-                await db.commit()
-                deleted = cursor.rowcount or 0
+                result = await conn.execute(query, *params)
+                pg_deleted = int(result.split()[-1]) if result.split()[-1].isdigit() else 0
+                deleted += pg_deleted
 
         telemetry.increment_counter(
             "rate_limiter.reset_user",

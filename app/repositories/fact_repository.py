@@ -17,7 +17,8 @@ import time
 from pathlib import Path
 from typing import Any, Literal
 
-import aiosqlite
+import asyncpg
+from app.infrastructure.query_converter import convert_query_to_postgres
 
 from app.infrastructure.db_utils import get_db_connection
 
@@ -33,11 +34,9 @@ class UnifiedFactRepository:
     - entity_id < 0 → chat fact (Telegram chat IDs are negative)
     """
 
-    def __init__(self, db_path: str | Path):
-        """Initialize repository with database path."""
-        self.db_path = Path(db_path)
-        if not self.db_path.exists():
-            raise FileNotFoundError(f"Database not found: {self.db_path}")
+    def __init__(self, database_url: str):
+        """Initialize repository with PostgreSQL connection string."""
+        self.database_url = database_url
 
     async def add_fact(
         self,
@@ -81,8 +80,8 @@ class UnifiedFactRepository:
         now = int(time.time())
         embedding_json = json.dumps(embedding) if embedding else None
 
-        async with get_db_connection(self.db_path) as db:
-            cursor = await db.execute(
+        async with get_db_connection(self.database_url) as conn:
+            query, params = convert_query_to_postgres(
                 """
                 INSERT INTO facts (
                     entity_type, entity_id, chat_context,
@@ -92,7 +91,7 @@ class UnifiedFactRepository:
                     first_observed, last_reinforced, is_active,
                     created_at, updated_at, embedding
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
                 ON CONFLICT(entity_type, entity_id, chat_context, fact_category, fact_key)
                 DO UPDATE SET
                     fact_value = excluded.fact_value,
@@ -102,6 +101,7 @@ class UnifiedFactRepository:
                     last_reinforced = excluded.last_reinforced,
                     updated_at = excluded.updated_at,
                     embedding = COALESCE(excluded.embedding, embedding)
+                RETURNING id
                 """,
                 (
                     entity_type,
@@ -124,9 +124,8 @@ class UnifiedFactRepository:
                     embedding_json,
                 ),
             )
-            await db.commit()
-
-            fact_id = cursor.lastrowid
+            row = await conn.fetchrow(query, *params)
+            fact_id = row['id'] if row else 0
 
             logger.info(
                 f"Stored {entity_type} fact: {fact_category}.{fact_key} = {fact_value[:50]}... "
@@ -192,10 +191,20 @@ class UnifiedFactRepository:
         query += " ORDER BY confidence DESC, last_reinforced DESC LIMIT ?"
         params.append(limit)
 
-        async with get_db_connection(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(query, params)
-            rows = await cursor.fetchall()
+        # Convert query to PostgreSQL format
+        query_pg = query.replace("?", "${index}")
+        # Replace ? with $1, $2, etc.
+        param_count = 0
+        query_pg_final = ""
+        for char in query:
+            if char == "?":
+                param_count += 1
+                query_pg_final += f"${param_count}"
+            else:
+                query_pg_final += char
+        
+        async with get_db_connection(self.database_url) as conn:
+            rows = await conn.fetch(query_pg_final, *params)
 
         facts = []
         for row in rows:
@@ -217,10 +226,12 @@ class UnifiedFactRepository:
 
     async def get_fact_by_id(self, fact_id: int) -> dict[str, Any] | None:
         """Get a single fact by ID."""
-        async with get_db_connection(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM facts WHERE id = ?", (fact_id,))
-            row = await cursor.fetchone()
+        async with get_db_connection(self.database_url) as conn:
+            query, params = convert_query_to_postgres(
+                "SELECT * FROM facts WHERE id = $1",
+                (fact_id,)
+            )
+            row = await conn.fetchrow(query, *params)
 
         if not row:
             return None
@@ -252,44 +263,50 @@ class UnifiedFactRepository:
         updates = []
         params: list[Any] = []
 
+        param_index = 1
         if fact_value is not None:
-            updates.append("fact_value = ?")
+            updates.append(f"fact_value = ${param_index}")
             params.append(fact_value)
+            param_index += 1
 
         if confidence is not None:
-            updates.append("confidence = ?")
+            updates.append(f"confidence = ${param_index}")
             params.append(confidence)
+            param_index += 1
 
         if evidence_text is not None:
-            updates.append("evidence_text = ?")
+            updates.append(f"evidence_text = ${param_index}")
             params.append(evidence_text)
+            param_index += 1
 
         if fact_description is not None:
-            updates.append("fact_description = ?")
+            updates.append(f"fact_description = ${param_index}")
             params.append(fact_description)
+            param_index += 1
 
         if embedding is not None:
-            updates.append("embedding = ?")
+            updates.append(f"embedding = ${param_index}")
             params.append(json.dumps(embedding))
+            param_index += 1
 
         if not updates:
             return False
 
-        updates.append("updated_at = ?")
+        updates.append(f"updated_at = ${param_index}")
         params.append(int(time.time()))
+        param_index += 1
 
-        updates.append("last_reinforced = ?")
+        updates.append(f"last_reinforced = ${param_index}")
         params.append(int(time.time()))
+        param_index += 1
 
         params.append(fact_id)
-
-        async with get_db_connection(self.db_path) as db:
-            cursor = await db.execute(
-                f"UPDATE facts SET {', '.join(updates)} WHERE id = ?",
-                params,
-            )
-            await db.commit()
-            updated = cursor.rowcount > 0
+        
+        query = f"UPDATE facts SET {', '.join(updates)} WHERE id = ${param_index}"
+        
+        async with get_db_connection(self.database_url) as conn:
+            result = await conn.execute(query, *params)
+            updated = result.split()[-1] != "0" if result.split()[-1].isdigit() else False
 
         if updated:
             logger.info(f"Updated fact {fact_id}")
@@ -309,19 +326,20 @@ class UnifiedFactRepository:
         Returns:
             True if deleted, False if not found
         """
-        async with get_db_connection(self.db_path) as db:
+        async with get_db_connection(self.database_url) as conn:
             if soft:
-                cursor = await db.execute(
-                    "UPDATE facts SET is_active = 0, updated_at = ? WHERE id = ?",
+                query, params = convert_query_to_postgres(
+                    "UPDATE facts SET is_active = 0, updated_at = $1 WHERE id = $2",
                     (int(time.time()), fact_id),
                 )
+                await conn.execute(query, *params)
             else:
-                cursor = await db.execute(
-                    "DELETE FROM facts WHERE id = ?",
+                query, params = convert_query_to_postgres(
+                    "DELETE FROM facts WHERE id = $1",
                     (fact_id,),
                 )
-            await db.commit()
-            deleted = cursor.rowcount > 0
+                result = await conn.execute(query, *params)
+                deleted = result.split()[-1] != "0" if result.split()[-1].isdigit() else False
 
         if deleted:
             logger.info(f"{'Soft-' if soft else ''}deleted fact {fact_id}")
@@ -349,27 +367,32 @@ class UnifiedFactRepository:
         """
         entity_type: Literal["user", "chat"] = "chat" if entity_id < 0 else "user"
 
-        params: list[Any] = [entity_type, entity_id]
-        where_clause = "entity_type = ? AND entity_id = ?"
+        base_params: list[Any] = [entity_type, entity_id]
+        param_index = 1
+        where_parts = [f"entity_type = ${param_index}", f"entity_id = ${param_index + 1}"]
+        param_index += 2
 
         if chat_context is not None:
-            where_clause += " AND chat_context = ?"
-            params.append(chat_context)
+            where_parts.append(f"chat_context = ${param_index}")
+            base_params.append(chat_context)
+            param_index += 1
 
-        async with get_db_connection(self.db_path) as db:
+        where_clause = " AND ".join(where_parts)
+
+        async with get_db_connection(self.database_url) as conn:
             if soft:
-                params.insert(0, int(time.time()))
-                cursor = await db.execute(
-                    f"UPDATE facts SET is_active = 0, updated_at = ? WHERE {where_clause}",
-                    params,
-                )
+                # Update: need to shift all param numbers by 1
+                updated_at_ts = int(time.time())
+                where_clause_adjusted = where_clause.replace("$1", "$2").replace("$2", "$3")
+                if "$3" in where_clause:
+                    where_clause_adjusted = where_clause_adjusted.replace("$3", "$4")
+                query = f"UPDATE facts SET is_active = 0, updated_at = $1 WHERE {where_clause_adjusted}"
+                params = [updated_at_ts] + base_params
+                result = await conn.execute(query, *params)
             else:
-                cursor = await db.execute(
-                    f"DELETE FROM facts WHERE {where_clause}",
-                    params,
-                )
-            await db.commit()
-            count = cursor.rowcount
+                query = f"DELETE FROM facts WHERE {where_clause}"
+                result = await conn.execute(query, *base_params)
+            count = int(result.split()[-1]) if result.split()[-1].isdigit() else 0
 
         logger.info(
             f"{'Soft-' if soft else ''}deleted {count} facts for "
@@ -426,10 +449,18 @@ class UnifiedFactRepository:
         sql += " ORDER BY confidence DESC, last_reinforced DESC LIMIT ?"
         params.append(limit)
 
-        async with get_db_connection(self.db_path) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(sql, params)
-            rows = await cursor.fetchall()
+        # Convert ? to $1, $2, etc.
+        param_count = 0
+        sql_pg = ""
+        for char in sql:
+            if char == "?":
+                param_count += 1
+                sql_pg += f"${param_count}"
+            else:
+                sql_pg += char
+        
+        async with get_db_connection(self.database_url) as conn:
+            rows = await conn.fetch(sql_pg, *params)
 
         facts = []
         for row in rows:
@@ -445,24 +476,24 @@ class UnifiedFactRepository:
 
     async def get_stats(self) -> dict[str, Any]:
         """Get statistics about facts in the repository."""
-        async with get_db_connection(self.db_path) as db:
+        async with get_db_connection(self.database_url) as conn:
             # Total counts
-            cursor = await db.execute(
-                "SELECT entity_type, COUNT(*) FROM facts WHERE is_active = 1 GROUP BY entity_type"
+            rows = await conn.fetch(
+                "SELECT entity_type, COUNT(*) as count FROM facts WHERE is_active = 1 GROUP BY entity_type"
             )
-            entity_counts = dict(await cursor.fetchall())
+            entity_counts = {row['entity_type']: row['count'] for row in rows}
 
             # Category counts
-            cursor = await db.execute(
-                "SELECT fact_category, COUNT(*) FROM facts WHERE is_active = 1 GROUP BY fact_category"
+            rows = await conn.fetch(
+                "SELECT fact_category, COUNT(*) as count FROM facts WHERE is_active = 1 GROUP BY fact_category"
             )
-            category_counts = dict(await cursor.fetchall())
+            category_counts = {row['fact_category']: row['count'] for row in rows}
 
             # Average confidence
-            cursor = await db.execute(
-                "SELECT AVG(confidence) FROM facts WHERE is_active = 1"
+            row = await conn.fetchrow(
+                "SELECT AVG(confidence) as avg_conf FROM facts WHERE is_active = 1"
             )
-            avg_confidence = (await cursor.fetchone())[0] or 0.0
+            avg_confidence = float(row['avg_conf']) if row and row['avg_conf'] else 0.0
 
         return {
             "total_facts": sum(entity_counts.values()),

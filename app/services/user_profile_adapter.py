@@ -14,11 +14,13 @@ import time
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
+import asyncpg
+from app.infrastructure.query_converter import convert_query_to_postgres
 
 from app.infrastructure.db_utils import get_db_connection
 from app.services import telemetry
 from app.repositories.fact_repository import UnifiedFactRepository
+from app.services.redis_types import RedisLike
 
 logger = logging.getLogger(__name__)
 
@@ -58,12 +60,20 @@ class UserProfileStoreAdapter:
     to the unified fact storage system.
     """
 
-    def __init__(self, db_path: str | Path):
-        """Initialize adapter with UnifiedFactRepository."""
-        self._db_path = Path(db_path)
-        self._fact_repo = UnifiedFactRepository(self._db_path)
+    def __init__(self, database_url: str, redis_client: RedisLike | None = None):
+        """
+        Initialize adapter with UnifiedFactRepository.
+
+        Args:
+            database_url: PostgreSQL connection string
+            redis_client: Optional Redis client for caching
+        """
+        self._database_url = database_url
+        self._fact_repo = UnifiedFactRepository(database_url)
         self._init_lock = asyncio.Lock()
         self._initialized = False
+        self._redis = redis_client
+        self._cache_ttl = 600  # 10 minutes
 
     @property
     def fact_repository(self) -> UnifiedFactRepository:
@@ -76,24 +86,22 @@ class UserProfileStoreAdapter:
             if self._initialized:
                 return
 
-            async with get_db_connection(self._db_path) as db:
+            async with get_db_connection(self._database_url) as conn:
                 try:
-                    await db.execute(
-                        "ALTER TABLE user_profiles ADD COLUMN pronouns TEXT"
+                    await conn.execute(
+                        "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS pronouns TEXT"
                     )
-                    await db.commit()
                     logger.info("Added pronouns column to user_profiles (adapter)")
-                except aiosqlite.OperationalError:
+                except asyncpg.PostgresError:
                     pass
                 try:
-                    await db.execute(
-                        "ALTER TABLE user_profiles ADD COLUMN membership_status TEXT DEFAULT 'unknown'"
+                    await conn.execute(
+                        "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS membership_status TEXT DEFAULT 'unknown'"
                     )
-                    await db.commit()
                     logger.info(
                         "Added membership_status column to user_profiles (adapter)"
                     )
-                except aiosqlite.OperationalError:
+                except asyncpg.PostgresError:
                     pass
 
             self._initialized = True
@@ -193,20 +201,23 @@ class UserProfileStoreAdapter:
         chat_context = chat_id if user_id > 0 else None
         entity_type = "chat" if user_id < 0 else "user"
 
-        async with get_db_connection(self._db_path) as db:
+        params: list[Any] = [entity_type, entity_id]
+
+        if chat_context is not None:
             query = """
-                SELECT COUNT(*) FROM facts 
-                WHERE entity_type = ? AND entity_id = ? AND is_active = 1
+                SELECT COUNT(*) as count FROM facts 
+                WHERE entity_type = $1 AND entity_id = $3 AND chat_context = $2 AND is_active = 1
             """
-            params: list[Any] = [entity_type, entity_id]
+            params.insert(1, chat_context)
+        else:
+            query = """
+                SELECT COUNT(*) as count FROM facts 
+                WHERE entity_type = $1 AND entity_id = $2 AND is_active = 1
+            """
 
-            if chat_context is not None:
-                query += " AND chat_context = ?"
-                params.append(chat_context)
-
-            async with db.execute(query, params) as cursor:
-                row = await cursor.fetchone()
-                return row[0] if row else 0
+        async with get_db_connection(self._database_url) as conn:
+            row = await conn.fetchrow(query, *params)
+            return row["count"] if row else 0
 
     async def get_or_create_profile(
         self,
@@ -225,53 +236,61 @@ class UserProfileStoreAdapter:
 
         from app.infrastructure.db_utils import get_db_connection
 
-        async with get_db_connection(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
-
+        async with get_db_connection(self._database_url) as conn:
             # Try to get existing profile
-            async with db.execute(
-                "SELECT * FROM user_profiles WHERE user_id = ? AND chat_id = ?",
+            query, params = convert_query_to_postgres(
+                "SELECT * FROM user_profiles WHERE user_id = $1 AND chat_id = $2",
                 (user_id, chat_id),
-            ) as cursor:
-                row = await cursor.fetchone()
+            )
+            row = await conn.fetchrow(query, *params)
 
             if row:
+                # Invalidate cache before updating
+                await self._invalidate_profile_cache(user_id, chat_id)
+
                 updates = [
-                    "last_seen = ?",
-                    "updated_at = ?",
-                    "membership_status = ?",
+                    "last_seen = $1",
+                    "updated_at = $2",
+                    "membership_status = $3",
                 ]
-                params: list[Any] = [now, now, "member"]
+                update_params: list[Any] = [now, now, "member"]
 
+                param_idx = 4
                 if display_name:
-                    updates.append("display_name = ?")
-                    params.append(display_name)
+                    updates.append(f"display_name = ${param_idx}")
+                    update_params.append(display_name)
+                    param_idx += 1
                 if username:
-                    updates.append("username = ?")
-                    params.append(username)
+                    updates.append(f"username = ${param_idx}")
+                    update_params.append(username)
+                    param_idx += 1
 
-                params.extend([user_id, chat_id])
+                update_params.extend([user_id, chat_id])
+                where_param_idx = param_idx
 
-                await db.execute(
-                    f"UPDATE user_profiles SET {', '.join(updates)} WHERE user_id = ? AND chat_id = ?",
-                    params,
-                )
-                await db.commit()
+                query = f"UPDATE user_profiles SET {', '.join(updates)} WHERE user_id = ${where_param_idx} AND chat_id = ${where_param_idx + 1}"
+                await conn.execute(query, *update_params)
 
-                async with db.execute(
-                    "SELECT * FROM user_profiles WHERE user_id = ? AND chat_id = ?",
+                query, params = convert_query_to_postgres(
+                    "SELECT * FROM user_profiles WHERE user_id = $1 AND chat_id = $2",
                     (user_id, chat_id),
-                ) as cursor:
-                    row = await cursor.fetchone()
-                    return _augment_profile(dict(row)) if row else {}
+                )
+                row = await conn.fetchrow(query, *params)
+                if row:
+                    profile = _augment_profile(dict(row))
+                    # Cache the result
+                    await self._cache_profile(user_id, chat_id, profile)
+                    return profile
+                return {}
 
-            await db.execute(
+            query, params = convert_query_to_postgres(
                 """
                 INSERT INTO user_profiles 
                 (user_id, chat_id, display_name, username, pronouns, membership_status,
                  first_seen, last_seen, interaction_count, message_count,
                  profile_version, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                RETURNING *
                 """,
                 (
                     user_id,
@@ -289,45 +308,104 @@ class UserProfileStoreAdapter:
                     now,
                 ),
             )
-            await db.commit()
+            row = await conn.fetchrow(query, *params)
+            return _augment_profile(dict(row)) if row else {}
 
-            async with db.execute(
-                "SELECT * FROM user_profiles WHERE user_id = ? AND chat_id = ?",
-                (user_id, chat_id),
-            ) as cursor:
-                row = await cursor.fetchone()
-                return _augment_profile(dict(row)) if row else {}
+    def _get_cache_key(self, user_id: int, chat_id: int | None) -> str:
+        """Generate Redis cache key for profile."""
+        if chat_id is None:
+            return f"profile:user:{user_id}:chat:null"
+        return f"profile:user:{user_id}:chat:{chat_id}"
+
+    async def _get_cached_profile(
+        self, user_id: int, chat_id: int | None
+    ) -> dict[str, Any] | None:
+        """Get cached profile from Redis."""
+        if self._redis is None:
+            return None
+
+        try:
+            import json
+
+            key = self._get_cache_key(user_id, chat_id)
+            cached_data = await self._redis.get(key)
+            if cached_data is None:
+                return None
+
+            if isinstance(cached_data, bytes):
+                cached_data = cached_data.decode("utf-8")
+
+            return json.loads(cached_data)
+        except Exception as exc:
+            logger.warning(f"Redis profile cache get failed: {exc}")
+            return None
+
+    async def _cache_profile(
+        self, user_id: int, chat_id: int | None, profile: dict[str, Any]
+    ) -> None:
+        """Cache profile in Redis."""
+        if self._redis is None:
+            return
+
+        try:
+            import json
+
+            key = self._get_cache_key(user_id, chat_id)
+            data = json.dumps(profile)
+            await self._redis.set(key, data, ex=self._cache_ttl)
+        except Exception as exc:
+            logger.warning(f"Redis profile cache set failed: {exc}")
+
+    async def _invalidate_profile_cache(self, user_id: int, chat_id: int | None) -> None:
+        """Invalidate cached profile."""
+        if self._redis is None:
+            return
+
+        try:
+            key = self._get_cache_key(user_id, chat_id)
+            await self._redis.delete(key)
+        except Exception as exc:
+            logger.warning(f"Redis profile cache invalidate failed: {exc}")
 
     async def get_profile(
         self, user_id: int, chat_id: int | None = None, limit: int | None = None
     ) -> dict[str, Any] | None:
         """Get profile for a user in a chat, or None if not exists."""
-        async with get_db_connection(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
+        # Try cache first
+        if chat_id is not None:
+            cached = await self._get_cached_profile(user_id, chat_id)
+            if cached is not None:
+                return cached
 
+        async with get_db_connection(self._database_url) as conn:
             if chat_id is None:
                 # Get user's most recent profile as base
-                async with db.execute(
+                query, params = convert_query_to_postgres(
                     """
                     SELECT * FROM user_profiles 
-                    WHERE user_id = ?
+                    WHERE user_id = $1
                     ORDER BY last_seen DESC
                     LIMIT 1
                     """,
                     (user_id,),
-                ) as cursor:
-                    row = await cursor.fetchone()
-                    if not row:
-                        return None
-                    return _augment_profile(dict(row))
+                )
+                row = await conn.fetchrow(query, *params)
+                if not row:
+                    return None
+                return _augment_profile(dict(row))
             else:
                 # Get specific profile
-                async with db.execute(
-                    "SELECT * FROM user_profiles WHERE user_id = ? AND chat_id = ?",
+                query, params = convert_query_to_postgres(
+                    "SELECT * FROM user_profiles WHERE user_id = $1 AND chat_id = $2",
                     (user_id, chat_id),
-                ) as cursor:
-                    row = await cursor.fetchone()
-                    return _augment_profile(dict(row)) if row else None
+                )
+                row = await conn.fetchrow(query, *params)
+                if row:
+                    profile = _augment_profile(dict(row))
+                    # Cache the result
+                    await self._cache_profile(user_id, chat_id, profile)
+                    return profile
+                return None
 
     async def update_interaction_count(
         self, user_id: int, chat_id: int, thread_id: int | None = None
@@ -335,27 +413,27 @@ class UserProfileStoreAdapter:
         """Increment interaction counters and refresh last seen metadata."""
         now = int(time.time())
 
-        async with get_db_connection(self._db_path) as db:
+        async with get_db_connection(self._database_url) as conn:
             updates = [
                 "interaction_count = interaction_count + 1",
                 "message_count = message_count + 1",
-                "last_seen = ?",
-                "updated_at = ?",
+                "last_seen = $1",
+                "updated_at = $2",
                 "membership_status = 'member'",
             ]
             params: list[Any] = [now, now]
+            param_idx = 3
 
             if thread_id is not None:
-                updates.append("last_active_thread = ?")
+                updates.append(f"last_active_thread = ${param_idx}")
                 params.append(thread_id)
+                param_idx += 1
 
             params.extend([user_id, chat_id])
+            where_param_idx = param_idx
 
-            await db.execute(
-                f"UPDATE user_profiles SET {', '.join(updates)} WHERE user_id = ? AND chat_id = ?",
-                params,
-            )
-            await db.commit()
+            query = f"UPDATE user_profiles SET {', '.join(updates)} WHERE user_id = ${where_param_idx} AND chat_id = ${where_param_idx + 1}"
+            await conn.execute(query, *params)
 
     async def update_profile(self, user_id: int, chat_id: int, **kwargs: Any) -> None:
         """Update profile fields with automatic timestamp refresh."""
@@ -367,16 +445,20 @@ class UserProfileStoreAdapter:
         now = int(time.time())
         kwargs["updated_at"] = now
 
-        columns = [f"{key} = ?" for key in kwargs.keys()]
-        params = list(kwargs.values())
-        params.extend([user_id, chat_id])
+        param_idx = 1
+        columns = []
+        params = []
+        for key in kwargs.keys():
+            columns.append(f"{key} = ${param_idx}")
+            params.append(kwargs[key])
+            param_idx += 1
 
-        async with get_db_connection(self._db_path) as db:
-            await db.execute(
-                f"UPDATE user_profiles SET {', '.join(columns)} WHERE user_id = ? AND chat_id = ?",
-                params,
-            )
-            await db.commit()
+        params.extend([user_id, chat_id])
+        where_param_idx = param_idx
+
+        async with get_db_connection(self._database_url) as conn:
+            query = f"UPDATE user_profiles SET {', '.join(columns)} WHERE user_id = ${where_param_idx} AND chat_id = ${where_param_idx + 1}"
+            await conn.execute(query, *params)
 
     async def list_chat_users(
         self,
@@ -387,99 +469,95 @@ class UserProfileStoreAdapter:
         """Return known users in a chat ordered by activity."""
         await self.init()
 
-        async with get_db_connection(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
-            query = """
-                SELECT user_id, display_name, username, pronouns, membership_status,
-                       interaction_count, message_count, last_seen, created_at, updated_at
-                FROM user_profiles
-                WHERE chat_id = ?
-            """
-            params: list[Any] = [chat_id]
+        query = """
+            SELECT user_id, display_name, username, pronouns, membership_status,
+                   interaction_count, message_count, last_seen, created_at, updated_at
+            FROM user_profiles
+            WHERE chat_id = $1
+        """
+        params: list[Any] = [chat_id]
+        param_idx = 2
 
-            if not include_inactive:
-                query += (
-                    " AND membership_status IN ('member', 'administrator', 'creator')"
-                )
+        if not include_inactive:
+            query += " AND membership_status IN ('member', 'administrator', 'creator')"
 
-            query += """
-                ORDER BY 
-                    CASE membership_status
-                        WHEN 'member' THEN 0
-                        WHEN 'administrator' THEN 0
-                        WHEN 'creator' THEN 0
-                        ELSE 1
-                    END,
-                    last_seen DESC
-            """
+        query += """
+            ORDER BY 
+                CASE membership_status
+                    WHEN 'member' THEN 0
+                    WHEN 'administrator' THEN 0
+                    WHEN 'creator' THEN 0
+                    ELSE 1
+                END,
+                last_seen DESC
+        """
 
-            if limit:
-                query += " LIMIT ?"
-                params.append(limit)
+        if limit:
+            query = query.replace("$1", "$1").replace("LIMIT ?", f"LIMIT ${param_idx}")
+            params.append(limit)
 
-            async with db.execute(query, params) as cursor:
-                rows = await cursor.fetchall()
-                return [_augment_profile(dict(row)) for row in rows]
+        async with get_db_connection(self._database_url) as conn:
+            rows = await conn.fetch(query, *params)
+            return [_augment_profile(dict(row)) for row in rows]
 
     async def get_relationships(
         self, user_id: int, chat_id: int, min_strength: float = 0.0
     ) -> list[dict[str, Any]]:
         """Get relationships for a user, sorted by strength."""
-        async with get_db_connection(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                """
-                SELECT * FROM user_relationships 
-                WHERE user_id = ? AND chat_id = ? AND strength >= ?
-                ORDER BY strength DESC, interaction_count DESC
-                """,
-                (user_id, chat_id, min_strength),
-            ) as cursor:
-                rows = await cursor.fetchall()
-                return [dict(row) for row in rows]
+        query, params = convert_query_to_postgres(
+            """
+            SELECT * FROM user_relationships 
+            WHERE user_id = $1 AND chat_id = $2 AND strength >= $3
+            ORDER BY strength DESC, interaction_count DESC
+            """,
+            (user_id, chat_id, min_strength),
+        )
+        async with get_db_connection(self._database_url) as conn:
+            rows = await conn.fetch(query, *params)
+            return [dict(row) for row in rows]
 
     async def get_profiles_needing_summarization(self, limit: int = 50) -> list[int]:
         """Return user IDs that require profile summarization."""
         await self.init()
 
-        async with get_db_connection(self._db_path) as db:
-            async with db.execute(
-                """
-                SELECT DISTINCT p.user_id
-                FROM user_profiles p
-                WHERE EXISTS (
-                    SELECT 1 FROM user_facts f
-                    WHERE f.entity_type = 'user'
-                      AND f.entity_id = p.user_id
-                      AND f.is_active = 1
-                )
-                AND (
-                    p.summary IS NULL
-                    OR p.last_seen > COALESCE(p.summary_updated_at, 0)
-                )
-                ORDER BY p.message_count DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ) as cursor:
-                rows = await cursor.fetchall()
-                return [row[0] for row in rows]
+        query, params = convert_query_to_postgres(
+            """
+            SELECT DISTINCT p.user_id
+            FROM user_profiles p
+            WHERE EXISTS (
+                SELECT 1 FROM facts f
+                WHERE f.entity_type = 'user'
+                  AND f.entity_id = p.user_id
+                  AND f.is_active = 1
+            )
+            AND (
+                p.summary IS NULL
+                OR p.last_seen > COALESCE((SELECT MAX(updated_at) FROM user_profiles WHERE user_id = p.user_id), 0)
+            )
+            ORDER BY p.message_count DESC
+            LIMIT $1
+            """,
+            (limit,),
+        )
+        async with get_db_connection(self._database_url) as conn:
+            rows = await conn.fetch(query, *params)
+            return [row["user_id"] for row in rows]
 
     async def update_summary(self, user_id: int, summary: str) -> None:
         """Update cached summary text for a user across all chats."""
         await self.init()
         now = int(time.time())
 
-        async with get_db_connection(self._db_path) as db:
-            await db.execute(
-                """
-                UPDATE user_profiles
-                SET summary = ?, summary_updated_at = ?
-                WHERE user_id = ?
-                """,
-                (summary, now, user_id),
-            )
-            await db.commit()
+        query, params = convert_query_to_postgres(
+            """
+            UPDATE user_profiles
+            SET summary = $1, updated_at = $2
+            WHERE user_id = $3
+            """,
+            (summary, now, user_id),
+        )
+        async with get_db_connection(self._database_url) as conn:
+            await conn.execute(query, *params)
 
         logger.info(
             "Updated summary for user %s (adapter)",
@@ -561,13 +639,13 @@ class UserProfileStoreAdapter:
 
         now = int(time.time())
 
-        async with get_db_connection(self._db_path) as db:
-            await db.execute(
-                """
-                UPDATE user_profiles
-                SET pronouns = ?, updated_at = ?
-                WHERE user_id = ? AND chat_id = ?
-                """,
-                (normalized, now, user_id, chat_id),
-            )
-            await db.commit()
+        query, params = convert_query_to_postgres(
+            """
+            UPDATE user_profiles
+            SET pronouns = $1, updated_at = $2
+            WHERE user_id = $3 AND chat_id = $4
+            """,
+            (normalized, now, user_id, chat_id),
+        )
+        async with get_db_connection(self._database_url) as conn:
+            await conn.execute(query, *params)

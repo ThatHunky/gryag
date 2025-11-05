@@ -129,7 +129,7 @@ class ChatMetaMiddleware(BaseMiddleware):
             and self._episodic_memory is not None
         ):
             self._multi_level_context_manager = MultiLevelContextManager(
-                db_path=self._settings.db_path,
+                db_path=self._settings.database_url,
                 settings=self._settings,
                 context_store=self._store,
                 profile_store=self._profile_store,

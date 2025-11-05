@@ -1436,6 +1436,10 @@ async def handle_group_message(
     telemetry.increment_counter("chat.addressed")
     user_id = message.from_user.id
 
+    # Ensure data dict exists (needed for processing lock check)
+    if data is None:
+        data = {}
+
     # Check if there's an unanswered trigger message from THIS USER before this one
     # If the bot didn't respond to the first trigger from this user, don't respond to subsequent ones
     # This prevents the bot from "catching up" and responding to messages it missed
@@ -1449,6 +1453,14 @@ async def handle_group_message(
     unanswered_threshold_seconds = (
         120  # 2 minutes - after this, allow responses again (reduced from 5 min)
     )
+
+    # Check if there's currently processing happening for this user
+    # If so, we know a response is being generated, so don't skip the message
+    lock_key = (chat_id, user_id)
+    processing_check = data.get("_processing_lock_check")
+    is_processing = False
+    if processing_check:
+        is_processing = await processing_check(lock_key)
 
     async with get_db_connection(store._database_url) as conn:
         # Query for the most recent message from this user in this chat/thread
@@ -1506,7 +1518,11 @@ async def handle_group_message(
 
                 # If there's no next message or the next message is not from the bot (role != 'model'),
                 # that means the user's trigger wasn't answered (and it's recent)
-                if next_row is None or next_row["role"] != "model":
+                # BUT: If processing is currently active for this user, we know a response is being generated,
+                # so don't skip the message (the response just hasn't been saved to DB yet)
+                if (
+                    next_row is None or next_row["role"] != "model"
+                ) and not is_processing:
                     LOGGER.info(
                         "Skipping trigger message - previous trigger from this user was not answered (recent)",
                         extra={
@@ -1521,6 +1537,18 @@ async def handle_group_message(
                     # Do NOT store this message - it would create a blocking chain
                     # Only the first unanswered trigger should block subsequent ones
                     return
+                elif (
+                    next_row is None or next_row["role"] != "model"
+                ) and is_processing:
+                    LOGGER.debug(
+                        "Previous trigger from this user appears unanswered, but processing is active - allowing message",
+                        extra={
+                            "chat_id": message.chat.id,
+                            "message_id": message.message_id,
+                            "user_id": user_id,
+                            "previous_trigger_id": user_last_row["id"],
+                        },
+                    )
 
     LOGGER.info(
         "Message addressed to bot - processing",
@@ -1530,10 +1558,6 @@ async def handle_group_message(
             "user_id": user_id,
         },
     )
-
-    # Ensure data dict exists
-    if data is None:
-        data = {}
 
     # Check admin status first (admins bypass rate limiting and processing locks)
     is_admin = user_id in settings.admin_user_ids_list
@@ -2948,7 +2972,7 @@ async def _handle_bot_message_locked(
             perf_timings["gemini_time_ms"] = gemini_time
             reply_text = response_data.get("text", "")
             thinking_text = (response_data.get("thinking", "") or "").strip()
-            
+
             LOGGER.info(
                 "Gemini API call completed",
                 extra={
@@ -2978,7 +3002,7 @@ async def _handle_bot_message_locked(
                 perf_timings["gemini_time_ms"] = gemini_time  # Update with total
                 reply_text = response_data.get("text", "")
                 thinking_text = (response_data.get("thinking", "") or "").strip()
-                
+
                 LOGGER.info(
                     "Gemini API retry completed",
                     extra={

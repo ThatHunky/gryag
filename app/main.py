@@ -225,7 +225,7 @@ async def main() -> None:
         )
     else:
         # Create a minimal donation scheduler instance without starting it
-        # Still initialize database table for on-demand sends via /gryagdonate command
+        # Initialize database table for donation tracking (used by scheduled sends and broadcast command)
         donation_scheduler = DonationScheduler(
             bot=bot,
             db_path=settings.database_url,

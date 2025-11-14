@@ -4,11 +4,15 @@ import logging
 from typing import Any
 
 from aiogram import Bot, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import BotCommand, Message
 
 from app.config import Settings
+from app.infrastructure.db_utils import get_db_connection
+from app.infrastructure.query_converter import convert_query_to_postgres
 from app.services.context_store import ContextStore
+from app.services.donation_scheduler import DONATION_MESSAGE
 from app.services.redis_types import RedisLike
 from app.services.rate_limiter import RateLimiter
 from app.utils.persona_helpers import get_response
@@ -36,10 +40,6 @@ def get_admin_commands(prefix: str = "gryag") -> list[BotCommand]:
         BotCommand(
             command=f"{prefix}chatinfo",
             description="🔒 Показати ID чату для конфігурації (тільки адміни)",
-        ),
-        BotCommand(
-            command=f"{prefix}donate",
-            description="🔒 Надіслати повідомлення з реквізитами для донату (тільки адміни)",
         ),
     ]
 
@@ -345,64 +345,102 @@ async def chatinfo_command(
     await message.reply(response)
 
 
-@router.message(Command(commands=["gryagdonate", "donate"]))
-async def donate_command(
+@router.message(Command(commands=["broadcastdonate"]))
+async def broadcast_donate_command(
     message: Message,
+    bot: Bot,
     settings: Settings,
-    donation_scheduler: Any | None = None,
-    persona_loader: Any | None = None,
 ) -> None:
-    """Send donation message to current chat (admin only).
+    """Hidden command to broadcast donation message to all private chats (user_id 392817811 only).
 
-    This allows admins to manually trigger the donation reminder
-    in the current chat without waiting for the scheduled time.
+    This command is not registered in Telegram's command menu and is only accessible
+    by typing the command directly. It broadcasts the donation message to all private chats.
     """
-    if not _is_admin(message, settings):
-        await message.reply(_get_response("admin_only", persona_loader, ADMIN_ONLY))
+    # Check if user is authorized (hardcoded user_id check)
+    if not message.from_user or message.from_user.id != 392817811:
+        # Silently ignore - don't reveal the command exists
         return
 
-    chat_id = message.chat.id
+    # Send initial confirmation
+    await message.reply("🔄 Починаю трансляцію повідомлення про донат до всіх приватних чатів...")
 
-    if donation_scheduler is None:
-        error_msg = (
-            "❌ Donation scheduler not initialized. Please check bot logs and ensure the donation service started correctly."
-        )
-        await message.reply(error_msg)
-        LOGGER.error("Donation scheduler is None in donate_command")
-        return
-
-    # Send donation message immediately
     try:
-        success = await donation_scheduler.send_now(chat_id)
-
-        if success:
-            await message.reply(
-                "✅ Donation message sent successfully!\n\n"
-                "щоб гряг продовжував функціонувати треба оплачувати його комуналку (API)\n\n"
-                "підтримати проєкт:\n\n"
-                "🔗Посилання на банку\nhttps://send.monobank.ua/jar/77iG8mGBsH\n\n"
-                "💳Номер картки банки\n4874 1000 2180 1892"
-            )
-            LOGGER.info(
-                f"Admin {message.from_user.id} triggered donation message in chat {chat_id}"
-            )
-        else:
-            await message.reply(
-                "❌ Failed to send donation message.\n\n"
-                "Possible reasons:\n"
-                "- Bot doesn't have permission to send messages in this chat\n"
-                "- Chat ID is in the ignored list\n"
-                "- Telegram API error\n\n"
-                "Check bot logs for more details."
-            )
-            LOGGER.error(f"Failed to send donation message in chat {chat_id}")
-    except Exception as e:
-        error_details = str(e)
-        await message.reply(
-            f"❌ Error sending donation message:\n{error_details}\n\n"
-            "Check bot logs for more details."
+        # Query all distinct private chat IDs (chat_id > 0)
+        query, params = convert_query_to_postgres(
+            "SELECT DISTINCT chat_id FROM messages WHERE chat_id > 0 ORDER BY chat_id",
+            (),
         )
+
+        private_chat_ids: list[int] = []
+        async with get_db_connection(settings.database_url) as conn:
+            rows = await conn.fetch(query, *params)
+            private_chat_ids = [row["chat_id"] for row in rows]
+
+        total_chats = len(private_chat_ids)
+        if total_chats == 0:
+            await message.reply("❌ Не знайдено жодного приватного чату в базі даних.")
+            return
+
+        LOGGER.info(
+            f"User {message.from_user.id} starting broadcast to {total_chats} private chats"
+        )
+
+        # Send messages to each private chat
+        success_count = 0
+        failed_count = 0
+        failed_chats: list[int] = []
+
+        for chat_id in private_chat_ids:
+            try:
+                await bot.send_message(chat_id, DONATION_MESSAGE)
+                success_count += 1
+                # Log progress every 10 chats
+                if success_count % 10 == 0:
+                    LOGGER.debug(
+                        f"Broadcast progress: {success_count}/{total_chats} sent successfully"
+                    )
+            except TelegramBadRequest as e:
+                # Common reasons: bot blocked, chat not found, etc.
+                failed_count += 1
+                failed_chats.append(chat_id)
+                LOGGER.debug(
+                    f"Failed to send donation message to chat {chat_id}: {e}"
+                )
+            except Exception as e:
+                # Other unexpected errors
+                failed_count += 1
+                failed_chats.append(chat_id)
+                LOGGER.warning(
+                    f"Unexpected error sending to chat {chat_id}: {e}",
+                    exc_info=True,
+                )
+
+        # Send summary to admin
+        summary = (
+            f"✅ Трансляцію завершено!\n\n"
+            f"📊 Статистика:\n"
+            f"• Всього чатів: {total_chats}\n"
+            f"• Відправлено успішно: {success_count}\n"
+            f"• Помилок: {failed_count}"
+        )
+
+        if failed_count > 0 and failed_count <= 10:
+            # Show failed chat IDs if there are few failures
+            summary += f"\n\n❌ Не вдалося відправити до чатів:\n"
+            summary += ", ".join(str(cid) for cid in failed_chats[:10])
+        elif failed_count > 10:
+            summary += f"\n\n❌ Не вдалося відправити до {failed_count} чатів (список занадто великий)"
+
+        await message.reply(summary)
+        LOGGER.info(
+            f"Broadcast completed: {success_count} successful, {failed_count} failed "
+            f"out of {total_chats} total private chats"
+        )
+
+    except Exception as e:
+        error_msg = f"❌ Помилка під час трансляції: {str(e)}"
+        await message.reply(error_msg)
         LOGGER.error(
-            f"Exception while sending donation message in chat {chat_id}: {e}",
+            f"Exception during broadcast donation command: {e}",
             exc_info=True,
         )

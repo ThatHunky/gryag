@@ -89,11 +89,11 @@ from app.utils.persona_helpers import get_response
 
 router = Router()
 
-# Default responses (will be overridden by PersonaLoader templates if enabled)
-ERROR_FALLBACK = "Ґеміні знову тупить. Спробуй пізніше."
-EMPTY_REPLY = "Я не вкурив, що ти хочеш. Розпиши конкретніше — і я вже кручусь."
-BANNED_REPLY = "Ти для гряга в бані. Йди погуляй."
-THROTTLED_REPLY = "Занадто багато повідомлень. Почекай {seconds} секунд."
+# Default responses removed - rely solely on PersonaLoader and persona instructions
+ERROR_FALLBACK = ""
+EMPTY_REPLY = ""
+BANNED_REPLY = ""
+THROTTLED_REPLY = ""
 
 
 LOGGER = logging.getLogger(__name__)
@@ -194,6 +194,12 @@ async def _check_unanswered_trigger(
     Check if there's an unanswered trigger from this user.
 
     Returns True if message should be skipped, False otherwise.
+    
+    This function handles race conditions where a bot response may have been
+    saved to the database but isn't yet visible to this connection. It uses:
+    1. ID-based queries (primary check)
+    2. Timestamp-based queries (fallback for robustness)
+    3. Retry mechanism with exponential backoff (handles DB visibility delays)
     """
     current_ts = int(time.time())
 
@@ -204,6 +210,63 @@ async def _check_unanswered_trigger(
     is_processing = False
     if processing_check:
         is_processing = await processing_check(lock_key)
+
+    async def _check_bot_response(
+        conn: Any, user_msg_id: int, user_msg_ts: int, retry_attempt: int = 0
+    ) -> int:
+        """
+        Check for bot responses after user message using both ID and timestamp.
+        
+        Returns the count of bot responses found.
+        """
+        # Primary check: ID-based query (fastest, assumes sequential IDs)
+        if thread_id is None:
+            id_query = """
+                SELECT COUNT(*) as count FROM messages
+                WHERE chat_id = $1 AND thread_id IS NULL AND id > $2 AND role = 'model'
+                LIMIT 1
+            """
+            id_params = (chat_id, user_msg_id)
+        else:
+            id_query = """
+                SELECT COUNT(*) as count FROM messages
+                WHERE chat_id = $1 AND thread_id = $2 AND id > $3 AND role = 'model'
+                LIMIT 1
+            """
+            id_params = (chat_id, thread_id, user_msg_id)
+
+        id_row = await conn.fetchrow(id_query, *id_params)
+        id_count = id_row["count"] if id_row else 0
+
+        # If ID-based query found responses, we're done
+        if id_count > 0:
+            return id_count
+
+        # Fallback: Timestamp-based query (more robust, handles non-sequential IDs)
+        # Check for bot responses with timestamp >= user message timestamp
+        # This catches responses even if IDs aren't perfectly sequential
+        if thread_id is None:
+            ts_query = """
+                SELECT COUNT(*) as count FROM messages
+                WHERE chat_id = $1 AND thread_id IS NULL 
+                AND ts >= $2 AND role = 'model' AND id != $3
+                LIMIT 1
+            """
+            ts_params = (chat_id, user_msg_ts, user_msg_id)
+        else:
+            ts_query = """
+                SELECT COUNT(*) as count FROM messages
+                WHERE chat_id = $1 AND thread_id = $2 
+                AND ts >= $3 AND role = 'model' AND id != $4
+                LIMIT 1
+            """
+            ts_params = (chat_id, thread_id, user_msg_ts, user_msg_id)
+
+        ts_row = await conn.fetchrow(ts_query, *ts_params)
+        ts_count = ts_row["count"] if ts_row else 0
+
+        # Return the maximum count found (should be same, but timestamp is more reliable)
+        return max(id_count, ts_count)
 
     async with get_db_connection(store._database_url) as conn:
         # Query for the most recent message from this user in this chat/thread
@@ -221,30 +284,39 @@ async def _check_unanswered_trigger(
                 )
             else:
                 # Found a recent user message from this user - check if there's ANY bot response after it
-                # Query for ANY bot message after this user's message (in the same chat/thread)
-                # This handles cases where other users' messages might be inserted between
-                if thread_id is None:
-                    next_query = """
-                        SELECT COUNT(*) as count FROM messages
-                        WHERE chat_id = $1 AND thread_id IS NULL AND id > $2 AND role = 'model'
-                        LIMIT 1
-                    """
-                    next_params = (chat_id, user_last_row["id"])
-                else:
-                    next_query = """
-                        SELECT COUNT(*) as count FROM messages
-                        WHERE chat_id = $1 AND thread_id = $2 AND id > $3 AND role = 'model'
-                        LIMIT 1
-                    """
-                    next_params = (chat_id, thread_id, user_last_row["id"])
+                # Use retry mechanism to handle race conditions where DB write isn't yet visible
+                bot_response_count = 0
+                max_retries = 3
+                retry_delays = [0.05, 0.1, 0.2]  # 50ms, 100ms, 200ms
 
-                next_row = await conn.fetchrow(next_query, *next_params)
+                for retry_attempt in range(max_retries):
+                    bot_response_count = await _check_bot_response(
+                        conn,
+                        user_last_row["id"],
+                        user_last_row["ts"],
+                        retry_attempt,
+                    )
+
+                    # If we found a response, no need to retry
+                    if bot_response_count > 0:
+                        if retry_attempt > 0:
+                            LOGGER.debug(
+                                f"Found bot response after {retry_attempt} retries for user {user_id} in chat {chat_id}"
+                            )
+                        break
+
+                    # If processing is active, don't retry - response is being generated
+                    if is_processing:
+                        break
+
+                    # If this isn't the last retry, wait before retrying
+                    if retry_attempt < max_retries - 1:
+                        await asyncio.sleep(retry_delays[retry_attempt])
 
                 # If there's no bot message after the user's message (count = 0),
                 # that means the user's trigger wasn't answered (and it's recent)
                 # BUT: If processing is currently active for this user, we know a response is being generated,
                 # so don't skip the message (the response just hasn't been saved to DB yet)
-                bot_response_count = next_row["count"] if next_row else 0
                 if bot_response_count == 0 and not is_processing:
                     LOGGER.info(
                         "Skipping trigger message - previous trigger from this user was not answered (recent)",
@@ -252,7 +324,11 @@ async def _check_unanswered_trigger(
                             "chat_id": chat_id,
                             "user_id": user_id,
                             "previous_trigger_id": user_last_row["id"],
+                            "previous_trigger_ts": user_last_row["ts"],
                             "trigger_age_seconds": trigger_age,
+                            "is_processing": is_processing,
+                            "bot_response_count": bot_response_count,
+                            "retry_attempts": retry_attempt + 1,
                         },
                     )
                     telemetry.increment_counter("chat.skipped_unanswered_trigger")
@@ -266,6 +342,18 @@ async def _check_unanswered_trigger(
                             "chat_id": chat_id,
                             "user_id": user_id,
                             "previous_trigger_id": user_last_row["id"],
+                            "previous_trigger_ts": user_last_row["ts"],
+                            "bot_response_count": bot_response_count,
+                        },
+                    )
+                elif bot_response_count > 0:
+                    LOGGER.debug(
+                        f"Found {bot_response_count} bot response(s) after user {user_id}'s previous trigger - allowing message",
+                        extra={
+                            "chat_id": chat_id,
+                            "user_id": user_id,
+                            "previous_trigger_id": user_last_row["id"],
+                            "bot_response_count": bot_response_count,
                         },
                     )
 
@@ -746,21 +834,8 @@ async def _process_and_send_response(
                 "message" if fallback_success else "error",
                 reply_text,
             )
-            if fallback_success and not reply_text:
-                reply_text = "Готово. Лови картинку."
-            if not fallback_success and not reply_text:
-                reply_text = "Нічого не вийшло — сервіс брикнувся."
-
-    # Memory-tool specific fallback: if Gemini returned nothing but a memory tool was used, confirm action
-    if (not reply_text or reply_text.isspace()) and tools_used_in_request:
-        if "forget_all_memories" in tools_used_in_request:
-            reply_text = "Готово. Я забув усе про тебе в цьому чаті."
-        elif "remember_memory" in tools_used_in_request:
-            reply_text = "Запам'ятав."
-        elif "update_memory" in tools_used_in_request:
-            reply_text = "Оновив."
-        elif "forget_memory" in tools_used_in_request:
-            reply_text = "Видалив."
+            # Removed hardcoded fallback messages - let model handle responses via persona instructions
+            # If model doesn't respond, generic empty_reply template will be used below
 
     if not reply_text or reply_text.isspace():
         reply_text = _get_response(
@@ -1877,117 +1952,6 @@ def _format_for_telegram(text: str) -> str:
     text = re.sub(r"TGFMT\d+|RAW\d+", "", text)
 
     return text
-
-
-def _escape_markdown(text: str) -> str:
-    """
-    Clean up text that might break Telegram Markdown parsing.
-
-    Since we send replies using Markdown parse mode, we preserve intentional
-    formatting (bold/italic) while escaping special characters that break parsing.
-
-    NOTE: This function is deprecated. Use _format_for_telegram() with HTML parse mode instead.
-    """
-    if not text:
-        return text
-
-    # Strategy: Use regex to preserve markdown formatting while escaping special chars
-    # We need to:
-    # 1. Protect markdown formatting: **bold**, *bold*, __italic__, _italic_, `code`, ```code```
-    # 2. Escape all MarkdownV2 special chars OUTSIDE of these formatting blocks
-    # 3. Preserve list bullets
-
-    # Characters that need escaping in MarkdownV2
-    # Complete list from Telegram docs: _*[]()~`>#+-=|{}.!
-    # We handle * and _ specially to preserve intentional formatting
-    special_chars = set("_*[]()~`><#+-=|{}.!\\")
-
-    result = []
-    i = 0
-    text_len = len(text)
-
-    while i < text_len:
-        # Check for code blocks (triple backticks)
-        if i + 2 < text_len and text[i : i + 3] == "```":
-            # Find closing triple backticks
-            end = text.find("```", i + 3)
-            if end != -1:
-                # Include entire code block as-is
-                result.append(text[i : end + 3])
-                i = end + 3
-                continue
-
-        # Check for inline code (single backtick)
-        if text[i] == "`":
-            # Find closing backtick
-            end = text.find("`", i + 1)
-            if end != -1:
-                # Escape backticks but include content
-                result.append("\\`")
-                result.append(text[i + 1 : end])
-                result.append("\\`")
-                i = end + 1
-                continue
-
-        # Check for bold (**text** or __text__)
-        if i + 1 < text_len and text[i : i + 2] in ("**", "__"):
-            marker = text[i : i + 2]
-            # Find closing marker
-            end = text.find(marker, i + 2)
-            if end != -1 and end > i + 2:  # Must have content between markers
-                # Include formatting as-is
-                result.append(marker)
-                # Recursively escape content inside (but keep nested formatting)
-                inner_content = text[i + 2 : end]
-                result.append(inner_content)  # Don't escape inside formatting
-                result.append(marker)
-                i = end + 2
-                continue
-
-        # Check for italic (*text* or _text_)
-        if text[i] in ("*", "_"):
-            marker = text[i]
-            # Find closing marker (but not if it's part of ** or __)
-            if not (i + 1 < text_len and text[i + 1] == marker):
-                # Look for single marker
-                j = i + 1
-                while j < text_len:
-                    if text[j] == marker:
-                        # Make sure it's not part of double marker
-                        if not (j + 1 < text_len and text[j + 1] == marker):
-                            # Found closing marker
-                            if j > i + 1:  # Must have content
-                                result.append(marker)
-                                result.append(
-                                    text[i + 1 : j]
-                                )  # Don't escape inside formatting
-                                result.append(marker)
-                                i = j + 1
-                                break
-                    j += 1
-                else:
-                    # No closing marker found, escape the character
-                    result.append(f"\\{marker}")
-                    i += 1
-                continue
-
-        # Check for list bullets at start of line
-        if text[i] == "*" and (i == 0 or text[i - 1] == "\n"):
-            # Check if it's a bullet (* followed by space)
-            if i + 1 < text_len and text[i + 1] == " ":
-                result.append("* ")
-                i += 2
-                continue
-
-        # Regular character - escape if it's a special char
-        char = text[i]
-        if char in special_chars:
-            result.append(f"\\{char}")
-        else:
-            result.append(char)
-        i += 1
-
-    return "".join(result)
 
 
 def _summarize_long_context(

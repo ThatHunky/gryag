@@ -364,3 +364,142 @@ async def test_check_and_handle_rate_limit_returns_none_when_not_sent():
     assert should_proceed is False
     assert rate_limit_response is None  # No message sent due to cooldown
 
+
+@pytest.mark.asyncio
+async def test_unanswered_trigger_uses_timestamp_fallback(context_store):
+    """Test that unanswered trigger check uses timestamp-based fallback when ID-based check fails."""
+    chat_id = 123
+    user_id = 456
+    thread_id = None
+
+    # Add user message
+    user_msg_id = await context_store.add_message(
+        chat_id=chat_id,
+        thread_id=thread_id,
+        user_id=user_id,
+        role="user",
+        text="Hello bot",
+        media=None,
+        metadata=None,
+        embedding=None,
+        retention_days=None,
+        sender=MessageSender(
+            role="user",
+            name="TestUser",
+            username="testuser",
+            is_bot=False,
+        ),
+    )
+
+    # Get the user message timestamp for reference
+    from app.infrastructure.db_utils import get_db_connection
+    async with get_db_connection(context_store._database_url) as conn:
+        user_row = await conn.fetchrow(
+            "SELECT ts FROM messages WHERE id = $1", user_msg_id
+        )
+        user_msg_ts = user_row["ts"] if user_row else int(time.time())
+
+    # Add bot response with same timestamp (simulating race condition where
+    # bot response might have non-sequential ID or be inserted concurrently)
+    # The timestamp-based fallback should catch this
+    await context_store.add_message(
+        chat_id=chat_id,
+        thread_id=thread_id,
+        user_id=None,
+        role="model",
+        text="Hello!",
+        media=None,
+        metadata=None,
+        embedding=None,
+        retention_days=None,
+        sender=MessageSender(
+            role="assistant",
+            name="gryag",
+            username="gryag",
+            is_bot=True,
+        ),
+    )
+
+    # Check should return False (don't skip) because bot replied
+    # The timestamp-based fallback should find the response even if
+    # ID-based query somehow misses it
+    data = {}
+    should_skip = await _check_unanswered_trigger(
+        chat_id=chat_id,
+        thread_id=thread_id,
+        user_id=user_id,
+        store=context_store,
+        data=data,
+    )
+    assert should_skip is False
+
+
+@pytest.mark.asyncio
+async def test_unanswered_trigger_retry_mechanism(context_store):
+    """Test that unanswered trigger check retries when bot response exists but isn't immediately visible."""
+    chat_id = 123
+    user_id = 456
+    thread_id = None
+    import asyncio
+
+    # Add user message
+    await context_store.add_message(
+        chat_id=chat_id,
+        thread_id=thread_id,
+        user_id=user_id,
+        role="user",
+        text="Hello bot",
+        media=None,
+        metadata=None,
+        embedding=None,
+        retention_days=None,
+        sender=MessageSender(
+            role="user",
+            name="TestUser",
+            username="testuser",
+            is_bot=False,
+        ),
+    )
+
+    # Start a task that will add bot response after a small delay
+    # This simulates the race condition where response is being saved
+    async def add_response_after_delay():
+        await asyncio.sleep(0.06)  # 60ms delay - longer than first retry (50ms)
+        await context_store.add_message(
+            chat_id=chat_id,
+            thread_id=thread_id,
+            user_id=None,
+            role="model",
+            text="Hello!",
+            media=None,
+            metadata=None,
+            embedding=None,
+            retention_days=None,
+            sender=MessageSender(
+                role="assistant",
+                name="gryag",
+                username="gryag",
+                is_bot=True,
+            ),
+        )
+
+    # Start the delayed response task
+    response_task = asyncio.create_task(add_response_after_delay())
+
+    # Check immediately - should initially not find response, but retry should find it
+    data = {}
+    should_skip = await _check_unanswered_trigger(
+        chat_id=chat_id,
+        thread_id=thread_id,
+        user_id=user_id,
+        store=context_store,
+        data=data,
+    )
+
+    # Wait for response task to complete
+    await response_task
+
+    # The retry mechanism should have found the response after the delay
+    # So should_skip should be False
+    assert should_skip is False
+

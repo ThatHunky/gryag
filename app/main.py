@@ -24,16 +24,7 @@ from app.middlewares.chat_filter import ChatFilterMiddleware
 from app.middlewares.chat_meta import ChatMetaMiddleware
 from app.middlewares.command_throttle import CommandThrottleMiddleware
 from app.middlewares.processing_lock import ProcessingLockMiddleware
-from app.core.initialization import (
-    init_bot_and_dispatcher,
-    init_core_services,
-    init_chat_memory,
-    init_context_services,
-    init_episode_monitoring,
-    init_bot_learning,
-    init_image_generation,
-    init_redis_client,
-)
+from app.core.initialization import init_redis_client
 from app.services.context_store import ContextStore, run_retention_pruning_task
 from app.services.gemini import GeminiClient
 from app.services.user_profile_adapter import UserProfileStoreAdapter

@@ -27,12 +27,13 @@ from app.services import telemetry
 from app.services.bot_profile import BotProfileStore
 from app.services.bot_learning import BotLearningEngine
 from app.repositories.memory_repository import MemoryRepository
+from app.utils.persona_helpers import get_response
 
 router = Router()
 logger = logging.getLogger(__name__)
 
-# Default admin-only message
-ADMIN_ONLY = "Ця команда лише для своїх. І явно не для тебе."
+# Default admin-only message removed - rely solely on PersonaLoader and persona instructions
+ADMIN_ONLY = ""
 
 
 async def _check_banned(
@@ -810,6 +811,7 @@ async def remove_fact_command(
     settings: Settings,
     profile_store: UserProfileStore,
     store: ContextStore,
+    persona_loader: Any | None = None,
 ) -> None:
     """
     Remove a specific fact by ID (admin only).
@@ -822,7 +824,10 @@ async def remove_fact_command(
         return
 
     if not message.from_user or not _is_admin(message.from_user.id, settings):
-        await message.reply("❌ Ця команда лише для адмінів.")
+        # Removed hardcoded message - rely on persona instructions
+        admin_msg = get_response("admin_only", persona_loader, ADMIN_ONLY)
+        if admin_msg:
+            await message.reply(admin_msg)
         return
 
 
@@ -832,6 +837,7 @@ async def forget_user_command(
     settings: Settings,
     profile_store: UserProfileStore,
     store: ContextStore,
+    persona_loader: Any | None = None,
 ) -> None:
     """
     Forget all facts about a user (requires confirmation, admin only).
@@ -846,7 +852,10 @@ async def forget_user_command(
         return
 
     if not message.from_user or not _is_admin(message.from_user.id, settings):
-        await message.reply("❌ Ця команда лише для адмінів.")
+        # Removed hardcoded message - rely on persona instructions
+        admin_msg = get_response("admin_only", persona_loader, ADMIN_ONLY)
+        if admin_msg:
+            await message.reply(admin_msg)
         return
 
 

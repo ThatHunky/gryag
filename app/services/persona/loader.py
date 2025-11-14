@@ -141,22 +141,6 @@ class PersonaLoader:
         """Get default hardcoded persona for backwards compatibility."""
         from app.persona import SYSTEM_PERSONA
 
-        # Default admin users (from current hardcoded persona)
-        default_admins = [
-            AdminUser(
-                user_id=831570515,
-                name="кавунева пітса",
-                display_name="кавунева пітса #Я_З_ТОМАТОМ_СПАЙСІ 🍻△✙➔",
-                special_status="admin_beloved",
-            ),
-            AdminUser(
-                user_id=392817811,
-                name="Всеволод Добровольський",
-                display_name="батько",
-                special_status="creator",
-            ),
-        ]
-
         # Default trigger pattern (from current hardcoded triggers)
         default_triggers = [r"\b(?:гр[яи]г[аоуеєіїюяьґ]*|gr[yi]ag\w*)\b"]
 
@@ -168,7 +152,7 @@ class PersonaLoader:
             language="uk",
             system_prompt=SYSTEM_PERSONA,
             trigger_patterns=default_triggers,
-            admin_users=default_admins,
+            admin_users=[],  # Admin users should come from YAML config or persona instructions, not hardcoded
             allow_profanity=True,
             sarcasm_level="high",
             humor_style="dark",
@@ -176,23 +160,10 @@ class PersonaLoader:
         )
 
     def _get_default_responses(self) -> dict[str, str]:
-        """Get default hardcoded responses for backwards compatibility."""
-        return {
-            "error_fallback": "Ґеміні знову тупить. Спробуй пізніше.",
-            "empty_reply": "Скажи конкретніше, бо зараз з цього нічого не зробити.",
-            "banned_reply": "Ти для {bot_name} в бані. Йди погуляй.",
-            "snarky_reply": "Пригальмуй, балакучий...",
-            "throttle_notice": "Занадто багато повідомлень. Почекай {minutes} хв.",
-            "admin_only": "Ця команда лише для своїх. І явно не для тебе.",
-            "chat_not_allowed": "Я тут не працюю.",
-            # Admin responses
-            "ban_success": "Готово: користувача кувалдіровано.",
-            "unban_success": "Ок, розбанив. Нехай знову пиздить.",
-            "already_banned": "Та він і так у бані сидив.",
-            "not_banned": "Нема кого розбанювати — список чистий.",
-            "missing_target": "Покажи, кого саме прибрати: зроби реплай або передай ID.",
-            "reset_done": "Все, обнулив ліміти. Можна знову розганяти балачки.",
-        }
+        """Get default responses - empty dict to rely solely on persona instructions."""
+        # Removed hardcoded responses - system should rely on persona instructions
+        # Response templates should be loaded from JSON files or persona config
+        return {}
 
     def get_system_prompt(self, **kwargs: Any) -> str:
         """Return the configured system prompt.

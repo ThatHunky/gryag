@@ -11,8 +11,8 @@
   "command_help": "Available commands: /{command_prefix}help, /{command_prefix}profile, /{command_prefix}facts",
   "profile_not_found": "Profile not found.",
   "facts_empty": "No information stored about this user yet.",
-  "ban_success": "User {user_name} has been banned.",
-  "unban_success": "User {user_name} has been unbanned.",
-  "reset_success": "History cleared for user {user_name}.",
+  "ban_success": "User {user} has been banned.",
+  "unban_success": "User {user} has been unbanned.",
+  "reset_success": "History cleared for user {user}.",
   "chat_info": "Chat ID: {chat_id}\nThread ID: {thread_id}\nChat Type: {chat_type}"
 }

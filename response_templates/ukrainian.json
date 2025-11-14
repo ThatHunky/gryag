@@ -11,8 +11,8 @@
   "command_help": "Доступні команди: /{command_prefix}help, /{command_prefix}profile, /{command_prefix}facts",
   "profile_not_found": "Профіль не знайдено.",
   "facts_empty": "Поки що нічого не знаю про цього користувача.",
-  "ban_success": "Забанено користувача {user_name}.",
-  "unban_success": "Розбанено користувача {user_name}.",
-  "reset_success": "Історію очищено для користувача {user_name}.",
+  "ban_success": "Забанено користувача {user}.",
+  "unban_success": "Розбанено користувача {user}.",
+  "reset_success": "Історію очищено для користувача {user}.",
   "chat_info": "ID чату: {chat_id}\nID треду: {thread_id}\nТип чату: {chat_type}"
 }

@@ -116,7 +116,7 @@ async def ban_user_command(
 
     await store.ban_user(chat_id, target_id)
     await message.reply(
-        _get_response("ban_success", persona_loader, BAN_SUCCESS, user_name=target_label)
+        _get_response("ban_success", persona_loader, BAN_SUCCESS, user=target_label)
     )
 
 
@@ -148,7 +148,7 @@ async def unban_user_command(
 
     await store.unban_user(chat_id, target_id)
     await message.reply(
-        _get_response("unban_success", persona_loader, UNBAN_SUCCESS, user_name=target_label)
+        _get_response("unban_success", persona_loader, UNBAN_SUCCESS, user=target_label)
     )
 
 

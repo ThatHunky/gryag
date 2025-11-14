@@ -33,11 +33,6 @@ _active_polls = {}
 _poll_votes = {}
 
 
-# Temporary in-memory storage for polls (will be replaced with database)
-_active_polls = {}
-_poll_votes = {}
-
-
 def _generate_poll_id(chat_id: int, thread_id: Optional[int]) -> str:
     """Generate a unique poll ID."""
     return f"poll_{chat_id}_{thread_id or 0}_{int(time.time())}"
@@ -178,6 +173,33 @@ async def _handle_create_poll(params: dict[str, Any]) -> str:
             ensure_ascii=False,
         )
 
+    # Validate and convert types
+    try:
+        chat_id_int = int(chat_id) if chat_id is not None else None
+        creator_id_int = int(creator_id) if creator_id is not None else None
+        thread_id_int = int(thread_id) if thread_id is not None else None
+    except (ValueError, TypeError):
+        return json.dumps(
+            {"success": False, "error": "Невірний тип параметрів (chat_id, creator_id, thread_id мають бути числами)"},
+            ensure_ascii=False,
+        )
+
+    # Validate question
+    if not isinstance(question, str):
+        question = str(question) if question is not None else ""
+    if not question.strip():
+        return json.dumps(
+            {"success": False, "error": "Питання не може бути порожнім"},
+            ensure_ascii=False,
+        )
+
+    # Validate options
+    if not isinstance(options, list):
+        return json.dumps(
+            {"success": False, "error": "Параметр options має бути списком"},
+            ensure_ascii=False,
+        )
+
     if len(options) < 2:
         return json.dumps(
             {
@@ -202,15 +224,35 @@ async def _handle_create_poll(params: dict[str, Any]) -> str:
             ensure_ascii=False,
         )
 
-    # Create poll (types already validated above)
+    # Validate poll_type
+    if poll_type not in ("regular", "multiple", "anonymous"):
+        poll_type = "regular"
+
+    # Validate duration_hours
+    duration_hours_int = None
+    if duration_hours is not None:
+        try:
+            duration_hours_int = int(duration_hours)
+            if duration_hours_int < 0:
+                return json.dumps(
+                    {"success": False, "error": "Тривалість не може бути від'ємною"},
+                    ensure_ascii=False,
+                )
+        except (ValueError, TypeError):
+            return json.dumps(
+                {"success": False, "error": "Невірний тип параметра duration_hours"},
+                ensure_ascii=False,
+            )
+
+    # Create poll
     poll_data = _create_poll_data(
-        chat_id,  # type: ignore[arg-type]
-        thread_id,
-        creator_id,  # type: ignore[arg-type]
+        chat_id_int,
+        thread_id_int,
+        creator_id_int,
         question,
         options,
         poll_type,
-        duration_hours,
+        duration_hours_int,
     )
 
     # Store in memory (will be database later)
@@ -248,6 +290,28 @@ async def _handle_vote_poll(params: dict[str, Any]) -> str:
     if not all([poll_id, user_id]):
         return json.dumps(
             {"success": False, "error": "Відсутні обов'язкові параметри"},
+            ensure_ascii=False,
+        )
+
+    # Validate types
+    if not isinstance(poll_id, str) or not poll_id.strip():
+        return json.dumps(
+            {"success": False, "error": "Невірний poll_id"},
+            ensure_ascii=False,
+        )
+
+    try:
+        user_id_int = int(user_id) if user_id is not None else None
+    except (ValueError, TypeError):
+        return json.dumps(
+            {"success": False, "error": "Невірний тип user_id"},
+            ensure_ascii=False,
+        )
+
+    # Validate option_indices
+    if not isinstance(option_indices, list):
+        return json.dumps(
+            {"success": False, "error": "option_indices має бути списком"},
             ensure_ascii=False,
         )
 
@@ -297,27 +361,27 @@ async def _handle_vote_poll(params: dict[str, Any]) -> str:
 
     # Check if user already voted
     poll_votes = _poll_votes.get(poll_id, {})
-    if user_id in poll_votes and not poll_data["allow_multiple"]:
+    if user_id_int in poll_votes and not poll_data["allow_multiple"]:
         return json.dumps(
             {"success": False, "error": "Ви вже проголосували в цьому опитуванні"},
             ensure_ascii=False,
         )
 
     # Record votes
-    if user_id not in poll_votes:
-        poll_votes[user_id] = []
+    if user_id_int not in poll_votes:
+        poll_votes[user_id_int] = []
 
     # Remove old votes if not allowing multiple votes
     if not poll_data["allow_multiple"]:
-        for old_idx in poll_votes[user_id]:
+        for old_idx in poll_votes[user_id_int]:
             if 0 <= old_idx < len(poll_data["options"]):
                 poll_data["options"][old_idx]["votes"] -= 1
-        poll_votes[user_id] = []
+        poll_votes[user_id_int] = []
 
     # Add new votes
     for idx in valid_indices:
-        if idx not in poll_votes[user_id]:
-            poll_votes[user_id].append(idx)
+        if idx not in poll_votes[user_id_int]:
+            poll_votes[user_id_int].append(idx)
             poll_data["options"][idx]["votes"] += 1
 
     _poll_votes[poll_id] = poll_votes
@@ -329,7 +393,7 @@ async def _handle_vote_poll(params: dict[str, Any]) -> str:
         tool_logger.info(
             "Vote recorded",
             poll_id=poll_id,
-            user_id=user_id,
+            user_id=user_id_int,
             votes_cast=len(valid_indices),
         )
 

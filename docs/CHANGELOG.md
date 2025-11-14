@@ -9,6 +9,20 @@ All notable changes to gryag's memory, context, and learning systems.
 
 ## [Unreleased]
 
+### 2025-11-09 — Telegram Checkers Redesign
+
+**Summary**: Rebuilt the Telegram checkers experience around user-vs-user challenges with improved UI and persistence.
+
+**Changes**:
+- Simplified the `checkers_games` schema and data-access layer to remove AI fields and support challenge, active, cancelled, and finished states.
+- Refactored handler logic to publish joinable challenges, manage in-chat gameplay, forfeits, and offer rematch shortcuts.
+- Added unit coverage for the new `CheckersGameStore` challenge lifecycle.
+
+**Verification**:
+```bash
+.venv/bin/pytest tests/unit/test_checkers_game_store.py
+```
+
 ### 2025-10-30 — C++ Port Scaffolding
 
 **Summary**: Added a dedicated `cpp/` subproject bootstrapping the gryag C++ bot (tgbot-cpp runtime, Gemini client, context store, persona loader, tool registry) without modifying the Python service.

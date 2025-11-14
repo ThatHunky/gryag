@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 import asyncpg
-from app.infrastructure.query_converter import convert_query_to_postgres
 
 from app.config import Settings
 from app.infrastructure.db_utils import get_db_connection
@@ -123,27 +122,25 @@ class EpisodicMemoryStore:
         except Exception as e:
             LOGGER.warning(f"Failed to generate episode embedding: {e}")
 
-        query, params = convert_query_to_postgres(
-            """
+        query = """
             INSERT INTO episodes 
             (chat_id, thread_id, topic, summary, summary_embedding, importance, 
              emotional_valence, message_ids, participant_ids, tags, created_at, access_count)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0)
             RETURNING id
-            """,
-            (
-                chat_id,
-                thread_id,
-                topic,
-                summary,
-                summary_embedding,
-                importance,
-                emotional_valence,
-                json.dumps(messages),
-                json.dumps(user_ids),
-                json.dumps(tags),
-                ts,
-            ),
+        """
+        params = (
+            chat_id,
+            thread_id,
+            topic,
+            summary,
+            summary_embedding,
+            importance,
+            emotional_valence,
+            json.dumps(messages),
+            json.dumps(user_ids),
+            json.dumps(tags),
+            ts,
         )
         async with get_db_connection(self.database_url) as conn:
             row = await conn.fetchrow(query, *params)
@@ -190,8 +187,7 @@ class EpisodicMemoryStore:
 
         # Fetch candidate episodes
         # PostgreSQL: participant_ids is TEXT (JSON), need to cast to jsonb for array operations
-        query, params = convert_query_to_postgres(
-            """
+        query = """
             SELECT * FROM episodes 
             WHERE chat_id = $1 
               AND importance >= $2
@@ -202,9 +198,8 @@ class EpisodicMemoryStore:
               )
             ORDER BY created_at DESC
             LIMIT $4
-            """,
-            (chat_id, min_importance, user_id, limit * 3),
-        )
+        """
+        params = (chat_id, min_importance, user_id, limit * 3)
         async with get_db_connection(self.database_url) as conn:
             rows = await conn.fetch(query, *params)
 
@@ -243,9 +238,9 @@ class EpisodicMemoryStore:
         scored.sort(reverse=True, key=lambda x: x[0])
 
         episodes = []
+        episode_ids_to_track = []
         for _, row in scored[:limit]:
-            # Update access tracking
-            await self._record_access(row["id"])
+            episode_ids_to_track.append(row["id"])
 
             episodes.append(
                 Episode(
@@ -264,6 +259,10 @@ class EpisodicMemoryStore:
                     access_count=row["access_count"],
                 )
             )
+
+        # Batch update access tracking for all episodes
+        if episode_ids_to_track:
+            await self._record_access_batch(episode_ids_to_track)
 
         return episodes
 
@@ -348,41 +347,52 @@ class EpisodicMemoryStore:
 
     async def _record_access(self, episode_id: int) -> None:
         """Record that an episode was accessed."""
+        await self._record_access_batch([episode_id])
+
+    async def _record_access_batch(self, episode_ids: list[int]) -> None:
+        """Batch record that multiple episodes were accessed."""
+        if not episode_ids:
+            return
+
         ts = int(time.time())
 
         async with get_db_connection(self.database_url) as conn:
-            # Update episode
-            query, params = convert_query_to_postgres(
-                """
+            # Batch update episodes
+            placeholders = ",".join(f"${i+1}" for i in range(len(episode_ids)))
+            query = f"""
                 UPDATE episodes 
-                SET last_accessed = $1, access_count = access_count + 1
-                WHERE id = $2
-                """,
-                (ts, episode_id),
-            )
+                SET last_accessed = ${len(episode_ids) + 1}, 
+                    access_count = access_count + 1
+                WHERE id IN ({placeholders})
+            """
+            params = list(episode_ids) + [ts]
             await conn.execute(query, *params)
 
-            # Log access
-            query, params = convert_query_to_postgres(
-                "INSERT INTO episode_accesses (episode_id, accessed_at, access_type) VALUES ($1, $2, $3)",
-                (episode_id, ts, "retrieval"),
-            )
-            await conn.execute(query, *params)
+            # Batch insert access logs
+            access_records = [(ep_id, ts, "retrieval") for ep_id in episode_ids]
+            query = """
+                INSERT INTO episode_accesses (episode_id, accessed_at, access_type) 
+                VALUES ($1, $2, $3)
+            """
+            # Execute in chunks to avoid parameter limits
+            chunk_size = 100
+            for i in range(0, len(access_records), chunk_size):
+                chunk = access_records[i:i + chunk_size]
+                await conn.executemany(query, chunk)
 
     async def get_episode(self, episode_id: int) -> Episode | None:
         """Get a specific episode by ID."""
         await self.init()
 
-        query, params = convert_query_to_postgres(
-            "SELECT * FROM episodes WHERE id = $1", (episode_id,)
-        )
+        query = "SELECT * FROM episodes WHERE id = $1"
+        params = (episode_id,)
         async with get_db_connection(self.database_url) as conn:
             row = await conn.fetchrow(query, *params)
 
         if not row:
             return None
 
-        await self._record_access(episode_id)
+        await self._record_access_batch([episode_id])
 
         return Episode(
             id=row["id"],
@@ -403,48 +413,13 @@ class EpisodicMemoryStore:
     @staticmethod
     def _cosine_similarity(a: list[float], b: list[float]) -> float:
         """Calculate cosine similarity."""
-        if not a or not b or len(a) != len(b):
-            return 0.0
+        from app.utils.text_processing import cosine_similarity
 
-        import math
-
-        dot = sum(x * y for x, y in zip(a, b))
-        norm_a = math.sqrt(sum(x * x for x in a))
-        norm_b = math.sqrt(sum(y * y for y in b))
-
-        if norm_a == 0.0 or norm_b == 0.0:
-            return 0.0
-
-        return dot / (norm_a * norm_b)
+        return cosine_similarity(a, b)
 
     @staticmethod
     def _extract_keywords(text: str) -> list[str]:
         """Extract keywords from text."""
-        stop_words = {
-            "the",
-            "a",
-            "an",
-            "and",
-            "or",
-            "but",
-            "in",
-            "on",
-            "at",
-            "to",
-            "for",
-            "of",
-            "with",
-            "by",
-            "from",
-            "is",
-            "was",
-        }
+        from app.utils.text_processing import extract_keywords
 
-        words = text.lower().split()
-        keywords = [
-            w.strip(".,!?;:\"'()[]{}")
-            for w in words
-            if w.strip(".,!?;:\"'()[]{}") not in stop_words and len(w) > 2
-        ]
-
-        return keywords
+        return extract_keywords(text)

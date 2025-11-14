@@ -9,7 +9,8 @@ import time
 from collections import deque
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import Any
+from typing import Any, TypedDict
+from dataclasses import dataclass
 
 from aiogram import Bot, Router
 from aiogram.enums import ParseMode
@@ -22,7 +23,7 @@ from app.persona import SYSTEM_PERSONA
 from app.services.calculator import calculator_tool, CALCULATOR_TOOL_DEFINITION
 from app.services.weather import weather_tool, WEATHER_TOOL_DEFINITION
 from app.services.currency import currency_tool, CURRENCY_TOOL_DEFINITION
-from app.services.polls import polls_tool, POLLS_TOOL_DEFINITION
+from app.services.polls import polls_tool, POLLS_TOOL_DEFINITION, _active_polls
 from app.services.search_tool import search_web_tool, SEARCH_WEB_TOOL_DEFINITION
 from app.services.image_generation import (
     ImageGenerationService,
@@ -83,6 +84,8 @@ from app.handlers.bot_learning_integration import (
 )
 from app.services.typing import typing_indicator
 from app.services.conversation_formatter import sanitize_placeholder_text
+from app.infrastructure.db_utils import get_db_connection
+from app.utils.persona_helpers import get_response
 
 router = Router()
 
@@ -90,17 +93,30 @@ router = Router()
 ERROR_FALLBACK = "Ґеміні знову тупить. Спробуй пізніше."
 EMPTY_REPLY = "Я не вкурив, що ти хочеш. Розпиши конкретніше — і я вже кручусь."
 BANNED_REPLY = "Ти для гряга в бані. Йди погуляй."
-THROTTLED_REPLY = "Занадто багато повідомлень. Почекай {minutes} хв."
+THROTTLED_REPLY = "Занадто багато повідомлень. Почекай {seconds} секунд."
 
 
 LOGGER = logging.getLogger(__name__)
+
+# Constants
+TELEGRAM_MESSAGE_LIMIT = 4096
+CONTEXT_TTL_SECONDS = 120
+MAX_EXCERPT_LENGTH = 200
+MIN_MEMORY_TEXT_LENGTH = 3
+MAX_POLL_OPTIONS = 10
+DEFAULT_VIDEO_DESCRIPTION_MESSAGES = 20
+DEFAULT_MAX_FACTS = 10
+UNANSWERED_TRIGGER_THRESHOLD_SECONDS = 120
+
+# Legacy constant (kept for backward compatibility, use CONTEXT_TTL_SECONDS instead)
+_CONTEXT_TTL_SECONDS = CONTEXT_TTL_SECONDS
 
 
 def _safe_html_payload(
     text: str,
     *,
     wrap: tuple[str, str] | None = None,
-    limit: int = 4096,
+    limit: int = TELEGRAM_MESSAGE_LIMIT,
     ellipsis: bool = False,
     already_html: bool = False,
 ) -> str:
@@ -143,39 +159,755 @@ def _safe_html_payload(
         truncated = truncated[:-1]
 
 
-def _get_response(
-    key: str,
+# Import get_response from shared utility (replaces local _get_response)
+_get_response = get_response  # Alias for backward compatibility
+
+
+def _build_user_message_query(
+    chat_id: int, thread_id: int | None, user_id: int
+) -> tuple[str, tuple]:
+    """Build query for fetching most recent user message."""
+    if thread_id is None:
+        return (
+            "SELECT id, role, user_id, external_user_id, ts FROM messages "
+            "WHERE chat_id = $1 AND thread_id IS NULL AND user_id = $2 "
+            "ORDER BY id DESC LIMIT 1",
+            (chat_id, user_id),
+        )
+    return (
+        "SELECT id, role, user_id, external_user_id, ts FROM messages "
+        "WHERE chat_id = $1 AND thread_id = $2 AND user_id = $3 "
+        "ORDER BY id DESC LIMIT 1",
+        (chat_id, thread_id, user_id),
+    )
+
+
+async def _check_unanswered_trigger(
+    chat_id: int,
+    thread_id: int | None,
+    user_id: int,
+    store: ContextStore,
+    data: dict[str, Any],
+    threshold_seconds: int = UNANSWERED_TRIGGER_THRESHOLD_SECONDS,
+) -> bool:
+    """
+    Check if there's an unanswered trigger from this user.
+
+    Returns True if message should be skipped, False otherwise.
+    """
+    current_ts = int(time.time())
+
+    # Check if there's currently processing happening for this user
+    # If so, we know a response is being generated, so don't skip the message
+    lock_key = (chat_id, user_id)
+    processing_check = data.get("_processing_lock_check")
+    is_processing = False
+    if processing_check:
+        is_processing = await processing_check(lock_key)
+
+    async with get_db_connection(store._database_url) as conn:
+        # Query for the most recent message from this user in this chat/thread
+        # This will be the PREVIOUS message (before the current one being processed)
+        query, params = _build_user_message_query(chat_id, thread_id, user_id)
+        user_last_row = await conn.fetchrow(query, *params)
+
+        if user_last_row and user_last_row["role"] == "user":
+            # Check if the unanswered trigger is recent enough to still block
+            trigger_age = current_ts - user_last_row["ts"]
+            if trigger_age > threshold_seconds:
+                # Trigger is old enough - allow responses again (reset)
+                LOGGER.debug(
+                    f"Previous trigger from user {user_id} is old ({trigger_age}s), allowing response"
+                )
+            else:
+                # Found a recent user message from this user - check if there's ANY bot response after it
+                # Query for ANY bot message after this user's message (in the same chat/thread)
+                # This handles cases where other users' messages might be inserted between
+                if thread_id is None:
+                    next_query = """
+                        SELECT COUNT(*) as count FROM messages
+                        WHERE chat_id = $1 AND thread_id IS NULL AND id > $2 AND role = 'model'
+                        LIMIT 1
+                    """
+                    next_params = (chat_id, user_last_row["id"])
+                else:
+                    next_query = """
+                        SELECT COUNT(*) as count FROM messages
+                        WHERE chat_id = $1 AND thread_id = $2 AND id > $3 AND role = 'model'
+                        LIMIT 1
+                    """
+                    next_params = (chat_id, thread_id, user_last_row["id"])
+
+                next_row = await conn.fetchrow(next_query, *next_params)
+
+                # If there's no bot message after the user's message (count = 0),
+                # that means the user's trigger wasn't answered (and it's recent)
+                # BUT: If processing is currently active for this user, we know a response is being generated,
+                # so don't skip the message (the response just hasn't been saved to DB yet)
+                bot_response_count = next_row["count"] if next_row else 0
+                if bot_response_count == 0 and not is_processing:
+                    LOGGER.info(
+                        "Skipping trigger message - previous trigger from this user was not answered (recent)",
+                        extra={
+                            "chat_id": chat_id,
+                            "user_id": user_id,
+                            "previous_trigger_id": user_last_row["id"],
+                            "trigger_age_seconds": trigger_age,
+                        },
+                    )
+                    telemetry.increment_counter("chat.skipped_unanswered_trigger")
+                    # Do NOT store this message - it would create a blocking chain
+                    # Only the first unanswered trigger should block subsequent ones
+                    return True
+                elif bot_response_count == 0 and is_processing:
+                    LOGGER.debug(
+                        "Previous trigger from this user appears unanswered, but processing is active - allowing message",
+                        extra={
+                            "chat_id": chat_id,
+                            "user_id": user_id,
+                            "previous_trigger_id": user_last_row["id"],
+                        },
+                    )
+
+    return False
+
+
+async def _acquire_processing_lock(
+    lock_key: tuple[int, int],
+    data: dict[str, Any],
+    is_admin: bool,
+) -> bool:
+    """
+    Acquire processing lock.
+
+    Returns True if acquired, False if already processing.
+    """
+    if is_admin:
+        return True  # Admins bypass locks
+
+    # Check if processing (via middleware data)
+    processing_check = data.get("_processing_lock_check")
+    if processing_check:
+        is_processing = await processing_check(lock_key)
+        if is_processing:
+            return False  # Already processing
+
+    # Acquire lock
+    processing_set = data.get("_processing_lock_set")
+    if processing_set:
+        await processing_set(lock_key, True)
+        LOGGER.debug(
+            "Processing lock acquired for user %s in chat %s",
+            lock_key[1],
+            lock_key[0],
+        )
+
+    return True
+
+
+async def _release_processing_lock(
+    lock_key: tuple[int, int],
+    data: dict[str, Any],
+    is_admin: bool,
+) -> None:
+    """Release processing lock."""
+    if is_admin:
+        return  # Admins don't use locks
+
+    processing_set = data.get("_processing_lock_set")
+    if processing_set:
+        await processing_set(lock_key, False)
+        LOGGER.debug(
+            "Processing lock released for user %s in chat %s",
+            lock_key[1],
+            lock_key[0],
+        )
+
+
+async def _check_and_handle_rate_limit(
+    message: Message,
+    rate_limiter: RateLimiter | None,
+    is_admin: bool,
     persona_loader: Any | None,
-    default: str,
-    **kwargs: Any,
-) -> str:
-    """Get response from PersonaLoader if available, otherwise use default."""
-    if persona_loader is not None:
-        try:
-            persona = getattr(persona_loader, "persona", None)
-            bot_name = getattr(persona, "name", None) if persona is not None else None
-            bot_display = (
-                getattr(persona, "display_name", None) if persona is not None else None
+    bot_username: str,
+    user_id: int,
+) -> tuple[bool, Message | None]:
+    """
+    Check rate limit.
+
+    Returns tuple of (should_proceed, rate_limit_response_message).
+    If should_proceed is False, rate_limit_response_message may contain the response sent to user.
+    """
+    if is_admin or rate_limiter is None or message.from_user is None:
+        return (True, None)  # Admins bypass, or no rate limiter, or no user
+
+    allowed, remaining, retry_after = await rate_limiter.check_and_increment(
+        user_id=message.from_user.id
+    )
+    LOGGER.info(
+        f"Rate limit check: user_id={user_id}, allowed={allowed}, remaining={remaining}, retry_after={retry_after}"
+    )
+    if not allowed:
+        # Only send error message if we haven't sent one recently (10 min cooldown)
+        should_show_error = rate_limiter.should_send_error_message(message.from_user.id)
+        rate_limit_message = None
+        if should_show_error:
+            wait_minutes = max((retry_after + 59) // 60, 1)
+            wait_seconds = wait_minutes * 60
+            throttle_text = _get_response(
+                "throttle_notice",
+                persona_loader,
+                THROTTLED_REPLY,
+                seconds=wait_seconds,
             )
-            if bot_name and "bot_name" not in kwargs:
-                kwargs["bot_name"] = bot_name
-            if bot_display and "bot_display_name" not in kwargs:
-                kwargs["bot_display_name"] = bot_display
-        except Exception:
-            LOGGER.exception(
-                "Failed to inject persona variables into response template"
+            rate_limit_message = await message.reply(throttle_text)
+        # Silently block otherwise (error already shown recently)
+        telemetry.increment_counter(
+            "chat.rate_limited",
+            user_id=message.from_user.id,
+            remaining=remaining,
+        )
+        return (False, rate_limit_message)
+
+    return (True, None)
+
+
+async def _generate_gemini_response(
+    ctx: MessageHandlerContext,
+    system_prompt: str,
+    history: list[dict],
+    user_parts: list[dict],
+    tool_definitions: list[dict] | None,
+    tool_callbacks: dict,
+    text_content: str | None,
+) -> dict[str, Any]:
+    """
+    Generate response from Gemini API.
+
+    Returns dict with keys: reply_text, response_time_ms, thinking_msg,
+    thinking_message_sent, perf_timings (updated).
+    """
+    thinking_message_sent = False
+    thinking_placeholder_sent = False
+    thinking_msg: Message | None = None
+    response_time_ms = 0
+    reply_text = ""
+
+    async with typing_indicator(ctx.bot, ctx.chat_id):
+        generation_start_time = time.time()
+
+        # Log what we're sending to Gemini
+        LOGGER.info(
+            f"Sending to Gemini: history_length={len(history)}, "
+            f"user_parts_count={len(user_parts)}, "
+            f"tools_count={len(tool_definitions) if tool_definitions else 0}, "
+            f"system_prompt_length={len(system_prompt) if system_prompt else 0}"
+        )
+
+        # Log first user part (text only, not media)
+        if user_parts:
+            first_part = user_parts[0]
+            if isinstance(first_part, dict) and "text" in first_part:
+                LOGGER.info(
+                    f"First user part text: {first_part['text'][:MAX_EXCERPT_LENGTH]}"
+                )
+
+            # Log media breakdown
+            media_count = sum(
+                1
+                for p in user_parts
+                if isinstance(p, dict) and ("inline_data" in p or "file_data" in p)
+            )
+            if media_count > 0:
+                LOGGER.info(f"Sending {media_count} media items to Gemini")
+
+        if ctx.settings.show_thinking_to_users:
+            LOGGER.info("Thinking placeholder enabled; sending immediate reply")
+            try:
+                thinking_msg = await ctx.message.reply("🤔 Думаю...")
+            except Exception as exc:
+                LOGGER.warning(f"Failed to send thinking placeholder: {exc}")
+                thinking_msg = None
+            else:
+                thinking_placeholder_sent = True
+                thinking_message_sent = True
+
+        try:
+            gemini_start = time.time()
+            response_data = await ctx.gemini_client.generate(
+                system_prompt=system_prompt,
+                history=history,
+                user_parts=user_parts,
+                tools=tool_definitions,
+                tool_callbacks=tool_callbacks,  # type: ignore[arg-type]
+            )
+            gemini_time = int((time.time() - gemini_start) * 1000)
+            ctx.perf_timings["gemini_time_ms"] = gemini_time
+            reply_text = response_data.get("text", "")
+            thinking_text = (response_data.get("thinking", "") or "").strip()
+
+            LOGGER.info(
+                "Gemini API call completed",
+                extra={
+                    "chat_id": ctx.chat_id,
+                    "user_id": ctx.user_id,
+                    "gemini_time_ms": gemini_time,
+                    "response_length": len(reply_text),
+                },
             )
 
-        return persona_loader.get_response(key, **kwargs)
+            # If Gemini returned only thinking content, retry without thinking enabled
+            if (not reply_text or reply_text.isspace()) and thinking_text:
+                LOGGER.info(
+                    "Gemini returned reasoning without final text; retrying without thinking output"
+                )
+                gemini_retry_start = time.time()
+                response_data = await ctx.gemini_client.generate(
+                    system_prompt=system_prompt,
+                    history=history,
+                    user_parts=user_parts,
+                    tools=tool_definitions,
+                    tool_callbacks=tool_callbacks,  # type: ignore[arg-type]
+                    include_thinking=False,
+                )
+                gemini_retry_time = int((time.time() - gemini_retry_start) * 1000)
+                gemini_time += gemini_retry_time
+                ctx.perf_timings["gemini_time_ms"] = gemini_time
+                reply_text = response_data.get("text", "")
+                thinking_text = (response_data.get("thinking", "") or "").strip()
 
-    if kwargs:
-        try:
-            return default.format(**kwargs)
-        except KeyError:
+                LOGGER.info(
+                    "Gemini API retry completed",
+                    extra={
+                        "chat_id": ctx.chat_id,
+                        "user_id": ctx.user_id,
+                        "gemini_retry_time_ms": gemini_retry_time,
+                        "total_gemini_time_ms": gemini_time,
+                    },
+                )
+
+            # Handle responses with thinking content (show reasoning process)
+            show_thinking = ctx.settings.show_thinking_to_users and bool(thinking_text)
+            if show_thinking:
+                LOGGER.info(
+                    "Gemini returned thinking content, showing reasoning process to user"
+                )
+                if thinking_msg is None:
+                    try:
+                        thinking_msg = await ctx.message.reply("🤔 Думаю...")
+                    except Exception as exc:
+                        LOGGER.warning(f"Failed to send thinking placeholder: {exc}")
+                        thinking_msg = None
+                if thinking_msg is not None:
+                    thinking_display = _safe_html_payload(
+                        thinking_text,
+                        wrap=("<i>", "</i>"),
+                        ellipsis=True,
+                    )
+
+                    try:
+                        await thinking_msg.edit_text(
+                            thinking_display,
+                            parse_mode=ParseMode.HTML,
+                            disable_web_page_preview=True,
+                        )
+                    except Exception as exc:
+                        LOGGER.warning(f"Failed to edit thinking message: {exc}")
+                        thinking_message_sent = False
+                        thinking_placeholder_sent = False
+                    else:
+                        thinking_placeholder_sent = True
+                        thinking_message_sent = True
+                else:
+                    thinking_message_sent = False
+                    thinking_placeholder_sent = False
+            elif thinking_text:
+                LOGGER.debug(
+                    "Thinking content suppressed (length=%s)", len(thinking_text)
+                )
+                thinking_message_sent = thinking_placeholder_sent
+            else:
+                thinking_message_sent = thinking_placeholder_sent
+
+            # Check if tools were disabled during generation (API overload fallback)
+            if ctx.gemini_client.tools_fallback_disabled and tool_definitions:
+                LOGGER.warning(
+                    "Tools were disabled during Gemini call due to API errors. "
+                    "Some features (image generation, web search, etc.) may not work."
+                )
+                # Check if user asked for a tool feature
+                user_text_lower = (text_content or "").lower()
+                tool_keywords = [
+                    "намалюй",
+                    "малюнок",
+                    "зображення",
+                    "картинк",
+                    "фото",
+                    "generate",
+                    "draw",
+                    "image",
+                    "picture",
+                    "photo",
+                    "пошук",
+                    "знайди",
+                    "search",
+                    "погода",
+                    "weather",
+                ]
+                if any(keyword in user_text_lower for keyword in tool_keywords):
+                    # User likely asked for a tool feature - provide helpful error
+                    if not reply_text or reply_text.isspace():
+                        reply_text = (
+                            "⚠️ Зараз API перевантажений і ця функція тимчасово недоступна. "
+                            "Спробуй пізніше (через 5-10 хвилин)."
+                        )
+                    else:
+                        reply_text = (
+                            "⚠️ Зараз API перевантажений і деякі функції тимчасово недоступні. "
+                            "Спробуй пізніше.\n\n" + reply_text
+                        )
+
+            # Calculate response time
+            generation_end_time = time.time()
+            response_time_ms = int((generation_end_time - generation_start_time) * 1000)
+
+            telemetry.increment_counter("chat.reply_success")
+
+        except GeminiContentBlockedError as exc:
+            telemetry.increment_counter("chat.content_blocked")
             LOGGER.warning(
-                "Missing variable while formatting default response for key=%s", key
+                "Content blocked by Gemini: block_reason=%s, chat=%s, user=%s",
+                exc.block_reason,
+                ctx.chat_id,
+                ctx.user_id,
             )
-    return default
+            reply_text = (
+                "Вибач, але мої фільтри безпеки не дозволили мені обробити це повідомлення. "
+                "Спробуй переформулювати або відправити інше повідомлення."
+            )
+        except GeminiError:
+            telemetry.increment_counter("chat.reply_failure")
+            reply_text = ""  # Will be set by caller with error fallback
+
+    return {
+        "reply_text": reply_text,
+        "response_time_ms": response_time_ms,
+        "thinking_msg": thinking_msg,
+        "thinking_message_sent": thinking_message_sent,
+        "perf_timings": ctx.perf_timings,
+    }
+
+
+async def _process_and_send_response(
+    ctx: MessageHandlerContext,
+    reply_text: str,
+    tools_used_in_request: list[str],
+    thinking_msg: Message | None,
+    thinking_message_sent: bool,
+    edit_image_tool: Any | None,
+    generate_image_tool: Any | None,
+    raw_text: str | None,
+    text_content: str | None,
+    response_time_ms: int,
+) -> Message | None:
+    """
+    Process, clean, and send response.
+
+    Returns sent message or None.
+    """
+    # Comprehensive response cleaning
+    original_reply = reply_text
+    reply_text = _clean_response_text(reply_text)
+
+    # Log if we had to clean metadata from the response
+    if original_reply != reply_text and original_reply:
+        LOGGER.warning(
+            "Cleaned metadata from response in chat %s: original_length=%d, cleaned_length=%d",
+            ctx.chat_id,
+            len(original_reply),
+            len(reply_text),
+        )
+        LOGGER.debug(
+            f"Original response contained: {original_reply[:MAX_EXCERPT_LENGTH]}"
+        )
+
+    # Fallback: force image generation/edit if Gemini returned nothing but the user clearly asked for it
+    # OR if the response contained tool call descriptions that got filtered out
+    tool_description_detected = False
+    if original_reply and original_reply != reply_text:
+        lower_original = original_reply.lower()
+        tool_keywords = [
+            "tool_call",
+            "function_call",
+            "generate_image",
+            "edit_image",
+            "search_web",
+        ]
+        tool_description_detected = any(kw in lower_original for kw in tool_keywords)
+
+    if (
+        ctx.settings.enable_image_generation
+        and ctx.image_gen_service is not None
+        and (
+            (not reply_text or reply_text.isspace())
+            or (tool_description_detected and len(reply_text) < 20)
+        )
+    ):
+        if tool_description_detected:
+            LOGGER.warning(
+                "Tool call description detected in response instead of actual tool call. Triggering fallback."
+            )
+        fallback_prompt = (raw_text or "").strip()
+        if fallback_prompt:
+            if ctx.bot_username:
+                fallback_prompt = re.sub(
+                    rf"@{re.escape(ctx.bot_username)}\\b",
+                    "",
+                    fallback_prompt,
+                    flags=re.IGNORECASE,
+                ).strip()
+            if fallback_prompt.startswith("/"):
+                fallback_prompt = fallback_prompt[1:].strip()
+
+        fallback_payload: dict[str, Any] | None = None
+        fallback_success = False
+
+        # Try edit fallback first if it looks like an image edit request
+        if (
+            fallback_prompt
+            and "edit_image" not in tools_used_in_request
+            and _looks_like_image_edit_request(fallback_prompt)
+            and edit_image_tool is not None
+        ):
+            LOGGER.info(
+                "Gemini skipped edit_image tool; performing fallback edit",
+                extra={
+                    "chat_id": ctx.chat_id,
+                    "message_id": ctx.message.message_id,
+                },
+            )
+            try:
+                fallback_raw = await edit_image_tool({"prompt": fallback_prompt})
+                fallback_payload = json.loads(fallback_raw)
+            except json.JSONDecodeError as exc:
+                LOGGER.error(f"Failed to parse edit_image response: {exc}")
+                fallback_payload = {
+                    "success": False,
+                    "error": "Помилка парсингу відповіді",
+                }
+            except Exception as exc:
+                LOGGER.error(f"Fallback edit_image failed: {exc}", exc_info=True)
+                fallback_payload = {
+                    "success": False,
+                    "error": "Не вийшло відредагувати, сервіс знову тупив.",
+                }
+            else:
+                tools_used_in_request.append("edit_image")
+
+        # If edit fallback didn't trigger, try generation fallback
+        if (
+            not fallback_payload
+            and fallback_prompt
+            and "generate_image" not in tools_used_in_request
+            and _looks_like_image_generation_request(fallback_prompt)
+            and generate_image_tool is not None
+        ):
+            LOGGER.info(
+                "Gemini skipped generate_image tool; performing fallback generation",
+                extra={
+                    "chat_id": ctx.chat_id,
+                    "message_id": ctx.message.message_id,
+                },
+            )
+            try:
+                fallback_raw = await generate_image_tool({"prompt": fallback_prompt})
+                fallback_payload = json.loads(fallback_raw)
+            except json.JSONDecodeError as exc:
+                LOGGER.error(f"Failed to parse generate_image response: {exc}")
+                fallback_payload = {
+                    "success": False,
+                    "error": "Помилка парсингу відповіді",
+                }
+            except Exception as exc:
+                LOGGER.error(
+                    f"Fallback generate_image failed: {exc}",
+                    exc_info=True,
+                )
+                fallback_payload = {
+                    "success": False,
+                    "error": "Не вийшло намалювати, щось перегрілося.",
+                }
+            else:
+                tools_used_in_request.append("generate_image")
+
+        if fallback_payload:
+            fallback_success = bool(fallback_payload.get("success"))
+            reply_text = fallback_payload.get(
+                "message" if fallback_success else "error",
+                reply_text,
+            )
+            if fallback_success and not reply_text:
+                reply_text = "Готово. Лови картинку."
+            if not fallback_success and not reply_text:
+                reply_text = "Нічого не вийшло — сервіс брикнувся."
+
+    # Memory-tool specific fallback: if Gemini returned nothing but a memory tool was used, confirm action
+    if (not reply_text or reply_text.isspace()) and tools_used_in_request:
+        if "forget_all_memories" in tools_used_in_request:
+            reply_text = "Готово. Я забув усе про тебе в цьому чаті."
+        elif "remember_memory" in tools_used_in_request:
+            reply_text = "Запам'ятав."
+        elif "update_memory" in tools_used_in_request:
+            reply_text = "Оновив."
+        elif "forget_memory" in tools_used_in_request:
+            reply_text = "Видалив."
+
+    if not reply_text or reply_text.isspace():
+        reply_text = _get_response(
+            "empty_reply",
+            ctx.persona_loader,
+            EMPTY_REPLY,
+            bot_username=ctx.bot_username,
+        )
+
+    reply_trimmed = reply_text[:TELEGRAM_MESSAGE_LIMIT]
+    # Convert markdown to HTML (handles bold, italic, strikethrough, spoilers)
+    formatted = _format_for_telegram(reply_trimmed)
+    # Telegram HTML mode handles newlines automatically - no br tags needed
+    reply_payload = _safe_html_payload(formatted, already_html=True)
+
+    response_message: Message | None = None
+
+    if thinking_message_sent and thinking_msg is not None:
+        try:
+            await thinking_msg.edit_text(
+                reply_payload,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            response_message = thinking_msg
+        except Exception as exc:
+            LOGGER.warning(
+                "Failed to replace thinking message with final answer: %s", exc
+            )
+            thinking_message_sent = False
+
+    if not thinking_message_sent or thinking_msg is None:
+        LOGGER.debug(
+            f"Sending response to chat {ctx.chat_id}: "
+            f"length={len(reply_payload)}, message_id={ctx.message.message_id}"
+        )
+        try:
+            response_message = await ctx.message.reply(
+                reply_payload,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            if response_message is not None:
+                LOGGER.info(
+                    f"Response sent successfully to chat {ctx.chat_id}: "
+                    f"response_id={response_message.message_id}"
+                )
+        except Exception as exc:
+            LOGGER.error(
+                f"Failed to send response message to chat {ctx.chat_id}: {exc}",
+                exc_info=True,
+            )
+            response_message = None
+
+    # Always save bot response to DB, even if sending failed
+    # This ensures the unanswered trigger check works correctly
+    if response_message is None:
+        LOGGER.warning(
+            f"Response message is None for chat {ctx.chat_id} (message_id={ctx.message.message_id}) - saving to DB anyway"
+        )
+
+    model_meta = _build_model_metadata(
+        response=response_message,
+        chat_id=ctx.chat_id,
+        thread_id=ctx.thread_id,
+        bot_username=ctx.bot_username,
+        original=ctx.message,
+        original_text=text_content,
+    )
+    # Add flag to metadata if sending failed
+    if response_message is None:
+        model_meta["send_failed"] = True
+    bot_display_name = model_meta.get("name") or "gryag"
+
+    model_embedding_start = time.time()
+    model_embedding = await ctx.gemini_client.embed_text(reply_trimmed)
+    model_embedding_time = int((time.time() - model_embedding_start) * 1000)
+
+    db_save_start = time.time()
+    try:
+        await ctx.store.add_message(
+            chat_id=ctx.chat_id,
+            thread_id=ctx.thread_id,
+            user_id=None,
+            role="model",
+            text=reply_trimmed,
+            media=None,
+            metadata=model_meta,
+            embedding=model_embedding,
+            retention_days=ctx.settings.retention_days,
+            sender=MessageSender(
+                role="assistant",
+                name=bot_display_name,
+                username=_normalize_username(ctx.bot_username),
+                is_bot=True,
+            ),
+        )
+        db_save_time = int((time.time() - db_save_start) * 1000)
+        ctx.perf_timings["db_save_time_ms"] = db_save_time
+    except Exception as exc:
+        LOGGER.error(
+            f"Failed to save bot response to DB for chat {ctx.chat_id}: {exc}",
+            exc_info=True,
+        )
+        # Still log the timing even if save failed
+        db_save_time = int((time.time() - db_save_start) * 1000)
+        ctx.perf_timings["db_save_time_ms"] = db_save_time
+
+    # Log total processing time with breakdown
+    total_processing_time = int((time.time() - ctx.processing_start_time) * 1000)
+    perf_summary = {
+        "chat_id": ctx.chat_id,
+        "user_id": ctx.user_id,
+        "message_id": ctx.message.message_id,
+        "total_time_ms": total_processing_time,
+        **ctx.perf_timings,  # Include all collected timing metrics
+    }
+    LOGGER.info(
+        "Message processing completed",
+        extra=perf_summary,
+    )
+
+    # Bot Self-Learning: Track this interaction for learning
+    if (
+        ctx.settings.enable_bot_self_learning
+        and ctx.bot_profile is not None
+        and ctx.bot_id is not None
+    ):
+        # Estimate token count
+        estimated_tokens = estimate_token_count(reply_trimmed)
+
+        # Track interaction in background (non-blocking)
+        asyncio.create_task(
+            track_bot_interaction(
+                bot_profile=ctx.bot_profile,
+                bot_id=ctx.bot_id,
+                chat_id=ctx.chat_id,
+                thread_id=ctx.thread_id,
+                message_id=response_message.message_id if response_message else None,
+                response_text=reply_trimmed,
+                response_time_ms=response_time_ms,
+                token_count=estimated_tokens,
+                tools_used=tools_used_in_request if tools_used_in_request else None,
+            )
+        )
+
+    return response_message
 
 
 _RECENT_CONTEXT: dict[tuple[int, int | None], deque[dict[str, Any]]] = {}
@@ -686,7 +1418,7 @@ async def _remember_context_message(
             "user_id": message.from_user.id,
             "name": message.from_user.full_name,
             "username": _normalize_username(message.from_user.username),
-            "excerpt": (text or media_summary or "")[:200] or None,
+            "excerpt": (text or media_summary or "")[:MAX_EXCERPT_LENGTH] or None,
             "text": text or media_summary,
             "media_parts": media_parts,
         }
@@ -778,7 +1510,7 @@ def _build_user_metadata(
             meta["reply_to_username"] = _normalize_username(reply.from_user.username)
         excerpt = _extract_text(reply)
         if excerpt:
-            meta["reply_excerpt"] = excerpt[:200]
+            meta["reply_excerpt"] = excerpt[:MAX_EXCERPT_LENGTH]
     elif fallback_context:
         # Only include essential fallback context to reduce confusion
         if fallback_context.get("message_id") is not None:
@@ -851,7 +1583,7 @@ def _build_model_metadata(
         meta["reply_to_username"] = _normalize_username(origin_user.username)
     excerpt = original_text.strip()
     if excerpt:
-        meta["reply_excerpt"] = " ".join(excerpt.split())[:200]
+        meta["reply_excerpt"] = " ".join(excerpt.split())[:MAX_EXCERPT_LENGTH]
     return {key: value for key, value in meta.items() if value not in (None, "")}
 
 
@@ -949,7 +1681,7 @@ async def _get_video_description_from_history(
         messages = await store.recent(
             chat_id=chat_id,
             thread_id=thread_id,
-            max_messages=20,  # Check last 20 messages
+            max_messages=DEFAULT_VIDEO_DESCRIPTION_MESSAGES,  # Check last 20 messages
         )
 
         # Find the video message and the bot's response after it
@@ -1000,7 +1732,7 @@ async def _enrich_with_user_profile(
             include_facts=True,
             include_relationships=True,
             min_confidence=settings.fact_confidence_threshold,
-            max_facts=10,
+            max_facts=DEFAULT_MAX_FACTS,
         )
 
         if summary and len(summary) > 20:  # Has meaningful content
@@ -1446,109 +2178,15 @@ async def handle_group_message(
     # This check is per-user: if user A's trigger wasn't answered, only user A's next triggers are skipped
     # Only block if the unanswered trigger is recent (within last 2 minutes) to allow reset after time passes
     # NOTE: This check runs BEFORE storing the current message, so we check the PREVIOUS message
-    from app.infrastructure.db_utils import get_db_connection
-    import time
-
-    current_ts = int(time.time())
-    unanswered_threshold_seconds = (
-        120  # 2 minutes - after this, allow responses again (reduced from 5 min)
+    should_skip = await _check_unanswered_trigger(
+        chat_id=chat_id,
+        thread_id=thread_id,
+        user_id=user_id,
+        store=store,
+        data=data,
     )
-
-    # Check if there's currently processing happening for this user
-    # If so, we know a response is being generated, so don't skip the message
-    lock_key = (chat_id, user_id)
-    processing_check = data.get("_processing_lock_check")
-    is_processing = False
-    if processing_check:
-        is_processing = await processing_check(lock_key)
-
-    async with get_db_connection(store._database_url) as conn:
-        # Query for the most recent message from this user in this chat/thread
-        # This will be the PREVIOUS message (before the current one being processed)
-        if thread_id is None:
-            query = """
-                SELECT id, role, user_id, external_user_id, ts
-                FROM messages
-                WHERE chat_id = $1 AND thread_id IS NULL AND user_id = $2
-                ORDER BY id DESC
-                LIMIT 1
-            """
-            params = (chat_id, user_id)
-        else:
-            query = """
-                SELECT id, role, user_id, external_user_id, ts
-                FROM messages
-                WHERE chat_id = $1 AND thread_id = $2 AND user_id = $3
-                ORDER BY id DESC
-                LIMIT 1
-            """
-            params = (chat_id, thread_id, user_id)
-
-        user_last_row = await conn.fetchrow(query, *params)
-
-        if user_last_row and user_last_row["role"] == "user":
-            # Check if the unanswered trigger is recent enough to still block
-            trigger_age = current_ts - user_last_row["ts"]
-            if trigger_age > unanswered_threshold_seconds:
-                # Trigger is old enough - allow responses again (reset)
-                LOGGER.debug(
-                    f"Previous trigger from user {user_id} is old ({trigger_age}s), allowing response"
-                )
-            else:
-                # Found a recent user message from this user - check if there's a bot response after it
-                # Query for the next message after this user's message (in the same chat/thread)
-                if thread_id is None:
-                    next_query = """
-                        SELECT role FROM messages
-                        WHERE chat_id = $1 AND thread_id IS NULL AND id > $2
-                        ORDER BY id ASC
-                        LIMIT 1
-                    """
-                    next_params = (chat_id, user_last_row["id"])
-                else:
-                    next_query = """
-                        SELECT role FROM messages
-                        WHERE chat_id = $1 AND thread_id = $2 AND id > $3
-                        ORDER BY id ASC
-                        LIMIT 1
-                    """
-                    next_params = (chat_id, thread_id, user_last_row["id"])
-
-                next_row = await conn.fetchrow(next_query, *next_params)
-
-                # If there's no next message or the next message is not from the bot (role != 'model'),
-                # that means the user's trigger wasn't answered (and it's recent)
-                # BUT: If processing is currently active for this user, we know a response is being generated,
-                # so don't skip the message (the response just hasn't been saved to DB yet)
-                if (
-                    next_row is None or next_row["role"] != "model"
-                ) and not is_processing:
-                    LOGGER.info(
-                        "Skipping trigger message - previous trigger from this user was not answered (recent)",
-                        extra={
-                            "chat_id": message.chat.id,
-                            "message_id": message.message_id,
-                            "user_id": user_id,
-                            "previous_trigger_id": user_last_row["id"],
-                            "trigger_age_seconds": trigger_age,
-                        },
-                    )
-                    telemetry.increment_counter("chat.skipped_unanswered_trigger")
-                    # Do NOT store this message - it would create a blocking chain
-                    # Only the first unanswered trigger should block subsequent ones
-                    return
-                elif (
-                    next_row is None or next_row["role"] != "model"
-                ) and is_processing:
-                    LOGGER.debug(
-                        "Previous trigger from this user appears unanswered, but processing is active - allowing message",
-                        extra={
-                            "chat_id": message.chat.id,
-                            "message_id": message.message_id,
-                            "user_id": user_id,
-                            "previous_trigger_id": user_last_row["id"],
-                        },
-                    )
+    if should_skip:
+        return
 
     LOGGER.info(
         "Message addressed to bot - processing",
@@ -1565,45 +2203,34 @@ async def handle_group_message(
 
     # Processing lock: Check if already processing a message from this user
     # (Skip for admins)
-    if not is_admin:
-
-        # Check if processing (via middleware data)
-        processing_check = data.get("_processing_lock_check")
-        if processing_check:
-            is_processing = await processing_check(lock_key)
-            if is_processing:
-                # Drop the message silently
-                LOGGER.info(
-                    "Dropping bot-addressed message from user %s in chat %s "
-                    "(already processing previous message) - message_id=%s",
-                    user_id,
-                    chat_id,
-                    message.message_id,
-                )
-                telemetry.increment_counter(
-                    "chat.dropped_during_processing",
-                    user_id=user_id,
-                    chat_id=chat_id,
-                )
-                return  # Drop message
-
-        # Acquire lock
-        processing_set = data.get("_processing_lock_set")
-        if processing_set:
-            await processing_set(lock_key, True)
-            LOGGER.debug(
-                "Processing lock acquired for user %s in chat %s (message_id=%s)",
-                user_id,
-                chat_id,
-                message.message_id,
-            )
+    lock_acquired = await _acquire_processing_lock(lock_key, data, is_admin)
+    if not lock_acquired:
+        # Drop the message silently
+        LOGGER.info(
+            "Dropping bot-addressed message from user %s in chat %s "
+            "(already processing previous message) - message_id=%s",
+            user_id,
+            chat_id,
+            message.message_id,
+        )
+        telemetry.increment_counter(
+            "chat.dropped_during_processing",
+            user_id=user_id,
+            chat_id=chat_id,
+        )
+        return  # Drop message
 
     # Ensure lock is released in finally block
     try:
         try:
-            await _handle_bot_message_locked(
+            # Create context object
+            ctx = MessageHandlerContext(
                 message=message,
                 bot=bot,
+                chat_id=message.chat.id,
+                thread_id=message.message_thread_id,
+                user_id=user_id,
+                is_admin=is_admin,
                 settings=settings,
                 store=store,
                 gemini_client=gemini_client,
@@ -1612,11 +2239,13 @@ async def handle_group_message(
                 hybrid_search=hybrid_search,
                 episodic_memory=episodic_memory,
                 episode_monitor=episode_monitor,
+                multi_level_context_manager=multi_level_context_manager,
                 bot_profile=bot_profile,
                 bot_learning=bot_learning,
+                bot_username=bot_username,
+                bot_id=bot_id,
                 prompt_manager=prompt_manager,
                 feature_limiter=feature_limiter,
-                multi_level_context_manager=multi_level_context_manager,
                 redis_client=redis_client,
                 rate_limiter=rate_limiter,
                 persona_loader=persona_loader,
@@ -1624,14 +2253,11 @@ async def handle_group_message(
                 donation_scheduler=donation_scheduler,
                 memory_repo=memory_repo,
                 telegram_service=telegram_service,
-                bot_username=bot_username,
-                bot_id=bot_id,
-                is_admin=is_admin,
-                user_id=user_id,
-                chat_id=message.chat.id,
-                thread_id=message.message_thread_id,
                 data=data,
+                perf_timings={},
+                processing_start_time=0.0,
             )
+            await _handle_bot_message_locked(ctx)
         except Exception as handler_exc:
             LOGGER.critical(
                 f"Message handler crashed unexpectedly: {handler_exc}", exc_info=True
@@ -1649,106 +2275,46 @@ async def handle_group_message(
                 )
     finally:
         # Release lock
-        if not is_admin:
-            processing_set = data.get("_processing_lock_set")
-            if processing_set:
-                await processing_set(lock_key, False)
-                LOGGER.debug(
-                    "Processing lock released for user %s in chat %s (message_id=%s)",
-                    user_id,
-                    chat_id,
-                    message.message_id,
-                )
+        await _release_processing_lock(lock_key, data, is_admin)
 
 
-async def _handle_bot_message_locked(
-    message: Message,
-    bot: Bot,
-    settings: Settings,
-    store: ContextStore,
-    gemini_client: GeminiClient,
-    profile_store: UserProfileStore,
-    chat_profile_store: Any,
-    hybrid_search: HybridSearchEngine,
-    episodic_memory: EpisodicMemoryStore,
-    episode_monitor: Any,
-    bot_profile: Any,
-    bot_learning: Any,
-    prompt_manager: SystemPromptManager,
-    feature_limiter: Any,
-    multi_level_context_manager: MultiLevelContextManager,
-    redis_client: RedisLike | None,
-    rate_limiter: RateLimiter | None,
-    persona_loader: Any,
-    image_gen_service: ImageGenerationService | None,
-    donation_scheduler: Any,
-    memory_repo: MemoryRepository,
-    telegram_service: TelegramService | None,
-    bot_username: str,
-    bot_id: int | None,
-    is_admin: bool,
-    user_id: int,
-    chat_id: int,
-    thread_id: int | None,
-    data: dict[str, Any],
-) -> None:
-    """Handle bot-addressed message with processing lock acquired."""
+class MessageContextResult(TypedDict, total=False):
+    """Result of message context building."""
 
-    # Rate limiting (skip for admins)
-    if not is_admin and rate_limiter is not None and message.from_user:
-        allowed, remaining, retry_after = await rate_limiter.check_and_increment(
-            user_id=message.from_user.id
-        )
-        LOGGER.info(
-            f"Rate limit check: user_id={user_id}, allowed={allowed}, remaining={remaining}, retry_after={retry_after}"
-        )
-        if not allowed:
-            # Only send error message if we haven't sent one recently (10 min cooldown)
-            should_show_error = rate_limiter.should_send_error_message(
-                message.from_user.id
-            )
-            if should_show_error:
-                wait_minutes = max((retry_after + 59) // 60, 1)
-                throttle_text = _get_response(
-                    "throttle_notice",
-                    persona_loader,
-                    THROTTLED_REPLY,
-                    minutes=wait_minutes,
-                    bot_username=bot_username,
-                )
-                await message.reply(throttle_text)
-            # Silently block otherwise (error already shown recently)
-            telemetry.increment_counter(
-                "chat.rate_limited",
-                user_id=message.from_user.id,
-                remaining=remaining,
-            )
-            return
+    history: list[dict[str, Any]]
+    user_parts: list[dict[str, Any]]
+    system_prompt_with_profile: str
+    tool_definitions: list[dict[str, Any]]
+    raw_text: str
+    fallback_text: str | None
+    reply_context_for_history: dict[str, Any] | None
+    reply_context_for_block: dict[str, Any] | None
+    reply_media_raw_for_block: list[dict[str, Any]] | None
+    reply_media_parts_for_block: list[dict[str, Any]] | None
+    history_messages_for_block: list[dict[str, Any]]
+    use_system_context_block: bool
+    context_assembly: Any | None
+    context_manager: MultiLevelContextManager | None
+    use_multi_level: bool
+    perf_timings: dict[str, int]
+    text_content: str
+    media_summary: str | None
+    user_meta: dict[str, Any]
 
-    if not is_admin and await store.is_banned(chat_id, user_id):
-        telemetry.increment_counter("chat.banned_user")
-        # Only send ban notice if cooldown has passed (30 min default)
-        if await store.should_send_ban_notice(chat_id, user_id):
-            await message.reply(
-                _get_response(
-                    "banned_reply",
-                    persona_loader,
-                    BANNED_REPLY,
-                    bot_username=bot_username,
-                )
-            )
-        # Always return early for banned users (no processing)
-        return
 
-    # Start timing for performance monitoring
-    processing_start_time = time.time()
-    perf_timings: dict[str, int] = {}  # Track performance timings for summary
+async def _build_message_context(
+    ctx: MessageHandlerContext,
+) -> MessageContextResult:
+    """
+    Build complete message context including history, user parts, system prompt, and tools.
 
+    Returns a dictionary with all context-related data needed for Gemini API call.
+    """
     # Build multi-level context if services are available
-    context_manager = multi_level_context_manager
-    use_multi_level = settings.enable_multi_level_context and (
+    context_manager = ctx.multi_level_context_manager
+    use_multi_level = ctx.settings.enable_multi_level_context and (
         context_manager is not None
-        or (hybrid_search is not None and episodic_memory is not None)
+        or (ctx.hybrid_search is not None and ctx.episodic_memory is not None)
     )
 
     context_assembly = None
@@ -1757,36 +2323,36 @@ async def _handle_bot_message_locked(
         # Phase 3: Use multi-level context manager
         if context_manager is None:
             context_manager = MultiLevelContextManager(
-                db_path=settings.db_path,
-                settings=settings,
-                context_store=store,
-                profile_store=profile_store,
-                hybrid_search=hybrid_search,
-                episode_store=episodic_memory,
-                gemini_client=gemini_client,  # Pass for media capability detection
+                db_path=ctx.settings.db_path,
+                settings=ctx.settings,
+                context_store=ctx.store,
+                profile_store=ctx.profile_store,
+                hybrid_search=ctx.hybrid_search,
+                episode_store=ctx.episodic_memory,
+                gemini_client=ctx.gemini_client,  # Pass for media capability detection
             )
 
         # Get query text for context retrieval
-        text_content = (message.text or message.caption or "").strip()
+        text_content = (ctx.message.text or ctx.message.caption or "").strip()
 
         # Build multi-level context
         context_build_start = time.time()
         try:
             context_assembly = await context_manager.build_context(
-                chat_id=chat_id,
-                thread_id=thread_id,
-                user_id=user_id,
+                chat_id=ctx.chat_id,
+                thread_id=ctx.thread_id,
+                user_id=ctx.user_id,
                 query_text=text_content or "conversation",
-                max_tokens=settings.context_token_budget,
+                max_tokens=ctx.settings.context_token_budget,
             )
             context_build_time = int((time.time() - context_build_start) * 1000)
-            perf_timings["context_build_time_ms"] = context_build_time
+            ctx.perf_timings["context_build_time_ms"] = context_build_time
 
             LOGGER.info(
                 "Multi-level context assembled",
                 extra={
-                    "chat_id": chat_id,
-                    "user_id": user_id,
+                    "chat_id": ctx.chat_id,
+                    "user_id": ctx.user_id,
                     "total_tokens": context_assembly.total_tokens,
                     "immediate_count": len(context_assembly.immediate.messages),
                     "recent_count": (
@@ -1811,7 +2377,7 @@ async def _handle_bot_message_locked(
             LOGGER.error(
                 "Multi-level context assembly failed, falling back to simple history",
                 exc_info=e,
-                extra={"chat_id": chat_id, "user_id": user_id},
+                extra={"chat_id": ctx.chat_id, "user_id": ctx.user_id},
             )
             telemetry.increment_counter("context.fallback_to_simple")
             use_multi_level = False
@@ -1821,18 +2387,18 @@ async def _handle_bot_message_locked(
     if not use_multi_level:
         # Fallback: Use simple history retrieval
         context_build_start = time.time()
-        history = await store.recent(
-            chat_id=chat_id,
-            thread_id=thread_id,
-            max_messages=settings.max_messages,
+        history = await ctx.store.recent(
+            chat_id=ctx.chat_id,
+            thread_id=ctx.thread_id,
+            max_messages=ctx.settings.max_messages,
         )
         context_build_time = int((time.time() - context_build_start) * 1000)
-        perf_timings["context_build_time_ms"] = context_build_time
+        ctx.perf_timings["context_build_time_ms"] = context_build_time
         LOGGER.info(
             "Simple history retrieved",
             extra={
-                "chat_id": chat_id,
-                "thread_id": thread_id,
+                "chat_id": ctx.chat_id,
+                "thread_id": ctx.thread_id,
                 "history_count": len(history),
                 "build_time_ms": context_build_time,
             },
@@ -1840,12 +2406,16 @@ async def _handle_bot_message_locked(
 
         # Apply token-based truncation to prevent overflow
         history = _truncate_history_to_tokens(
-            history, max_tokens=settings.context_token_budget
+            history, max_tokens=ctx.settings.context_token_budget
         )
 
         # Summarize context if it's getting too long to prevent confusion
-        history = _summarize_long_context(history, settings.context_summary_threshold)
-        history = _summarize_long_context(history, settings.context_summary_threshold)
+        history = _summarize_long_context(
+            history, ctx.settings.context_summary_threshold
+        )
+        history = _summarize_long_context(
+            history, ctx.settings.context_summary_threshold
+        )
     else:
         # Multi-level context will be formatted later
         history = []
@@ -1857,25 +2427,25 @@ async def _handle_bot_message_locked(
     reply_media_parts_for_block: list[dict[str, Any]] | None = None
 
     history_messages_for_block: list[dict[str, Any]] = []
-    use_system_context_block = settings.enable_system_context_block
+    use_system_context_block = ctx.settings.enable_system_context_block
 
     # Collect media from message (photos, videos, audio, etc.)
     media_collect_start = time.time()
-    media_raw = await collect_media_parts(bot, message)
+    media_raw = await collect_media_parts(ctx.bot, ctx.message)
     media_collect_time = int((time.time() - media_collect_start) * 1000)
-    perf_timings["media_collect_time_ms"] = media_collect_time
+    ctx.perf_timings["media_collect_time_ms"] = media_collect_time
     if media_collect_time > 1000:  # Log if takes more than 1 second
         LOGGER.info(
             "Media collection completed",
             extra={
-                "chat_id": chat_id,
-                "message_id": message.message_id,
+                "chat_id": ctx.chat_id,
+                "message_id": ctx.message.message_id,
                 "media_count": len(media_raw),
                 "collect_time_ms": media_collect_time,
             },
         )
 
-    raw_text = (message.text or message.caption or "").strip()
+    raw_text = (ctx.message.text or ctx.message.caption or "").strip()
 
     # Check for YouTube URLs in the text
     from app.services.media import extract_youtube_urls
@@ -1885,7 +2455,7 @@ async def _handle_bot_message_locked(
         LOGGER.info(
             "Detected %d YouTube URL(s) in message %s",
             len(youtube_urls),
-            message.message_id,
+            ctx.message.message_id,
         )
         # Add YouTube URLs as file_uri media items
         for url in youtube_urls:
@@ -1898,7 +2468,7 @@ async def _handle_bot_message_locked(
             )
 
     # Build Gemini-compatible media parts
-    media_parts = gemini_client.build_media_parts(media_raw, logger=LOGGER)
+    media_parts = ctx.gemini_client.build_media_parts(media_raw, logger=LOGGER)
 
     # Log media types for debugging
     if media_parts:
@@ -1919,9 +2489,9 @@ async def _handle_bot_message_locked(
     trimmed_media_count = 0
     try:
         max_current_media = getattr(
-            settings,
+            ctx.settings,
             "gemini_max_media_items_current",
-            getattr(settings, "gemini_max_media_items", 28),
+            getattr(ctx.settings, "gemini_max_media_items", 28),
         )
         if isinstance(max_current_media, int) and max_current_media > 0:
             if len(media_parts) > max_current_media:
@@ -1937,20 +2507,10 @@ async def _handle_bot_message_locked(
             "Media trim step skipped due to configuration error", exc_info=True
         )
 
-    # Check for poll voting (numbers like "1", "2", "1,3", etc.)
-    poll_vote_result = await _handle_poll_vote_attempt(
-        raw_text, chat_id, thread_id, user_id
-    )
-    if poll_vote_result:
-        # FORMATTING DISABLED: Sending plain text, relying on system prompt
-        # poll_formatted = _format_for_telegram(poll_vote_result)
-        await message.reply(poll_vote_result, parse_mode=ParseMode.HTML)
-        return
-
     reply_context = None
     reply_media_parts: list[dict[str, Any]] | None = None
-    if message.reply_to_message:
-        reply = message.reply_to_message
+    if ctx.message.reply_to_message:
+        reply = ctx.message.reply_to_message
         key = (reply.chat.id, reply.message_thread_id)
         stored_queue = _RECENT_CONTEXT.get(key)
         if stored_queue:
@@ -1965,10 +2525,10 @@ async def _handle_bot_message_locked(
         # try to collect media directly from the reply message
         if not reply_context or not reply_context.get("media_parts"):
             try:
-                reply_media_raw = await collect_media_parts(bot, reply)
+                reply_media_raw = await collect_media_parts(ctx.bot, reply)
                 if reply_media_raw:
                     reply_media_raw_for_block = reply_media_raw
-                    reply_media_parts = gemini_client.build_media_parts(
+                    reply_media_parts = ctx.gemini_client.build_media_parts(
                         reply_media_raw, logger=LOGGER
                     )
                     if reply_media_parts:
@@ -1999,6 +2559,16 @@ async def _handle_bot_message_locked(
                                 "text": reply_text or _summarize_media(reply_media_raw),
                                 "excerpt": (reply_text or "")[:200] or None,
                                 "media_parts": reply_media_parts,
+                                "is_bot": (
+                                    reply.from_user.is_bot
+                                    if reply.from_user
+                                    else None
+                                ),
+                                "role": (
+                                    "model"
+                                    if reply.from_user and reply.from_user.is_bot
+                                    else "user"
+                                ),
                             }
                         else:
                             # Update existing context with media
@@ -2030,25 +2600,36 @@ async def _handle_bot_message_locked(
                     ),
                     "text": reply_text,
                     "excerpt": (reply_text or "")[:200] if reply_text else None,
+                    "is_bot": (
+                        reply.from_user.is_bot if reply.from_user else None
+                    ),
+                    "role": (
+                        "model"
+                        if reply.from_user and reply.from_user.is_bot
+                        else "user"
+                    ),
                 }
 
         if reply_context:
             reply_context_for_block = dict(reply_context)
 
     # Always store reply context for history injection if enabled and present
-    if reply_context and settings.include_reply_excerpt:
+    if reply_context and ctx.settings.include_reply_excerpt:
         reply_context_for_history = reply_context
 
     if use_system_context_block:
         target_thread_for_block = (
-            thread_id
-            if (settings.system_context_block_thread_only and thread_id is not None)
+            ctx.thread_id
+            if (
+                ctx.settings.system_context_block_thread_only
+                and ctx.thread_id is not None
+            )
             else None
         )
-        max_messages_for_block = settings.system_context_block_max_messages
+        max_messages_for_block = ctx.settings.system_context_block_max_messages
         try:
-            history_messages_for_block = await store.recent(
-                chat_id=chat_id,
+            history_messages_for_block = await ctx.store.recent(
+                chat_id=ctx.chat_id,
                 thread_id=target_thread_for_block,
                 max_messages=max_messages_for_block,
             )
@@ -2056,14 +2637,14 @@ async def _handle_bot_message_locked(
             LOGGER.exception("Failed to load history for system context block")
             history_messages_for_block = []
 
-    fallback_context = reply_context or _get_recent_context(chat_id, thread_id)
+    fallback_context = reply_context or _get_recent_context(ctx.chat_id, ctx.thread_id)
     fallback_text = fallback_context.get("text") if fallback_context else None
     media_summary = _summarize_media(media_raw)
 
     user_meta = _build_user_metadata(
-        message,
-        chat_id,
-        thread_id,
+        ctx.message,
+        ctx.chat_id,
+        ctx.thread_id,
         fallback_context=fallback_context,
     )
 
@@ -2085,11 +2666,11 @@ async def _handle_bot_message_locked(
         )
 
     # Add inline reply excerpt if enabled and available (after metadata)
-    if settings.include_reply_excerpt and reply_context:
+    if ctx.settings.include_reply_excerpt and reply_context:
         reply_text = reply_context.get("text") or reply_context.get("excerpt")
         if reply_text:
             # Truncate to configured max
-            max_chars = settings.reply_excerpt_max_chars
+            max_chars = ctx.settings.reply_excerpt_max_chars
             excerpt = reply_text[:max_chars]
             if len(reply_text) > max_chars:
                 excerpt = excerpt + "..."
@@ -2130,22 +2711,22 @@ async def _handle_bot_message_locked(
     text_content = raw_text or media_summary or fallback_text or ""
 
     embedding_start = time.time()
-    user_embedding = await gemini_client.embed_text(text_content)
+    user_embedding = await ctx.gemini_client.embed_text(text_content)
     embedding_time = int((time.time() - embedding_start) * 1000)
-    perf_timings["embedding_time_ms"] = embedding_time
+    ctx.perf_timings["embedding_time_ms"] = embedding_time
 
-    from_user = message.from_user
+    from_user = ctx.message.from_user
     db_add_start = time.time()
-    await store.add_message(
-        chat_id=chat_id,
-        thread_id=thread_id,
-        user_id=user_id,
+    await ctx.store.add_message(
+        chat_id=ctx.chat_id,
+        thread_id=ctx.thread_id,
+        user_id=ctx.user_id,
         role="user",
         text=text_content,
         media=media_parts,
         metadata=user_meta,
         embedding=user_embedding,
-        retention_days=settings.retention_days,
+        retention_days=ctx.settings.retention_days,
         sender=MessageSender(
             role="user",
             name=from_user.full_name if from_user else None,
@@ -2154,63 +2735,58 @@ async def _handle_bot_message_locked(
         ),
     )
     db_add_time = int((time.time() - db_add_start) * 1000)
-    perf_timings["db_add_time_ms"] = db_add_time
+    ctx.perf_timings["db_add_time_ms"] = db_add_time
     if db_add_time > 500:  # Log if DB operation takes more than 500ms
         LOGGER.info(
             "Database add_message completed",
             extra={
-                "chat_id": chat_id,
-                "thread_id": thread_id,
-                "user_id": user_id,
+                "chat_id": ctx.chat_id,
+                "thread_id": ctx.thread_id,
+                "user_id": ctx.user_id,
                 "db_time_ms": db_add_time,
             },
         )
 
     # Phase 4.2: Track message for episode creation
-    if settings.auto_create_episodes and episode_monitor is not None:
+    if ctx.settings.auto_create_episodes and ctx.episode_monitor is not None:
         try:
-            await episode_monitor.track_message(
-                chat_id=chat_id,
-                thread_id=thread_id,
+            await ctx.episode_monitor.track_message(
+                chat_id=ctx.chat_id,
+                thread_id=ctx.thread_id,
                 message={
-                    "id": message.message_id,
-                    "user_id": user_id,
+                    "id": ctx.message.message_id,
+                    "user_id": ctx.user_id,
                     "text": text_content,
                     "timestamp": int(time.time()),
-                    "chat_id": chat_id,
+                    "chat_id": ctx.chat_id,
                 },
             )
             LOGGER.debug(
                 "Message tracked for episode creation",
-                extra={"chat_id": chat_id, "message_id": message.message_id},
+                extra={"chat_id": ctx.chat_id, "message_id": ctx.message.message_id},
             )
         except Exception as e:
             LOGGER.error(
                 "Failed to track message for episodes",
                 exc_info=e,
-                extra={"chat_id": chat_id, "message_id": message.message_id},
+                extra={"chat_id": ctx.chat_id, "message_id": ctx.message.message_id},
             )
-
-    # Centralized search tool implementation
-    search_messages_tool = create_search_messages_tool(
-        store=store, gemini_client=gemini_client, chat_id=chat_id, thread_id=thread_id
-    )
 
     # Centralized tool definitions (registry) with caching
     # Note: Memory tools are already included in build_tool_definitions_registry
     # Note: Admin status affects moderation tool availability, so we don't cache across different admin statuses
     tool_definitions: list[dict[str, Any]] = build_tool_definitions_registry(
-        settings, is_admin=is_admin
+        ctx.settings, is_admin=ctx.is_admin
     )
 
     # Enrich with user profile context
     # Note: If using multi-level context, profile is already included
     if not use_multi_level:
         profile_context = await _enrich_with_user_profile(
-            profile_store=profile_store,
-            user_id=user_id,
-            chat_id=chat_id,
-            settings=settings,
+            profile_store=ctx.profile_store,
+            user_id=ctx.user_id,
+            chat_id=ctx.chat_id,
+            settings=ctx.settings,
         )
     else:
         profile_context = None
@@ -2235,24 +2811,26 @@ async def _handle_bot_message_locked(
         _SYSTEM_PROMPT_CACHE = None
         _SYSTEM_PROMPT_PERSONA_LOADER_CACHE = None
         _SYSTEM_PROMPT_CHAT_ID_CACHE = None
-    cacheable = persona_loader is None and not prompt_manager
+    cacheable = ctx.persona_loader is None and not ctx.prompt_manager
     if cacheable and _SYSTEM_PROMPT_CACHE is not None:
         base_system_prompt = _SYSTEM_PROMPT_CACHE
     else:
         base_system_prompt = SYSTEM_PERSONA
         # Use persona from loader if available
-        if persona_loader is not None:
+        if ctx.persona_loader is not None:
             try:
-                base_system_prompt = persona_loader.get_system_prompt(
+                base_system_prompt = ctx.persona_loader.get_system_prompt(
                     current_time=current_time
                 )
             except Exception as e:
                 LOGGER.warning(
                     f"Failed to get system prompt from persona loader, using default: {e}"
                 )
-        if prompt_manager:
+        if ctx.prompt_manager:
             try:
-                custom_prompt = await prompt_manager.get_active_prompt(chat_id=chat_id)
+                custom_prompt = await ctx.prompt_manager.get_active_prompt(
+                    chat_id=ctx.chat_id
+                )
                 if custom_prompt:
                     base_system_prompt = custom_prompt.prompt_text
                     LOGGER.debug(
@@ -2265,15 +2843,18 @@ async def _handle_bot_message_locked(
                 )
         if cacheable:
             _SYSTEM_PROMPT_CACHE = base_system_prompt
-            _SYSTEM_PROMPT_PERSONA_LOADER_CACHE = persona_loader
-            _SYSTEM_PROMPT_CHAT_ID_CACHE = chat_id
+            _SYSTEM_PROMPT_PERSONA_LOADER_CACHE = ctx.persona_loader
+            _SYSTEM_PROMPT_CHAT_ID_CACHE = ctx.chat_id
     # If we have profile context, inject it into the system prompt
     system_prompt_with_profile = base_system_prompt + timestamp_context
 
     # Format context for Gemini
     if use_multi_level and context_manager and context_assembly:
         # Check if compact format is enabled
-        if settings.enable_compact_conversation_format and not use_system_context_block:
+        if (
+            ctx.settings.enable_compact_conversation_format
+            and not use_system_context_block
+        ):
             # Use compact plain text format (70-80% token savings)
             formatted_context = context_manager.format_for_gemini_compact(
                 context_assembly
@@ -2299,17 +2880,19 @@ async def _handle_bot_message_locked(
                 from app.services.conversation_formatter import format_message_compact
 
                 current_username = (
-                    message.from_user.full_name if message.from_user else "User"
+                    ctx.message.from_user.full_name if ctx.message.from_user else "User"
                 )
-                current_user_id = message.from_user.id if message.from_user else None
+                current_user_id = (
+                    ctx.message.from_user.id if ctx.message.from_user else None
+                )
 
                 # Extract reply information for compact format
                 reply_to_user_id = None
                 reply_to_username = None
                 reply_excerpt = None
 
-                if settings.include_reply_excerpt and message.reply_to_message:
-                    reply_to_msg = message.reply_to_message
+                if ctx.settings.include_reply_excerpt and ctx.message.reply_to_message:
+                    reply_to_msg = ctx.message.reply_to_message
                     if reply_to_msg.from_user:
                         reply_to_user_id = reply_to_msg.from_user.id
                         reply_to_username = reply_to_msg.from_user.full_name
@@ -2321,7 +2904,7 @@ async def _handle_bot_message_locked(
                         reply_text = _extract_text(reply_to_msg)
                         if reply_text:
                             max_chars = min(
-                                settings.reply_excerpt_max_chars, 160
+                                ctx.settings.reply_excerpt_max_chars, 160
                             )  # Compact format uses shorter excerpts
                             reply_excerpt = reply_text[:max_chars]
                             if len(reply_text) > max_chars:
@@ -2351,12 +2934,12 @@ async def _handle_bot_message_locked(
 
             # Add media with priority: current message first, then reply media, then historical
             max_media_total = (
-                settings.gemini_max_media_items
+                ctx.settings.gemini_max_media_items
             )  # Default 28 (Gemini API limit)
             # Strict behavior: do not include historical media in compact mode;
             # rely on text markers for awareness and only process media for current/replied messages
             max_historical = 0
-            max_videos = settings.gemini_max_video_items  # Default 1
+            max_videos = ctx.settings.gemini_max_video_items  # Default 1
 
             all_media = []
             video_count = 0
@@ -2403,9 +2986,9 @@ async def _handle_bot_message_locked(
                             # Skip this video but try to get description
                             if reply_msg_id:
                                 description = await _get_video_description_from_history(
-                                    store=store,
-                                    chat_id=chat_id,
-                                    thread_id=thread_id,
+                                    store=ctx.store,
+                                    chat_id=ctx.chat_id,
+                                    thread_id=ctx.thread_id,
                                     message_id=reply_msg_id,
                                 )
                                 if description:
@@ -2566,7 +3149,7 @@ async def _handle_bot_message_locked(
         )
 
     # JSON format path: strip media from history and add reply media to user_parts instead
-    if (not settings.enable_compact_conversation_format) and history:
+    if (not ctx.settings.enable_compact_conversation_format) and history:
         try:
             new_history: list[dict[str, Any]] = []
             removed_media_count = 0
@@ -2625,7 +3208,7 @@ async def _handle_bot_message_locked(
 
             # Add metadata if available
             reply_meta = {
-                "chat_id": chat_id,
+                "chat_id": ctx.chat_id,
                 "message_id": reply_msg_id,
             }
             if reply_context_for_history.get("user_id"):
@@ -2657,9 +3240,18 @@ async def _handle_bot_message_locked(
 
             # Do NOT add media parts to history in JSON mode; reply media will be attached to user_parts below
 
+            # Determine correct role: if replying to a bot message, use "model"/"assistant", otherwise "user"
+            reply_is_bot = reply_context_for_history.get("is_bot")
+            if reply_is_bot:
+                # This is a bot message, use "model" role (Gemini convention)
+                reply_role = "model"
+            else:
+                # This is a user message
+                reply_role = "user"
+
             # Insert at beginning of history (chronologically first)
             if reply_parts:
-                history.insert(0, {"role": "user", "parts": reply_parts})
+                history.insert(0, {"role": reply_role, "parts": reply_parts})
 
                 # Track telemetry
                 if reply_context_for_history.get("media_parts"):
@@ -2671,7 +3263,9 @@ async def _handle_bot_message_locked(
                 )
 
     # In JSON mode, attach reply media directly to user_parts (respecting total media cap)
-    if (not settings.enable_compact_conversation_format) and reply_context_for_history:
+    if (
+        not ctx.settings.enable_compact_conversation_format
+    ) and reply_context_for_history:
         try:
             reply_media = reply_context_for_history.get("media_parts") or []
             if reply_media:
@@ -2681,7 +3275,7 @@ async def _handle_bot_message_locked(
                     for p in user_parts
                     if isinstance(p, dict) and ("inline_data" in p or "file_data" in p)
                 )
-                max_total = settings.gemini_max_media_items
+                max_total = ctx.settings.gemini_max_media_items
                 remaining = max(0, max_total - current_media_count)
                 if remaining > 0:
                     to_add = reply_media[:remaining]
@@ -2711,7 +3305,7 @@ async def _handle_bot_message_locked(
             trigger_text_source = media_summary
 
         system_context_block_text = _build_system_context_block(
-            settings=settings,
+            settings=ctx.settings,
             history_messages=history_messages_for_block,
             trigger_meta=user_meta,
             trigger_text=trigger_text_source,
@@ -2720,8 +3314,8 @@ async def _handle_bot_message_locked(
             reply_context=reply_context_for_block,
             reply_raw_media=reply_media_raw_for_block,
             reply_media_parts=reply_media_parts_for_block,
-            chat_id=chat_id,
-            thread_id=thread_id,
+            chat_id=ctx.chat_id,
+            thread_id=ctx.thread_id,
         )
 
         if system_context_block_text:
@@ -2738,7 +3332,7 @@ async def _handle_bot_message_locked(
                     for p in user_parts
                     if isinstance(p, dict) and ("inline_data" in p or "file_data" in p)
                 )
-                max_total = settings.gemini_max_media_items
+                max_total = ctx.settings.gemini_max_media_items
                 remaining = max(0, max_total - current_media_count)
                 if remaining > 0:
                     to_add = reply_media_parts_for_block[:remaining]
@@ -2753,28 +3347,243 @@ async def _handle_bot_message_locked(
                         "context.reply_media_system_block", len(to_add)
                     )
 
+    return {
+        "history": history,
+        "user_parts": user_parts,
+        "system_prompt_with_profile": system_prompt_with_profile,
+        "tool_definitions": tool_definitions,
+        "raw_text": raw_text,
+        "fallback_text": fallback_text,
+        "reply_context_for_history": reply_context_for_history,
+        "reply_context_for_block": reply_context_for_block,
+        "reply_media_raw_for_block": reply_media_raw_for_block,
+        "reply_media_parts_for_block": reply_media_parts_for_block,
+        "history_messages_for_block": history_messages_for_block,
+        "use_system_context_block": use_system_context_block,
+        "context_assembly": context_assembly,
+        "context_manager": context_manager,
+        "use_multi_level": use_multi_level,
+        "perf_timings": ctx.perf_timings,
+        "text_content": text_content,
+        "media_summary": media_summary,
+        "user_meta": user_meta,
+    }
+
+
+@dataclass
+class MessageHandlerContext:
+    """Context object containing all services and state for message handling."""
+
+    # Core message info
+    message: Message
+    bot: Bot
+    chat_id: int
+    thread_id: int | None
+    user_id: int
+    is_admin: bool
+
+    # Services
+    settings: Settings
+    store: ContextStore
+    gemini_client: GeminiClient
+    profile_store: UserProfileStore
+    chat_profile_store: Any
+
+    # Context services
+    hybrid_search: HybridSearchEngine | None
+    episodic_memory: EpisodicMemoryStore | None
+    episode_monitor: Any | None
+    multi_level_context_manager: MultiLevelContextManager | None
+
+    # Bot services
+    bot_profile: Any | None
+    bot_learning: Any | None
+    bot_username: str
+    bot_id: int | None
+
+    # Other services
+    prompt_manager: SystemPromptManager | None
+    feature_limiter: Any | None
+    redis_client: RedisLike | None
+    rate_limiter: RateLimiter | None
+    persona_loader: Any | None
+    image_gen_service: ImageGenerationService | None
+    donation_scheduler: Any | None
+    memory_repo: MemoryRepository
+    telegram_service: TelegramService | None
+
+    # Processing state
+    data: dict[str, Any]
+    perf_timings: dict[str, int]
+    processing_start_time: float
+
+
+async def _handle_bot_message_locked(
+    ctx: MessageHandlerContext,
+) -> None:
+    """Handle bot-addressed message with processing lock acquired."""
+
+    # Initialize processing state
+    ctx.processing_start_time = time.time()
+    ctx.perf_timings = {}  # Track performance timings for summary
+
+    # Rate limiting (skip for admins)
+    should_proceed, rate_limit_response_message = await _check_and_handle_rate_limit(
+        message=ctx.message,
+        rate_limiter=ctx.rate_limiter,
+        is_admin=ctx.is_admin,
+        persona_loader=ctx.persona_loader,
+        bot_username=ctx.bot_username,
+        user_id=ctx.user_id,
+    )
+    if not should_proceed:
+        # Save rate limit response to DB if it was sent, so unanswered trigger check works correctly
+        if rate_limit_response_message and rate_limit_response_message.text:
+            try:
+                await ctx.store.add_message(
+                    chat_id=ctx.chat_id,
+                    thread_id=ctx.thread_id,
+                    user_id=None,
+                    role="model",
+                    text=rate_limit_response_message.text,
+                    media=None,
+                    metadata={"type": "rate_limit_notice"},
+                    embedding=None,
+                    retention_days=ctx.settings.retention_days,
+                    sender=MessageSender(
+                        role="assistant",
+                        name="gryag",
+                        username=_normalize_username(ctx.bot_username),
+                        is_bot=True,
+                    ),
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    f"Failed to save rate limit response to DB: {exc}",
+                    exc_info=True,
+                )
+        return
+
+    if not ctx.is_admin and await ctx.store.is_banned(ctx.chat_id, ctx.user_id):
+        telemetry.increment_counter("chat.banned_user")
+        # Only send ban notice if cooldown has passed (30 min default)
+        if await ctx.store.should_send_ban_notice(ctx.chat_id, ctx.user_id):
+            ban_notice_text = _get_response(
+                "banned_reply",
+                ctx.persona_loader,
+                BANNED_REPLY,
+            )
+            ban_message = await ctx.message.reply(ban_notice_text)
+            # Save ban notice response to DB so unanswered trigger check works correctly
+            if ban_message:
+                try:
+                    await ctx.store.add_message(
+                        chat_id=ctx.chat_id,
+                        thread_id=ctx.thread_id,
+                        user_id=None,
+                        role="model",
+                        text=ban_notice_text,
+                        media=None,
+                        metadata={"type": "ban_notice"},
+                        embedding=None,
+                        retention_days=ctx.settings.retention_days,
+                        sender=MessageSender(
+                            role="assistant",
+                            name="gryag",
+                            username=_normalize_username(ctx.bot_username),
+                            is_bot=True,
+                        ),
+                    )
+                except Exception as exc:
+                    LOGGER.warning(
+                        f"Failed to save ban notice response to DB: {exc}",
+                        exc_info=True,
+                    )
+        # Always return early for banned users (no processing)
+        return
+
+    # Extract raw text early for poll vote check
+    raw_text = (ctx.message.text or ctx.message.caption or "").strip()
+
+    # Check for poll voting (numbers like "1", "2", "1,3", etc.)
+    poll_vote_result = await _handle_poll_vote_attempt(
+        raw_text, ctx.chat_id, ctx.thread_id, ctx.user_id
+    )
+    if poll_vote_result:
+        # FORMATTING DISABLED: Sending plain text, relying on system prompt
+        poll_response_message = await ctx.message.reply(poll_vote_result, parse_mode=ParseMode.HTML)
+        # Save bot response to DB so unanswered trigger check works correctly
+        if poll_response_message:
+            try:
+                await ctx.store.add_message(
+                    chat_id=ctx.chat_id,
+                    thread_id=ctx.thread_id,
+                    user_id=None,
+                    role="model",
+                    text=poll_vote_result,
+                    media=None,
+                    metadata={"type": "poll_vote_response"},
+                    embedding=None,
+                    retention_days=ctx.settings.retention_days,
+                    sender=MessageSender(
+                        role="assistant",
+                        name="gryag",
+                        username=_normalize_username(ctx.bot_username),
+                        is_bot=True,
+                    ),
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    f"Failed to save poll vote response to DB: {exc}",
+                    exc_info=True,
+                )
+        return
+
+    # Build complete message context
+    context_result = await _build_message_context(ctx)
+
+    # Extract context variables
+    history = context_result["history"]
+    user_parts = context_result["user_parts"]
+    system_prompt_with_profile = context_result["system_prompt_with_profile"]
+    tool_definitions = context_result["tool_definitions"]
+    raw_text = context_result["raw_text"]
+    fallback_text = context_result["fallback_text"]
+    reply_context_for_history = context_result["reply_context_for_history"]
+    reply_context_for_block = context_result["reply_context_for_block"]
+    reply_media_raw_for_block = context_result["reply_media_raw_for_block"]
+    reply_media_parts_for_block = context_result["reply_media_parts_for_block"]
+    history_messages_for_block = context_result["history_messages_for_block"]
+    use_system_context_block = context_result["use_system_context_block"]
+    context_assembly = context_result["context_assembly"]
+    context_manager = context_result["context_manager"]
+    use_multi_level = context_result["use_multi_level"]
+    text_content = context_result["text_content"]
+    media_summary = context_result["media_summary"]
+    user_meta = context_result["user_meta"]
+
     # Track which tools were used in this request
     tools_used_in_request: list[str] = []
 
     # Centralized callbacks (registry) with tracking
     # Always build tool callbacks - memory_repo can be None and will be handled gracefully
     tracked_tool_callbacks = build_tool_callbacks_registry(
-        settings=settings,
-        store=store,
-        gemini_client=gemini_client,
-        profile_store=profile_store,
-        memory_repo=memory_repo,  # Can be None, memory tools will be skipped
-        chat_id=chat_id,
-        thread_id=thread_id,
-        message_id=message.message_id,
+        settings=ctx.settings,
+        store=ctx.store,
+        gemini_client=ctx.gemini_client,
+        profile_store=ctx.profile_store,
+        memory_repo=ctx.memory_repo,  # Can be None, memory tools will be skipped
+        chat_id=ctx.chat_id,
+        thread_id=ctx.thread_id,
+        message_id=ctx.message.message_id,
         tools_used_tracker=tools_used_in_request,
-        user_id=user_id,
-        bot=bot,
-        message=message,
-        image_gen_service=image_gen_service,
-        feature_limiter=feature_limiter,
-        is_admin=is_admin,
-        telegram_service=telegram_service,
+        user_id=ctx.user_id,
+        bot=ctx.bot,
+        message=ctx.message,
+        image_gen_service=ctx.image_gen_service,
+        feature_limiter=ctx.feature_limiter,
+        is_admin=ctx.is_admin,
+        telegram_service=ctx.telegram_service,
     )
     # Web search, image tools, and memory tool callbacks are provided by registry
 
@@ -2785,636 +3594,60 @@ async def _handle_bot_message_locked(
     # Bot Self-Learning: Track generation timing
     response_time_ms = 0  # Initialize in case of error
 
-    # NOTE: Deterministic memory capture DISABLED per user request (2025-10-26)
-    # Previously intercepted "запам'ятай/remember" patterns
-    # Now delegating all memory operations to LLM tool calling
-    if False:  # DISABLED: Deterministic memory capture
-        # Deterministic memory capture: handle explicit "remember" commands without LLM
-        # This avoids tool-call loops where the model recalls instead of storing.
-        try:
-            if settings.enable_tool_based_memory and memory_repo is not None:
-                text_for_intent = (raw_text or "").strip()
-                if text_for_intent:
-                    # Remove bot mention and leading slash commands
-                    if bot_username:
-                        text_for_intent = re.sub(
-                            rf"@{re.escape(bot_username)}\\b",
-                            "",
-                            text_for_intent,
-                            flags=re.IGNORECASE,
-                        ).strip()
-                    if text_for_intent.startswith("/"):
-                        text_for_intent = text_for_intent[1:].strip()
-
-                    # Match explicit remember intents (UA + EN)
-                    # Supports different apostrophes: ' and ’
-                    remember_patterns = [
-                        r"^(?:запам['’]?ятай|пам['’]?ятай|запиши)\b\s*(?:що|шо)?\s*[:\-]?\s*(.+)",
-                        r"^remember\b\s*(?:that)?\s*[:\-]?\s*(.+)",
-                    ]
-
-                    memory_text: str | None = None
-                    for pat in remember_patterns:
-                        m = re.search(pat, text_for_intent, flags=re.IGNORECASE)
-                        if m:
-                            candidate = (m.group(1) or "").strip()
-                            # Avoid capturing empty or trivial strings
-                            if len(candidate) >= 3:
-                                memory_text = candidate
-                                break
-
-                    # If we didn't match the capturing group but the message starts with the intent
-                    # fall back to using the rest of the message after the trigger word(s)
-                    if memory_text is None:
-                        starts_with_triggers = [
-                            r"^(?:запам['’]?ятай|пам['’]?ятай|запиши)\b",
-                            r"^remember\b",
-                        ]
-                        for trig in starts_with_triggers:
-                            mt = re.sub(
-                                trig, "", text_for_intent, flags=re.IGNORECASE
-                            ).strip()
-                            if mt and len(mt) >= 3:
-                                memory_text = mt
-                                break
-
-                    if memory_text:
-                        remember_cb = tracked_tool_callbacks.get("remember_memory")
-                        if remember_cb is not None:
-                            LOGGER.info(
-                                "Rule-based memory intercept: storing memory without LLM",
-                                extra={
-                                    "chat_id": chat_id,
-                                    "user_id": user_id,
-                                    "len": len(memory_text),
-                                },
-                            )
-                            try:
-                                raw = await remember_cb(
-                                    {"user_id": user_id, "memory_text": memory_text}
-                                )
-                                payload = json.loads(raw)
-                            except Exception:
-                                LOGGER.exception("remember_memory intercept failed")
-                                payload = {
-                                    "status": "error",
-                                    "message": "Не вийшло запам'ятати.",
-                                }
-
-                            # Compose immediate confirmation and persist bot turn, then return
-                            if payload.get("status") == "success":
-                                reply_confirm = "Запам’ятав."
-                                tools_used_in_request.append("remember_memory")
-                            else:
-                                reply_confirm = (
-                                    payload.get("message") or "Не вийшло запам'ятати."
-                                )
-
-                            # Send reply now and store like normal
-                            response_message = await message.reply(
-                                reply_confirm,
-                                parse_mode=ParseMode.HTML,
-                                disable_web_page_preview=True,
-                            )
-
-                            model_meta = _build_model_metadata(
-                                response=response_message,
-                                chat_id=chat_id,
-                                thread_id=thread_id,
-                                bot_username=bot_username,
-                                original=message,
-                                original_text=text_for_intent,
-                            )
-                            bot_display_name = model_meta.get("name") or "gryag"
-
-                            model_embedding = await gemini_client.embed_text(
-                                reply_confirm
-                            )
-
-                            await store.add_message(
-                                chat_id=chat_id,
-                                thread_id=thread_id,
-                                user_id=None,
-                                role="model",
-                                text=reply_confirm,
-                                media=None,
-                                metadata=model_meta,
-                                embedding=model_embedding,
-                                retention_days=settings.retention_days,
-                                sender=MessageSender(
-                                    role="assistant",
-                                    name=bot_display_name,
-                                    username=_normalize_username(bot_username),
-                                    is_bot=True,
-                                ),
-                            )
-
-                            # Short-circuit the rest of the handler
-                            return
-        except Exception:
-            # Non-fatal: fall back to normal flow if the interceptor fails
-            LOGGER.exception(
-                "Memory intercept path error; continuing with normal generation"
-            )
-
-    async with typing_indicator(bot, chat_id):
-        generation_start_time = time.time()
-
-        # Log what we're sending to Gemini
-        LOGGER.info(
-            f"Sending to Gemini: history_length={len(history)}, "
-            f"user_parts_count={len(user_parts)}, "
-            f"tools_count={len(tool_definitions) if tool_definitions else 0}, "
-            f"system_prompt_length={len(system_prompt_with_profile) if system_prompt_with_profile else 0}"
-        )
-
-        # Log first user part (text only, not media)
-        if user_parts:
-            first_part = user_parts[0]
-            if isinstance(first_part, dict) and "text" in first_part:
-                LOGGER.info(f"First user part text: {first_part['text'][:200]}")
-
-            # Log media breakdown
-            media_count = sum(
-                1
-                for p in user_parts
-                if isinstance(p, dict) and ("inline_data" in p or "file_data" in p)
-            )
-            if media_count > 0:
-                LOGGER.info(f"Sending {media_count} media items to Gemini")
-
-        thinking_message_sent = False
-        thinking_placeholder_sent = False
-        thinking_msg: Message | None = None
-
-        if settings.show_thinking_to_users:
-            LOGGER.info("Thinking placeholder enabled; sending immediate reply")
-            try:
-                thinking_msg = await message.reply("🤔 Думаю...")
-            except Exception as exc:
-                LOGGER.warning(f"Failed to send thinking placeholder: {exc}")
-                thinking_msg = None
-            else:
-                thinking_placeholder_sent = True
-                thinking_message_sent = True
-                # Placeholder sent; response generation will continue without blocking
-
-        try:
-            gemini_start = time.time()
-            response_data = await gemini_client.generate(
-                system_prompt=system_prompt_with_profile,
-                history=history,
-                user_parts=user_parts,
-                tools=tool_definitions,
-                tool_callbacks=tracked_tool_callbacks,  # type: ignore[arg-type]
-            )
-            gemini_time = int((time.time() - gemini_start) * 1000)
-            perf_timings["gemini_time_ms"] = gemini_time
-            reply_text = response_data.get("text", "")
-            thinking_text = (response_data.get("thinking", "") or "").strip()
-
-            LOGGER.info(
-                "Gemini API call completed",
-                extra={
-                    "chat_id": chat_id,
-                    "user_id": user_id,
-                    "gemini_time_ms": gemini_time,
-                    "response_length": len(reply_text),
-                },
-            )
-
-            # If Gemini returned only thinking content, retry without thinking enabled
-            if (not reply_text or reply_text.isspace()) and thinking_text:
-                LOGGER.info(
-                    "Gemini returned reasoning without final text; retrying without thinking output"
-                )
-                gemini_retry_start = time.time()
-                response_data = await gemini_client.generate(
-                    system_prompt=system_prompt_with_profile,
-                    history=history,
-                    user_parts=user_parts,
-                    tools=tool_definitions,
-                    tool_callbacks=tracked_tool_callbacks,  # type: ignore[arg-type]
-                    include_thinking=False,
-                )
-                gemini_retry_time = int((time.time() - gemini_retry_start) * 1000)
-                gemini_time += gemini_retry_time  # Add retry time to total
-                perf_timings["gemini_time_ms"] = gemini_time  # Update with total
-                reply_text = response_data.get("text", "")
-                thinking_text = (response_data.get("thinking", "") or "").strip()
-
-                LOGGER.info(
-                    "Gemini API retry completed",
-                    extra={
-                        "chat_id": chat_id,
-                        "user_id": user_id,
-                        "gemini_retry_time_ms": gemini_retry_time,
-                        "total_gemini_time_ms": gemini_time,
-                    },
-                )
-
-            # Handle responses with thinking content (show reasoning process)
-            show_thinking = settings.show_thinking_to_users and bool(thinking_text)
-            if show_thinking:
-                LOGGER.info(
-                    "Gemini returned thinking content, showing reasoning process to user"
-                )
-                if thinking_msg is None:
-                    try:
-                        thinking_msg = await message.reply("🤔 Думаю...")
-                    except Exception as exc:
-                        LOGGER.warning(f"Failed to send thinking placeholder: {exc}")
-                        thinking_msg = None
-                if thinking_msg is not None:
-                    thinking_display = _safe_html_payload(
-                        thinking_text,
-                        wrap=("<i>", "</i>"),
-                        ellipsis=True,
-                    )
-
-                    try:
-                        await thinking_msg.edit_text(
-                            thinking_display,
-                            parse_mode=ParseMode.HTML,
-                            disable_web_page_preview=True,
-                        )
-                    except Exception as exc:
-                        LOGGER.warning(f"Failed to edit thinking message: {exc}")
-                        thinking_message_sent = False
-                        thinking_placeholder_sent = False
-                    else:
-                        # Thinking content shown; continue to generate final response
-                        thinking_placeholder_sent = True
-                        thinking_message_sent = True
-                else:
-                    thinking_message_sent = False
-                    thinking_placeholder_sent = False
-            elif thinking_text:
-                LOGGER.debug(
-                    "Thinking content suppressed (length=%s)", len(thinking_text)
-                )
-                thinking_message_sent = thinking_placeholder_sent
-            else:
-                thinking_message_sent = thinking_placeholder_sent
-
-            # Check if tools were disabled during generation (API overload fallback)
-            if gemini_client.tools_fallback_disabled and tool_definitions:
-                LOGGER.warning(
-                    "Tools were disabled during Gemini call due to API errors. "
-                    "Some features (image generation, web search, etc.) may not work."
-                )
-                # Check if user asked for a tool feature
-                user_text_lower = (text_content or "").lower()
-                tool_keywords = [
-                    "намалюй",
-                    "малюнок",
-                    "зображення",
-                    "картинк",
-                    "фото",
-                    "generate",
-                    "draw",
-                    "image",
-                    "picture",
-                    "photo",
-                    "пошук",
-                    "знайди",
-                    "search",
-                    "погода",
-                    "weather",
-                ]
-                if any(keyword in user_text_lower for keyword in tool_keywords):
-                    # User likely asked for a tool feature - provide helpful error
-                    if not reply_text or reply_text.isspace():
-                        # Empty response - replace entirely
-                        reply_text = (
-                            "⚠️ Зараз API перевантажений і ця функція тимчасово недоступна. "
-                            "Спробуй пізніше (через 5-10 хвилин)."
-                        )
-                    else:
-                        # Prepend warning to existing response
-                        reply_text = (
-                            "⚠️ Зараз API перевантажений і деякі функції тимчасово недоступні. "
-                            "Спробуй пізніше.\n\n" + reply_text
-                        )
-
-            # Calculate response time
-            generation_end_time = time.time()
-            response_time_ms = int((generation_end_time - generation_start_time) * 1000)
-
-            telemetry.increment_counter("chat.reply_success")
-
-            # Update user profile in background (fire-and-forget)
-            asyncio.create_task(
-                _update_user_profile_background(
-                    profile_store=profile_store,
-                    user_id=user_id,
-                    chat_id=chat_id,
-                    thread_id=thread_id,
-                    display_name=(
-                        message.from_user.full_name if message.from_user else None
-                    ),
-                    username=message.from_user.username if message.from_user else None,
-                    settings=settings,
-                )
-            )
-        except GeminiContentBlockedError as exc:
-            telemetry.increment_counter("chat.content_blocked")
-            LOGGER.warning(
-                "Content blocked by Gemini: block_reason=%s, chat=%s, user=%s",
-                exc.block_reason,
-                chat_id,
-                user_id,
-            )
-            # Provide a user-friendly message that's more helpful
-            reply_text = (
-                "Вибач, але мої фільтри безпеки не дозволили мені обробити це повідомлення. "
-                "Спробуй переформулювати або відправити інше повідомлення."
-            )
-        except GeminiError:
-            telemetry.increment_counter("chat.reply_failure")
-            reply_text = _get_response(
-                "error_fallback",
-                persona_loader,
-                ERROR_FALLBACK,
-                bot_username=bot_username,
-            )
-
-        # Comprehensive response cleaning
-        original_reply = reply_text
-        reply_text = _clean_response_text(reply_text)
-
-        # Log if we had to clean metadata from the response
-        if original_reply != reply_text and original_reply:
-            LOGGER.warning(
-                "Cleaned metadata from response in chat %s: original_length=%d, cleaned_length=%d",
-                chat_id,
-                len(original_reply),
-                len(reply_text),
-            )
-            LOGGER.debug(f"Original response contained: {original_reply[:200]}")
-
-        # Fallback: force image generation/edit if Gemini returned nothing but the user clearly asked for it
-        # OR if the response contained tool call descriptions that got filtered out
-        tool_description_detected = False
-        if original_reply and original_reply != reply_text:
-            lower_original = original_reply.lower()
-            tool_keywords = [
-                "tool_call",
-                "function_call",
-                "generate_image",
-                "edit_image",
-                "search_web",
-            ]
-            tool_description_detected = any(
-                kw in lower_original for kw in tool_keywords
-            )
-
-        if (
-            settings.enable_image_generation
-            and image_gen_service is not None
-            and (
-                (not reply_text or reply_text.isspace())
-                or (tool_description_detected and len(reply_text) < 20)
-            )
-        ):
-            if tool_description_detected:
-                LOGGER.warning(
-                    "Tool call description detected in response instead of actual tool call. Triggering fallback."
-                )
-            fallback_prompt = (raw_text or "").strip()
-            if fallback_prompt:
-                if bot_username:
-                    fallback_prompt = re.sub(
-                        rf"@{re.escape(bot_username)}\\b",
-                        "",
-                        fallback_prompt,
-                        flags=re.IGNORECASE,
-                    ).strip()
-                if fallback_prompt.startswith("/"):
-                    fallback_prompt = fallback_prompt[1:].strip()
-
-            fallback_payload: dict[str, Any] | None = None
-            fallback_success = False
-
-            # Try edit fallback first if it looks like an image edit request
-            if (
-                fallback_prompt
-                and "edit_image" not in tools_used_in_request
-                and _looks_like_image_edit_request(fallback_prompt)
-                and edit_image_tool is not None
-            ):
-                LOGGER.info(
-                    "Gemini skipped edit_image tool; performing fallback edit",
-                    extra={
-                        "chat_id": chat_id,
-                        "message_id": message.message_id,
-                    },
-                )
-                try:
-                    fallback_raw = await edit_image_tool({"prompt": fallback_prompt})
-                    fallback_payload = json.loads(fallback_raw)
-                except json.JSONDecodeError as exc:
-                    LOGGER.error(f"Failed to parse edit_image response: {exc}")
-                    fallback_payload = {
-                        "success": False,
-                        "error": "Помилка парсингу відповіді",
-                    }
-                except Exception as exc:
-                    LOGGER.error(f"Fallback edit_image failed: {exc}", exc_info=True)
-                    fallback_payload = {
-                        "success": False,
-                        "error": "Не вийшло відредагувати, сервіс знову тупив.",
-                    }
-                else:
-                    tools_used_in_request.append("edit_image")
-
-            # If edit fallback didn't trigger, try generation fallback
-            if (
-                not fallback_payload
-                and fallback_prompt
-                and "generate_image" not in tools_used_in_request
-                and _looks_like_image_generation_request(fallback_prompt)
-                and generate_image_tool is not None
-            ):
-                LOGGER.info(
-                    "Gemini skipped generate_image tool; performing fallback generation",
-                    extra={
-                        "chat_id": chat_id,
-                        "message_id": message.message_id,
-                    },
-                )
-                try:
-                    fallback_raw = await generate_image_tool(
-                        {"prompt": fallback_prompt}
-                    )
-                    fallback_payload = json.loads(fallback_raw)
-                except json.JSONDecodeError as exc:
-                    LOGGER.error(f"Failed to parse generate_image response: {exc}")
-                    fallback_payload = {
-                        "success": False,
-                        "error": "Помилка парсингу відповіді",
-                    }
-                except Exception as exc:
-                    LOGGER.error(
-                        f"Fallback generate_image failed: {exc}",
-                        exc_info=True,
-                    )
-                    fallback_payload = {
-                        "success": False,
-                        "error": "Не вийшло намалювати, щось перегрілося.",
-                    }
-                else:
-                    tools_used_in_request.append("generate_image")
-
-            if fallback_payload:
-                fallback_success = bool(fallback_payload.get("success"))
-                reply_text = fallback_payload.get(
-                    "message" if fallback_success else "error",
-                    reply_text,
-                )
-                if fallback_success and not reply_text:
-                    reply_text = "Готово. Лови картинку."
-                if not fallback_success and not reply_text:
-                    reply_text = "Нічого не вийшло — сервіс брикнувся."
-
-        # Memory-tool specific fallback: if Gemini returned nothing but a memory tool was used, confirm action
-        if (not reply_text or reply_text.isspace()) and tools_used_in_request:
-            if "forget_all_memories" in tools_used_in_request:
-                reply_text = "Готово. Я забув усе про тебе в цьому чаті."
-            elif "remember_memory" in tools_used_in_request:
-                reply_text = "Запам’ятав."
-            elif "update_memory" in tools_used_in_request:
-                reply_text = "Оновив."
-            elif "forget_memory" in tools_used_in_request:
-                reply_text = "Видалив."
-
-        if not reply_text or reply_text.isspace():
-            reply_text = _get_response(
-                "empty_reply", persona_loader, EMPTY_REPLY, bot_username=bot_username
-            )
-
-        reply_trimmed = reply_text[:4096]
-        # Convert markdown to HTML (handles bold, italic, strikethrough, spoilers)
-        formatted = _format_for_telegram(reply_trimmed)
-        # Telegram HTML mode handles newlines automatically - no br tags needed
-        reply_payload = _safe_html_payload(formatted, already_html=True)
-
-        response_message: Message | None = None
-
-        if thinking_message_sent and thinking_msg is not None:
-            try:
-                await thinking_msg.edit_text(
-                    reply_payload,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
-                )
-                response_message = thinking_msg
-            except Exception as exc:
-                LOGGER.warning(
-                    "Failed to replace thinking message with final answer: %s", exc
-                )
-                thinking_message_sent = False
-
-        if not thinking_message_sent or thinking_msg is None:
-            LOGGER.debug(
-                f"Sending response to chat {chat_id}: "
-                f"length={len(reply_payload)}, message_id={message.message_id}"
-            )
-            try:
-                response_message = await message.reply(
-                    reply_payload,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
-                )
-                if response_message is not None:
-                    LOGGER.info(
-                        f"Response sent successfully to chat {chat_id}: "
-                        f"response_id={response_message.message_id}"
-                    )
-            except Exception as exc:
-                LOGGER.error(
-                    f"Failed to send response message to chat {chat_id}: {exc}",
-                    exc_info=True,
-                )
-                response_message = None
-
-        if response_message is None:
-            LOGGER.warning(
-                f"Response message is None for chat {chat_id} (message_id={message.message_id})"
-            )
-
-        model_meta = _build_model_metadata(
-            response=response_message,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            bot_username=bot_username,
-            original=message,
-            original_text=text_content,
-        )
-        bot_display_name = model_meta.get("name") or "gryag"
-
-        model_embedding_start = time.time()
-        model_embedding = await gemini_client.embed_text(reply_trimmed)
-        model_embedding_time = int((time.time() - model_embedding_start) * 1000)
-
-        db_save_start = time.time()
-        await store.add_message(
-            chat_id=chat_id,
-            thread_id=thread_id,
-            user_id=None,
-            role="model",
-            text=reply_trimmed,
-            media=None,
-            metadata=model_meta,
-            embedding=model_embedding,
-            retention_days=settings.retention_days,
-            sender=MessageSender(
-                role="assistant",
-                name=bot_display_name,
-                username=_normalize_username(bot_username),
-                is_bot=True,
-            ),
-        )
-        db_save_time = int((time.time() - db_save_start) * 1000)
-        perf_timings["db_save_time_ms"] = db_save_time
-
-    # Log total processing time with breakdown
-    total_processing_time = int((time.time() - processing_start_time) * 1000)
-    perf_summary = {
-        "chat_id": chat_id,
-        "user_id": user_id,
-        "message_id": message.message_id,
-        "total_time_ms": total_processing_time,
-        **perf_timings,  # Include all collected timing metrics
-    }
-    LOGGER.info(
-        "Message processing completed",
-        extra=perf_summary,
+    # Generate response from Gemini
+    generation_result = await _generate_gemini_response(
+        ctx=ctx,
+        system_prompt=system_prompt_with_profile,
+        history=history,
+        user_parts=user_parts,
+        tool_definitions=tool_definitions,
+        tool_callbacks=tracked_tool_callbacks,
+        text_content=text_content,
     )
 
-    # Bot Self-Learning: Track this interaction for learning
-    if (
-        settings.enable_bot_self_learning
-        and bot_profile is not None
-        and bot_id is not None
-    ):
-        # Estimate token count
-        estimated_tokens = estimate_token_count(reply_trimmed)
+    reply_text = generation_result["reply_text"]
+    response_time_ms = generation_result["response_time_ms"]
+    thinking_msg = generation_result["thinking_msg"]
+    thinking_message_sent = generation_result["thinking_message_sent"]
+    ctx.perf_timings = generation_result["perf_timings"]
 
-        # Track interaction in background (non-blocking)
-        asyncio.create_task(
-            track_bot_interaction(
-                bot_profile=bot_profile,
-                bot_id=bot_id,
-                chat_id=chat_id,
-                thread_id=thread_id,
-                message_id=response_message.message_id,
-                response_text=reply_trimmed,
-                response_time_ms=response_time_ms,
-                token_count=estimated_tokens,
-                tools_used=tools_used_in_request if tools_used_in_request else None,
-            )
+    # Handle GeminiError case (empty reply_text means error occurred)
+    if not reply_text:
+        reply_text = _get_response(
+            "error_fallback",
+            ctx.persona_loader,
+            ERROR_FALLBACK,
+            bot_username=ctx.bot_username,
         )
+
+    # Update user profile in background (fire-and-forget)
+    asyncio.create_task(
+        _update_user_profile_background(
+            profile_store=ctx.profile_store,
+            user_id=ctx.user_id,
+            chat_id=ctx.chat_id,
+            thread_id=ctx.thread_id,
+            display_name=(
+                ctx.message.from_user.full_name if ctx.message.from_user else None
+            ),
+            username=ctx.message.from_user.username if ctx.message.from_user else None,
+            settings=ctx.settings,
+        )
+    )
+
+    # Process and send response
+    response_message = await _process_and_send_response(
+        ctx=ctx,
+        reply_text=reply_text,
+        tools_used_in_request=tools_used_in_request,
+        thinking_msg=thinking_msg,
+        thinking_message_sent=thinking_message_sent,
+        edit_image_tool=edit_image_tool,
+        generate_image_tool=generate_image_tool,
+        raw_text=raw_text,
+        text_content=text_content,
+        response_time_ms=response_time_ms,
+    )
 
 
 async def _handle_poll_vote_attempt(
@@ -3446,8 +3679,6 @@ async def _handle_poll_vote_attempt(
 
         # Try to find an active poll in this chat/thread
         # For now, we'll get the most recent poll
-        from app.services.polls import _active_polls
-
         # Find the most recent poll for this chat/thread
         recent_poll_id = None
         recent_time = 0
@@ -3471,8 +3702,6 @@ async def _handle_poll_vote_attempt(
                 # Get creation time
                 created = poll_data["created_at"]
                 if isinstance(created, str):
-                    from datetime import datetime
-
                     created_time = datetime.fromisoformat(created).timestamp()
                 else:
                     created_time = created
@@ -3493,8 +3722,6 @@ async def _handle_poll_vote_attempt(
                 "option_indices": numbers,
             }
         )
-
-        import json
 
         result_data = json.loads(vote_result)
 

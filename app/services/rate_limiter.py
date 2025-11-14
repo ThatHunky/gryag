@@ -5,7 +5,6 @@ import time
 from typing import Tuple
 
 from app.infrastructure.db_utils import get_db_connection
-from app.infrastructure.query_converter import convert_query_to_postgres
 from app.services import telemetry
 from app.services.redis_rate_limiter import RedisRateLimiter
 from app.services.redis_types import RedisLike
@@ -119,20 +118,16 @@ class RateLimiter:
 
         async with self._lock:
             async with get_db_connection(self._database_url) as conn:
-                query, params = convert_query_to_postgres(
-                    "DELETE FROM rate_limits WHERE window_start < $1",
-                    (window_start - self.WINDOW_SECONDS,)
-                )
+                query = "DELETE FROM rate_limits WHERE window_start < $1"
+                params = (window_start - self.WINDOW_SECONDS,)
                 await conn.execute(query, *params)
 
-                query, params = convert_query_to_postgres(
-                    """
+                query = """
                     SELECT request_count
                     FROM rate_limits
                     WHERE user_id = $1 AND window_start = $2
-                    """,
-                    (user_id, window_start),
-                )
+                    """
+                params = (user_id, window_start)
                 row = await conn.fetchrow(query, *params)
 
                 if row and row['request_count'] >= self._limit:
@@ -143,24 +138,20 @@ class RateLimiter:
                     return False, 0, retry_after
 
                 if row:
-                    query, params = convert_query_to_postgres(
-                        """
+                    query = """
                         UPDATE rate_limits
                         SET request_count = request_count + 1, last_seen = $1
                         WHERE user_id = $2 AND window_start = $3
-                        """,
-                        (current_ts, user_id, window_start),
-                    )
+                    """
+                    params = (current_ts, user_id, window_start)
                     await conn.execute(query, *params)
                     new_count = row['request_count'] + 1
                 else:
-                    query, params = convert_query_to_postgres(
-                        """
+                    query = """
                         INSERT INTO rate_limits (user_id, window_start, request_count, last_seen)
                         VALUES ($1, $2, 1, $3)
-                        """,
-                        (user_id, window_start, current_ts),
-                    )
+                    """
+                    params = (user_id, window_start, current_ts)
                     await conn.execute(query, *params)
                     new_count = 1
 
@@ -224,10 +215,8 @@ class RateLimiter:
         # Also reset in PostgreSQL
         async with self._lock:
             async with get_db_connection(self._database_url) as conn:
-                query, params = convert_query_to_postgres(
-                    "DELETE FROM rate_limits WHERE user_id = $1",
-                    (user_id,),
-                )
+                query = "DELETE FROM rate_limits WHERE user_id = $1"
+                params = (user_id,)
                 result = await conn.execute(query, *params)
                 pg_deleted = int(result.split()[-1]) if result.split()[-1].isdigit() else 0
                 deleted += pg_deleted

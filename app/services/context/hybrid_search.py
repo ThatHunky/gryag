@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -307,55 +308,66 @@ class HybridSearchEngine:
             if not keywords:
                 return []
 
-            # Build FTS5 query - quote each keyword to handle special chars
-            fts_query = " OR ".join(f'"{kw}"' for kw in keywords)
+            ts_terms = []
+            for kw in keywords:
+                sanitized = re.sub(r"[^a-z0-9]+", "", kw.lower())
+                if not sanitized:
+                    continue
+                ts_terms.append(f"{sanitized}:*")
 
-            # Build SQL query
+            if not ts_terms:
+                return []
+
+            ts_query = " | ".join(ts_terms)
+
+            where_clauses = [
+                "m.text_search_vector @@ to_tsquery('english', $1)",
+                "m.chat_id = $2",
+            ]
+            params: list[Any] = [ts_query, chat_id]
+            param_idx = 3
+
             if thread_id is None:
-                where_clause = "AND m.chat_id = ?"
-                params: list[Any] = [fts_query, chat_id]
+                where_clauses.append("m.thread_id IS NULL")
             else:
-                where_clause = "AND m.chat_id = ? AND m.thread_id = ?"
-                params = [fts_query, chat_id, thread_id]
+                where_clauses.append(f"m.thread_id = ${param_idx}")
+                params.append(thread_id)
+                param_idx += 1
 
-            # Add time range filter
             if time_range_days:
                 cutoff = int(time.time()) - (time_range_days * 86400)
-                where_clause += " AND m.ts >= ?"
+                where_clauses.append(f"m.ts >= ${param_idx}")
                 params.append(cutoff)
+                param_idx += 1
 
-            query_sql = f"""
-                SELECT m.id, m.chat_id, m.thread_id, m.user_id, m.role,
-                       m.text, m.media, m.ts, 
-                       rank as fts_rank
-                FROM messages_fts fts
-                JOIN messages m ON fts.rowid = m.id
-                WHERE messages_fts MATCH ? {where_clause}
-                ORDER BY rank
-                LIMIT ?
-            """
+            # Build LIMIT clause with proper parameter placeholder
+            limit_placeholder = f"${param_idx}"
             params.append(limit)
 
-            # Convert ? to $1, $2, etc.
-            param_count = 0
-            query_pg = ""
-            for char in query_sql:
-                if char == "?":
-                    param_count += 1
-                    query_pg += f"${param_count}"
-                else:
-                    query_pg += char
-            
+            query_sql = f"""
+                SELECT
+                    m.id,
+                    m.chat_id,
+                    m.thread_id,
+                    m.user_id,
+                    m.role,
+                    m.text,
+                    m.media,
+                    m.ts,
+                    ts_rank_cd(m.text_search_vector, to_tsquery('english', $1)) AS rank
+                FROM messages m
+                WHERE {' AND '.join(where_clauses)}
+                ORDER BY rank DESC
+                LIMIT {limit_placeholder}
+            """
+
             async with get_db_connection(self.database_url) as conn:
-                rows = await conn.fetch(query_pg, *params)
+                rows = await conn.fetch(query_sql, *params)
 
             # Build results
             results = []
             for row in rows:
-                # FTS5 rank is negative (lower is better), normalize to 0-1
-                # Typical ranks are -1.0 to -10.0
-                fts_rank = abs(row["fts_rank"])
-                keyword_score = 1.0 / (1.0 + fts_rank)  # Normalize to 0-1
+                keyword_score = float(row["rank"]) if row["rank"] is not None else 0.0
 
                 # Parse metadata
                 metadata = {}
@@ -503,31 +515,32 @@ class HybridSearchEngine:
 
         # Query database
         try:
-            async with get_db_connection(self.db_path) as db:
-                async with db.execute(
+            async with get_db_connection(self.database_url) as conn:
+                rows = await conn.fetch(
                     """
-                    SELECT user_id, COUNT(*) as msg_count
+                    SELECT user_id, COUNT(*) AS msg_count
                     FROM messages
-                    WHERE chat_id = ? AND user_id IS NOT NULL
+                    WHERE chat_id = $1 AND user_id IS NOT NULL
                     GROUP BY user_id
                     """,
-                    (chat_id,),
-                ) as cursor:
-                    rows = await cursor.fetchall()
+                    chat_id,
+                )
 
             if not rows:
                 return {}
 
             # Calculate weights based on message counts
-            max_count = max(row[1] for row in rows)
+            max_count = max(row["msg_count"] for row in rows)
             if max_count == 0:
                 return {}
 
-            weights = {}
-            for user_id, count in rows:
+            weights: dict[int, float] = {}
+            for row in rows:
+                uid = row["user_id"]
+                count = row["msg_count"]
                 # Linear scaling from 1.0 to 2.0 based on activity
                 weight = 1.0 + (count / max_count)
-                weights[user_id] = weight
+                weights[int(uid)] = weight
 
             # Cache it
             self._user_weight_cache[cache_key] = weights
@@ -562,75 +575,16 @@ class HybridSearchEngine:
     @staticmethod
     def _cosine_similarity(a: list[float], b: list[float]) -> float:
         """Calculate cosine similarity between two vectors."""
-        if not a or not b or len(a) != len(b):
-            return 0.0
+        from app.utils.text_processing import cosine_similarity
 
-        dot = sum(x * y for x, y in zip(a, b))
-        norm_a = math.sqrt(sum(x * x for x in a))
-        norm_b = math.sqrt(sum(y * y for y in b))
+        return cosine_similarity(a, b)
 
-        if norm_a == 0.0 or norm_b == 0.0:
-            return 0.0
-
-        return dot / (norm_a * norm_b)
-
-    @staticmethod
-    def _extract_keywords(query: str) -> list[str]:
+    def _extract_keywords(self, query: str) -> list[str]:
         """
         Extract keywords from query for FTS5 search.
 
         Removes stop words, normalizes whitespace.
         """
-        # Simple keyword extraction (can be enhanced)
-        stop_words = {
-            "the",
-            "a",
-            "an",
-            "and",
-            "or",
-            "but",
-            "in",
-            "on",
-            "at",
-            "to",
-            "for",
-            "of",
-            "with",
-            "by",
-            "from",
-            "as",
-            "is",
-            "was",
-            "are",
-            "were",
-            "been",
-            "be",
-            "have",
-            "has",
-            "had",
-            "do",
-            "does",
-            "did",
-            "will",
-            "would",
-            "should",
-            "could",
-            "may",
-            "might",
-            "can",
-            "about",
-            "that",
-            "this",
-            "these",
-            "those",
-        }
+        from app.utils.text_processing import extract_keywords
 
-        # Split and clean
-        words = query.lower().split()
-        keywords = [
-            w.strip(".,!?;:\"'()[]{}")
-            for w in words
-            if w.strip(".,!?;:\"'()[]{}") not in stop_words and len(w) > 2
-        ]
-
-        return keywords
+        return extract_keywords(query)

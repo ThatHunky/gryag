@@ -107,10 +107,20 @@ def build_tool_callbacks(telegram_service: TelegramService) -> dict:
             return json.dumps({"error": "Missing query or chat_id"})
 
         try:
-            logger.info(f"Calling find_user with query='{query}', chat_id={chat_id}")
+            # Validate and convert types
+            query_str = str(query) if query is not None else ""
+            if not query_str.strip():
+                return json.dumps({"error": "Query cannot be empty"})
+            
+            try:
+                chat_id_int = int(chat_id)
+            except (ValueError, TypeError):
+                return json.dumps({"error": f"Invalid chat_id: {chat_id}"})
+
+            logger.info(f"Calling find_user with query='{query_str}', chat_id={chat_id_int}")
             result = await telegram_service.find_user(
-                query=str(query),
-                chat_id=int(chat_id)
+                query=query_str,
+                chat_id=chat_id_int
             )
             logger.info(f"find_user returned: {result}")
             return json.dumps(result)
@@ -129,10 +139,17 @@ def build_tool_callbacks(telegram_service: TelegramService) -> dict:
             return json.dumps({"success": False, "error": "Missing user_id or chat_id"})
 
         try:
-            logger.info(f"Calling kick_user with user_id={user_id}, chat_id={chat_id}")
+            # Validate and convert types
+            try:
+                user_id_int = int(user_id)
+                chat_id_int = int(chat_id)
+            except (ValueError, TypeError) as e:
+                return json.dumps({"success": False, "error": f"Invalid user_id or chat_id: {str(e)}"})
+
+            logger.info(f"Calling kick_user with user_id={user_id_int}, chat_id={chat_id_int}")
             result = await telegram_service.kick_user(
-                user_id=int(user_id),
-                chat_id=int(chat_id)
+                user_id=user_id_int,
+                chat_id=chat_id_int
             )
             logger.info(f"kick_user returned: {result}")
             return json.dumps({"success": True, "message": result})
@@ -152,11 +169,21 @@ def build_tool_callbacks(telegram_service: TelegramService) -> dict:
             return json.dumps({"success": False, "error": "Missing user_id or chat_id"})
 
         try:
-            logger.info(f"Calling mute_user with user_id={user_id}, chat_id={chat_id}, duration={duration_minutes}")
+            # Validate and convert types
+            try:
+                user_id_int = int(user_id)
+                chat_id_int = int(chat_id)
+                duration_int = int(duration_minutes) if duration_minutes is not None else None
+                if duration_int is not None and duration_int < 0:
+                    return json.dumps({"success": False, "error": "duration_minutes must be non-negative"})
+            except (ValueError, TypeError) as e:
+                return json.dumps({"success": False, "error": f"Invalid parameter type: {str(e)}"})
+
+            logger.info(f"Calling mute_user with user_id={user_id_int}, chat_id={chat_id_int}, duration={duration_int}")
             result = await telegram_service.mute_user(
-                user_id=int(user_id),
-                chat_id=int(chat_id),
-                duration_minutes=int(duration_minutes) if duration_minutes else None
+                user_id=user_id_int,
+                chat_id=chat_id_int,
+                duration_minutes=duration_int
             )
             logger.info(f"mute_user returned: {result}")
             return json.dumps({"success": True, "message": result})
@@ -175,10 +202,17 @@ def build_tool_callbacks(telegram_service: TelegramService) -> dict:
             return json.dumps({"success": False, "error": "Missing user_id or chat_id"})
 
         try:
-            logger.info(f"Calling unmute_user with user_id={user_id}, chat_id={chat_id}")
+            # Validate and convert types
+            try:
+                user_id_int = int(user_id)
+                chat_id_int = int(chat_id)
+            except (ValueError, TypeError) as e:
+                return json.dumps({"success": False, "error": f"Invalid user_id or chat_id: {str(e)}"})
+
+            logger.info(f"Calling unmute_user with user_id={user_id_int}, chat_id={chat_id_int}")
             result = await telegram_service.unmute_user(
-                user_id=int(user_id),
-                chat_id=int(chat_id)
+                user_id=user_id_int,
+                chat_id=chat_id_int
             )
             logger.info(f"unmute_user returned: {result}")
             return json.dumps({"success": True, "message": result})

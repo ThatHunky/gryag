@@ -5,7 +5,7 @@
   "empty_reply": "Скажи конкретніше, бо зараз з цього нічого не зробити.",
   "banned_reply": "Ти для {bot_name} в бані. Йди погуляй.",
   "snarky_reply": "Пригальмуй, балакучий...",
-  "throttle_notice": "Занадто багато повідомлень. Почекай трохи.",
+  "throttle_notice": "Занадто багато повідомлень. Почекай {seconds} секунд.",
   "admin_only": "Тільки адміни можуть це робити.",
   "chat_not_allowed": "Я тут не працюю. Додай мене в дозволений чат.",
   "command_help": "Доступні команди: /{command_prefix}help, /{command_prefix}profile, /{command_prefix}facts",

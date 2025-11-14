@@ -46,6 +46,40 @@ class _DummyGemini:
         return [0.1, 0.2, 0.3]
 
 
+class _DummyMemoryRepo:
+    async def add_memory(self, user_id: int, chat_id: int, memory_text: str):
+        class Memory:
+            def __init__(self):
+                self.id = 1
+        return Memory()
+    
+    async def get_memories_for_user(self, user_id: int, chat_id: int):
+        return []
+    
+    async def get_memory_by_id(self, memory_id: int):
+        return None
+    
+    async def delete_memory(self, memory_id: int):
+        return True
+    
+    async def delete_all_memories(self, user_id: int, chat_id: int):
+        return 0
+
+
+class _DummyTelegramService:
+    async def find_user(self, query: str, chat_id: int):
+        return {"user_id": 123, "username": "test"}
+    
+    async def kick_user(self, user_id: int, chat_id: int):
+        return "User kicked"
+    
+    async def mute_user(self, user_id: int, chat_id: int, duration_minutes: int | None = None):
+        return "User muted"
+    
+    async def unmute_user(self, user_id: int, chat_id: int):
+        return "User unmuted"
+
+
 def _names_from_defs(defs: list[dict]) -> list[str]:
     names = []
     for d in defs:
@@ -101,7 +135,7 @@ async def test_registry_callbacks_include_defined_tools_when_enabled(monkeypatch
         store=types.SimpleNamespace(),
         gemini_client=_DummyGemini(),
         profile_store=_DummyProfileStore(),
-        memory_repo=None,
+        memory_repo=_DummyMemoryRepo(),
         chat_id=111,
         thread_id=222,
         message_id=333,
@@ -110,6 +144,7 @@ async def test_registry_callbacks_include_defined_tools_when_enabled(monkeypatch
         bot=_DummyBot(),
         message=_DummyMessage(),
         image_gen_service=_DummyImageService(),
+        telegram_service=_DummyTelegramService(),
     )
 
     # Ensure every defined tool name has a callback

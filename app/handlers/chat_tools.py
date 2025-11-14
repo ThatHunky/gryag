@@ -27,7 +27,12 @@ from app.services.calculator import calculator_tool, CALCULATOR_TOOL_DEFINITION
 from app.services.weather import weather_tool, WEATHER_TOOL_DEFINITION
 from app.services.currency import currency_tool, CURRENCY_TOOL_DEFINITION
 from app.services.polls import polls_tool, POLLS_TOOL_DEFINITION
-from app.services.search_tool import search_web_tool, SEARCH_WEB_TOOL_DEFINITION
+from app.services.search_tool import (
+    fetch_web_content_tool,
+    FETCH_WEB_CONTENT_TOOL_DEFINITION,
+    search_web_tool,
+    SEARCH_WEB_TOOL_DEFINITION,
+)
 from app.services.image_generation import (
     GENERATE_IMAGE_TOOL_DEFINITION,
     EDIT_IMAGE_TOOL_DEFINITION,
@@ -175,6 +180,7 @@ def build_tool_definitions(settings: Settings, is_admin: bool = False) -> list[d
     # Web search (if enabled)
     if settings.enable_web_search:
         tool_definitions.append(SEARCH_WEB_TOOL_DEFINITION)
+        tool_definitions.append(FETCH_WEB_CONTENT_TOOL_DEFINITION)
 
     # Calculator
     tool_definitions.append(CALCULATOR_TOOL_DEFINITION)
@@ -421,6 +427,18 @@ def build_tool_callbacks(
         # Create wrapper that downloads and sends images for image searches
         async def search_web_callback(params: dict[str, Any]) -> str:
             """Search web and send images if applicable."""
+            # Log search_type for debugging
+            search_type = params.get("search_type", "text")
+            query = params.get("query", "")
+            logger.info(
+                f"Web search called: search_type={search_type}, query={query[:100]}",
+                extra={
+                    "chat_id": chat_id,
+                    "search_type": search_type,
+                    "query_length": len(query),
+                }
+            )
+            
             # Call the original search_web_tool
             result_json = await search_web_tool(params, gemini_client, api_key=None)
 
@@ -582,6 +600,11 @@ def build_tool_callbacks(
             return json.dumps(result)
 
         callbacks["search_web"] = make_tracked_callback("search_web", search_web_callback)
+        
+        # Fetch web content tool
+        callbacks["fetch_web_content"] = make_tracked_callback(
+            "fetch_web_content", fetch_web_content_tool
+        )
 
     # Memory tools (if enabled and memory_repo available)
     if settings.enable_tool_based_memory and memory_repo is not None:

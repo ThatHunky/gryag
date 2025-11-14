@@ -757,3 +757,34 @@ BEGIN
     DELETE FROM user_request_history
     WHERE requested_at < (strftime('%s', 'now') - 604800); -- 7 days in seconds
 END;
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- Checkers Game - User vs. user challenge-based gameplay
+-- Added: Implementation date
+-- Supports public challenges with accept/cancel flow and tracked board messages
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS checkers_games (
+    id TEXT PRIMARY KEY,
+    chat_id INTEGER NOT NULL,
+    thread_id INTEGER,
+    challenger_id INTEGER NOT NULL,
+    opponent_id INTEGER,
+    current_player INTEGER,
+    game_state TEXT NOT NULL,  -- JSON board state (empty JSON while pending)
+    game_status TEXT NOT NULL CHECK(game_status IN ('pending', 'active', 'finished', 'cancelled')),
+    winner_id INTEGER,
+    challenge_message_id INTEGER,  -- Telegram message ID for open challenge
+    board_message_id INTEGER,      -- Telegram message ID for active board
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkers_games_chat_thread
+    ON checkers_games(chat_id, thread_id);
+CREATE INDEX IF NOT EXISTS idx_checkers_games_challenger
+    ON checkers_games(challenger_id);
+CREATE INDEX IF NOT EXISTS idx_checkers_games_opponent
+    ON checkers_games(opponent_id);
+CREATE INDEX IF NOT EXISTS idx_checkers_games_status
+    ON checkers_games(game_status);

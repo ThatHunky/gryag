@@ -161,12 +161,55 @@ class MultiLevelContextManager:
 
         max_tokens = max_tokens or self.settings.context_token_budget
 
-        # Token allocation (as percentages of budget)
-        immediate_budget = int(max_tokens * 0.20)  # 20% - most recent
-        recent_budget = int(max_tokens * 0.30)  # 30% - chronological
-        relevant_budget = int(max_tokens * 0.25)  # 25% - search results
-        background_budget = int(max_tokens * 0.15)  # 15% - profile
-        episodic_budget = int(max_tokens * 0.10)  # 10% - episodes
+        # Calculate adaptive budget allocation based on query and context
+        from app.services.context.token_optimizer import calculate_dynamic_budget
+
+        # Get recent message count for activity detection
+        recent_messages = await self.context_store.recent(
+            chat_id, thread_id, limit=10
+        )
+        recent_message_count = len(recent_messages)
+
+        # Check if profile facts exist
+        has_profile_facts = False
+        if self.profile_store:
+            try:
+                facts = await self.profile_store.get_facts(
+                    user_id, chat_id, limit=1, min_confidence=0.5
+                )
+                has_profile_facts = len(facts) > 0
+            except Exception:
+                pass
+
+        # Check if episodes exist
+        has_episodes = False
+        if self.episode_store:
+            try:
+                episodes = await self.episode_store.retrieve_relevant_episodes(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    query=query_text,
+                    limit=1,
+                    min_importance=0.3,
+                )
+                has_episodes = len(episodes) > 0
+            except Exception:
+                pass
+
+        # Calculate dynamic budgets
+        budget_percentages = calculate_dynamic_budget(
+            query_text=query_text,
+            recent_message_count=recent_message_count,
+            has_profile_facts=has_profile_facts,
+            has_episodes=has_episodes,
+        )
+
+        # Convert percentages to token budgets
+        immediate_budget = int(max_tokens * budget_percentages["immediate"])
+        recent_budget = int(max_tokens * budget_percentages["recent"])
+        relevant_budget = int(max_tokens * budget_percentages["relevant"])
+        background_budget = int(max_tokens * budget_percentages["background"])
+        episodic_budget = int(max_tokens * budget_percentages["episodic"])
 
         # Level 1: Immediate context (always included)
         immediate_start = time.time()
@@ -185,12 +228,32 @@ class MultiLevelContextManager:
         else:
             tasks.append(asyncio.sleep(0, result=None))
 
+        # Detect query type to adjust context retrieval
+        query_type = self._detect_query_type(query_text)
+        is_news_query = query_type == "news"
+        
+        # For news queries, reduce or skip relevant context (past conversations)
+        # to prevent pulling in irrelevant old conversations
         if include_relevant and self.hybrid_search:
-            tasks.append(
-                self._get_relevant_context(
-                    query_text, chat_id, thread_id, user_id, relevant_budget
+            if is_news_query:
+                # For news queries, significantly reduce relevant context budget
+                # or skip it entirely to avoid confusion from old conversations
+                news_relevant_budget = int(relevant_budget * 0.3)  # 30% of normal budget
+                tasks.append(
+                    self._get_relevant_context(
+                        query_text, chat_id, thread_id, user_id, news_relevant_budget
+                    )
                 )
-            )
+                LOGGER.debug(
+                    f"News query detected, reducing relevant context budget to {news_relevant_budget} tokens",
+                    extra={"chat_id": chat_id, "query": query_text[:100]}
+                )
+            else:
+                tasks.append(
+                    self._get_relevant_context(
+                        query_text, chat_id, thread_id, user_id, relevant_budget
+                    )
+                )
         else:
             tasks.append(asyncio.sleep(0, result=None))
 
@@ -475,11 +538,26 @@ class MultiLevelContextManager:
                 f"(lost {media_count_before - media_count_after})"
             )
 
-        # Calculate time span
+        # Calculate time span from actual timestamps
         time_span = 0
         if recent_only:
-            # Would need timestamps in messages - for now just estimate
-            time_span = len(recent_only) * 60  # Assume 1 message per minute
+            timestamps = [
+                msg.get("ts")
+                for msg in recent_only
+                if msg.get("ts") is not None
+            ]
+            if len(timestamps) >= 2:
+                # Calculate span from oldest to newest
+                oldest_ts = min(timestamps)
+                newest_ts = max(timestamps)
+                time_span = newest_ts - oldest_ts
+            elif len(timestamps) == 1:
+                # Single message, estimate based on current time
+                now = int(time.time())
+                time_span = now - timestamps[0]
+            else:
+                # No timestamps available, estimate conservatively
+                time_span = len(recent_only) * 60  # Assume 1 message per minute
 
         tokens = self._estimate_tokens(recent_only)
 
@@ -488,6 +566,80 @@ class MultiLevelContextManager:
             token_count=tokens,
             time_span_seconds=time_span,
         )
+
+    def _detect_query_type(self, query: str) -> str:
+        """
+        Detect query type based on patterns, keywords, and structure.
+        
+        Returns: "news", "factual", "conversational", "command", "general"
+        """
+        if not query:
+            return "general"
+        
+        query_lower = query.lower().strip()
+        query_words = query_lower.split()
+        query_length = len(query_words)
+        
+        # News-related keywords (Ukrainian and English)
+        news_keywords = [
+            "новини", "новин", "новина", "новинка",
+            "атака", "атаки", "атаку", "атакою",
+            "події", "подій", "подія", "подією",
+            "сьогодні", "сьогоднішня", "сьогоднішні", "сьогоднішньої",
+            "останні", "останніх", "остання", "останнє",
+            "що сталося", "що відбулося", "що трапилося",
+            "news", "latest", "recent", "today", "attack", "attacks",
+            "events", "happened", "breaking", "breaking news"
+        ]
+        
+        # Factual/lookup question words (Ukrainian and English)
+        factual_indicators = [
+            "що", "хто", "коли", "де", "як", "чому", "скільки",
+            "what", "who", "when", "where", "how", "why", "how many", "how much",
+            "який", "яка", "яке", "які",
+            "which", "whose"
+        ]
+        
+        # Command indicators
+        command_indicators = [
+            "зроби", "створи", "напиши", "покажи", "знайди", "пошукай",
+            "do", "create", "write", "show", "find", "search", "generate",
+            "згенеруй", "зроби", "створи", "намалюй"
+        ]
+        
+        # Conversational indicators (greetings, casual)
+        conversational_indicators = [
+            "привіт", "вітаю", "добрий день", "доброго ранку", "добрий вечір",
+            "hello", "hi", "hey", "good morning", "good evening", "good day",
+            "як справи", "що нового", "how are you", "what's up"
+        ]
+        
+        # Check for news keywords
+        for keyword in news_keywords:
+            if keyword in query_lower:
+                return "news"
+        
+        # Check for factual questions (question words at start)
+        if query_words and query_words[0] in factual_indicators:
+            return "factual"
+        
+        # Check for any factual indicators in query
+        if any(indicator in query_lower for indicator in factual_indicators):
+            return "factual"
+        
+        # Check for commands (imperative verbs)
+        if any(indicator in query_lower for indicator in command_indicators):
+            return "command"
+        
+        # Check for conversational patterns
+        if any(indicator in query_lower for indicator in conversational_indicators):
+            return "conversational"
+        
+        # Very short queries (< 3 words) are likely conversational or follow-ups
+        if query_length < 3:
+            return "conversational"
+        
+        return "general"
 
     async def _get_relevant_context(
         self,
@@ -501,6 +653,7 @@ class MultiLevelContextManager:
         Get relevant context via hybrid search.
 
         Uses semantic + keyword + temporal + importance signals.
+        Filters out low-relevance results and old context for news queries.
         """
         if not self.hybrid_search:
             return RelevantContext(
@@ -509,23 +662,70 @@ class MultiLevelContextManager:
                 average_relevance=0.0,
             )
 
+        # Detect query type
+        query_type = self._detect_query_type(query)
+        is_news_query = query_type == "news"
+        
+        # For news queries, exclude old context
+        time_range_days = None
+        if is_news_query:
+            time_range_days = self.settings.exclude_old_context_for_news_days
+            LOGGER.debug(
+                f"News query detected, excluding context older than {time_range_days} days",
+                extra={"query": query[:100], "chat_id": chat_id}
+            )
+
         # Determine how many results we need
         # Assume average of ~150 tokens per message
         estimated_results = max(1, max_tokens // 150)
         limit = min(estimated_results, self.settings.relevant_context_size)
 
         # Execute hybrid search with timeout to prevent runaway searches
-        try:
-            results = await self.hybrid_search.search(
-                query=query,
-                chat_id=chat_id,
-                thread_id=thread_id,
-                user_id=user_id,
-                limit=limit,
-                timeout_seconds=5.0,  # 5 second timeout for relevant context search
-            )
-        except Exception as e:
-            LOGGER.error(f"Hybrid search failed: {e}", exc_info=True)
+        # Retry logic for transient errors
+        max_retries = 2
+        last_error = None
+        results = []
+        for attempt in range(max_retries + 1):
+            try:
+                results = await self.hybrid_search.search(
+                    query=query,
+                    chat_id=chat_id,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    limit=limit * 2,  # Get more results to filter
+                    time_range_days=time_range_days,
+                    timeout_seconds=5.0,  # 5 second timeout for relevant context search
+                )
+                last_error = None  # Success
+                break  # Success, exit retry loop
+            except asyncio.TimeoutError:
+                # Timeout errors shouldn't be retried
+                LOGGER.warning(
+                    f"Hybrid search timeout for chat {chat_id}",
+                    extra={"chat_id": chat_id, "query": query[:100], "attempt": attempt + 1}
+                )
+                last_error = "timeout"
+                break
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries:
+                    # Retry with exponential backoff
+                    wait_time = 0.1 * (2 ** attempt)
+                    LOGGER.warning(
+                        f"Hybrid search failed (attempt {attempt + 1}/{max_retries + 1}), retrying in {wait_time}s: {e}",
+                        extra={"chat_id": chat_id, "query": query[:100]}
+                    )
+                    await asyncio.sleep(wait_time)
+                else:
+                    LOGGER.error(
+                        f"Hybrid search failed after {max_retries + 1} attempts: {e}",
+                        exc_info=True,
+                        extra={"chat_id": chat_id, "query": query[:100]}
+                    )
+
+        # Check if we have results (search succeeded)
+        if last_error is not None or not results:
+            # Return empty context on failure
             return RelevantContext(
                 snippets=[],
                 token_count=0,
@@ -549,15 +749,28 @@ class MultiLevelContextManager:
             snippets.append(snippet)
             total_relevance += result.final_score
 
+        # Prune low-relevance snippets using utility function
+        from app.services.context.token_optimizer import prune_low_relevance
+
+        min_score = self.settings.min_relevance_score_threshold
+        snippets = prune_low_relevance(snippets, min_score=min_score)
+
+        # Recalculate total relevance after pruning
+        total_relevance = sum(s.get("score", 0.0) for s in snippets)
+
         # Apply semantic deduplication if enabled
         if self.settings.enable_semantic_deduplication:
             snippets = self._deduplicate_snippets(snippets)
+            # Recalculate again after deduplication
+            total_relevance = sum(s.get("score", 0.0) for s in snippets)
 
         # Truncate to budget
         snippets = self._truncate_snippets_to_budget(snippets, max_tokens)
 
         avg_relevance = total_relevance / len(snippets) if snippets else 0.0
-        tokens = sum(len(s["text"].split()) * 1.3 for s in snippets)  # Rough estimate
+        # Use accurate token estimation
+        from app.services.context.token_optimizer import estimate_tokens_accurate
+        tokens = sum(estimate_tokens_accurate(s.get("text", "")) for s in snippets)
 
         return RelevantContext(
             snippets=snippets,
@@ -650,15 +863,17 @@ class MultiLevelContextManager:
                     LOGGER.warning(f"Failed to get chat facts: {e}")
 
             # Estimate tokens and truncate if needed
-            summary_tokens = len(summary.split()) * 1.3 if summary else 0
+            from app.services.context.token_optimizer import estimate_tokens_accurate
+
+            summary_tokens = estimate_tokens_accurate(summary) if summary else 0
             facts_tokens = sum(
-                len(f["fact_key"].split() + f["fact_value"].split()) * 1.3
+                estimate_tokens_accurate(f.get("fact_key", "") + " " + f.get("fact_value", ""))
                 for f in facts
             )
 
-            chat_summary_tokens = len(chat_summary.split()) * 1.3 if chat_summary else 0
+            chat_summary_tokens = estimate_tokens_accurate(chat_summary) if chat_summary else 0
             chat_facts_tokens = sum(
-                len(f["fact_key"].split() + f["fact_value"].split()) * 1.3
+                estimate_tokens_accurate(f.get("fact_key", "") + " " + f.get("fact_value", ""))
                 for f in chat_facts
             )
 
@@ -692,7 +907,11 @@ class MultiLevelContextManager:
             )
 
         except Exception as e:
-            LOGGER.error(f"Failed to get background context: {e}", exc_info=True)
+            LOGGER.error(
+                f"Failed to get background context: {e}",
+                exc_info=True,
+                extra={"user_id": user_id, "chat_id": chat_id, "query": query[:100]}
+            )
             return BackgroundContext(
                 profile_summary=None,
                 key_facts=[],
@@ -734,8 +953,10 @@ class MultiLevelContextManager:
             episodes = []
             total_tokens = 0
 
+            from app.services.context.token_optimizer import estimate_tokens_accurate
+
             for ep in episodes_obj:
-                summary_tokens = len(ep.summary.split()) * 1.3
+                summary_tokens = estimate_tokens_accurate(ep.summary)
 
                 if total_tokens + summary_tokens > max_tokens:
                     break
@@ -759,7 +980,11 @@ class MultiLevelContextManager:
             )
 
         except Exception as e:
-            LOGGER.error(f"Failed to get episodic context: {e}", exc_info=True)
+            LOGGER.error(
+                f"Failed to get episodic context: {e}",
+                exc_info=True,
+                extra={"user_id": user_id, "chat_id": chat_id, "query": query[:100]}
+            )
             return EpisodicContext(
                 episodes=[],
                 token_count=0,
@@ -767,29 +992,20 @@ class MultiLevelContextManager:
 
     def _estimate_tokens(self, messages: list[dict[str, Any]]) -> int:
         """
-        Estimate token count for messages.
+        Estimate token count for messages using accurate token estimation.
 
-        Rough heuristic:
-        - Text: words * 1.3 (accounts for tokenization)
+        Uses character-based heuristic that accounts for:
+        - English: ~4 chars per token
+        - Ukrainian/Cyrillic: ~5 chars per token
+        - Code/symbols: ~3.5 chars per token
         - Media (inline_data): ~258 tokens per item (Gemini's image token cost)
         - Media (file_data/URI): ~100 tokens per item (YouTube URLs, etc.)
         """
+        from app.services.context.token_optimizer import estimate_message_tokens
+
         total = 0
         for msg in messages:
-            parts = msg.get("parts", [])
-            for part in parts:
-                if isinstance(part, dict):
-                    if "text" in part:
-                        text = part["text"]
-                        words = len(text.split())
-                        total += int(words * 1.3)
-                    elif "inline_data" in part:
-                        # Images/audio/video consume significant tokens
-                        # Gemini uses ~258 tokens per image
-                        total += 258
-                    elif "file_data" in part:
-                        # File URIs (e.g., YouTube URLs) are cheaper
-                        total += 100
+            total += estimate_message_tokens(msg)
         return total
 
     def _truncate_to_budget(
@@ -819,9 +1035,11 @@ class MultiLevelContextManager:
         truncated = []
         total_tokens = 0
 
+        from app.services.context.token_optimizer import estimate_tokens_accurate
+
         for snippet in snippets:
             text = snippet.get("text", "")
-            tokens = int(len(text.split()) * 1.3)
+            tokens = estimate_tokens_accurate(text)
 
             if total_tokens + tokens > max_tokens:
                 break

@@ -354,6 +354,12 @@ class Settings(BaseSettings):
     deduplication_similarity_threshold: float = Field(
         0.85, alias="DEDUPLICATION_SIMILARITY_THRESHOLD", ge=0.7, le=0.99
     )  # Threshold for considering snippets duplicates
+    min_relevance_score_threshold: float = Field(
+        0.3, alias="MIN_RELEVANCE_SCORE_THRESHOLD", ge=0.0, le=1.0
+    )  # Minimum relevance score for including context snippets (filters out low-quality matches)
+    exclude_old_context_for_news_days: int = Field(
+        30, alias="EXCLUDE_OLD_CONTEXT_FOR_NEWS_DAYS", ge=1, le=365
+    )  # Exclude context older than N days for news queries (prevents irrelevant old conversations)
     max_tool_response_tokens: int = Field(
         300, alias="MAX_TOOL_RESPONSE_TOKENS", ge=100, le=1000
     )  # Maximum tokens per tool response

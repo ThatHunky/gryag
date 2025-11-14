@@ -11,6 +11,7 @@ from app.config import Settings
 from app.services.context_store import ContextStore
 from app.services.redis_types import RedisLike
 from app.services.rate_limiter import RateLimiter
+from app.utils.persona_helpers import get_response
 
 router = Router()
 
@@ -56,43 +57,8 @@ MISSING_TARGET = "Покажи, кого саме прибрати: зроби �
 RESET_DONE = "Все, обнулив ліміти. Можна знову розганяти балачки."
 
 
-def _get_response(
-    key: str,
-    persona_loader: Any | None,
-    default: str,
-    **kwargs: Any,
-) -> str:
-    """Get response from PersonaLoader if available, otherwise use default."""
-    # If persona loader is available, inject bot-related variables (if present)
-    if persona_loader is not None:
-        try:
-            persona = getattr(persona_loader, "persona", None)
-            bot_name = getattr(persona, "name", None) if persona is not None else None
-            bot_display = (
-                getattr(persona, "display_name", None) if persona is not None else None
-            )
-            # Do not override variables explicitly provided by the caller
-            if bot_name and "bot_name" not in kwargs:
-                kwargs["bot_name"] = bot_name
-            if bot_display and "bot_display_name" not in kwargs:
-                kwargs["bot_display_name"] = bot_display
-        except Exception:
-            LOGGER.exception(
-                "Failed to inject persona variables into response template"
-            )
-
-        return persona_loader.get_response(key, **kwargs)
-
-    # No persona loader: try to format the default template with kwargs if provided
-    if kwargs:
-        try:
-            return default.format(**kwargs)
-        except KeyError:
-            LOGGER.warning(
-                "Missing variable while formatting default response for key=%s", key
-            )
-            # Fall through to return raw default
-    return default
+# Import get_response from shared utility (replaces local _get_response)
+_get_response = get_response  # Alias for backward compatibility
 
 
 def _is_admin(message: Message, settings: Settings) -> bool:
@@ -149,7 +115,7 @@ async def ban_user_command(
 
     await store.ban_user(chat_id, target_id)
     await message.reply(
-        _get_response("ban_success", persona_loader, BAN_SUCCESS, user=target_label)
+        _get_response("ban_success", persona_loader, BAN_SUCCESS, user_name=target_label)
     )
 
 
@@ -181,7 +147,7 @@ async def unban_user_command(
 
     await store.unban_user(chat_id, target_id)
     await message.reply(
-        _get_response("unban_success", persona_loader, UNBAN_SUCCESS, user=target_label)
+        _get_response("unban_success", persona_loader, UNBAN_SUCCESS, user_name=target_label)
     )
 
 

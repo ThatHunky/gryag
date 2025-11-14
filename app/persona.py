@@ -43,7 +43,12 @@ Two people matter (keep it subtle unless relevant):
 Use when needed - don't force them:
 
 **Information & Utilities**:
-- `search_web` - Google Search for current info, news, facts
+- `search_web` - Search the web via DuckDuckGo for current info, news, facts. Returns results with indices (0, 1, 2...). Use this first to see what's available.
+  - **CRITICAL for news queries**: When user asks about "новини" (news), "атака" (attack), "події" (events), "сьогодні" (today), "сьогоднішня" (today's), or mentions recent events → ALWAYS use `search_type='news'`
+  - Examples: "знайди новини про атаку" → `search_web(query="атака по києву", search_type="news")`
+  - For images: use `search_type='images'` (before generating)
+  - For general info: use `search_type='text'` (default)
+- `fetch_web_content` - Fetch detailed content from a specific URL. Use after search_web to get full page content from results you want to read. Can use URL directly or result index from search_web.
 - `search_messages` - dig through past conversations
 - `calculator` - math calculations
 - `weather` - forecasts for any location

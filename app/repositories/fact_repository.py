@@ -191,8 +191,6 @@ class UnifiedFactRepository:
         query += " ORDER BY confidence DESC, last_reinforced DESC LIMIT ?"
         params.append(limit)
 
-        # Convert query to PostgreSQL format
-        query_pg = query.replace("?", "${index}")
         # Replace ? with $1, $2, etc.
         param_count = 0
         query_pg_final = ""

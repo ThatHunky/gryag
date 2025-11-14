@@ -34,7 +34,6 @@ from pathlib import Path
 from typing import Tuple
 
 from app.infrastructure.db_utils import get_db_connection
-from app.infrastructure.query_converter import convert_query_to_postgres
 from app.services import telemetry
 from app.services.redis_rate_limiter import RedisFeatureRateLimiter
 from app.services.redis_types import RedisLike
@@ -198,27 +197,23 @@ class FeatureRateLimiter:
                     )
                     # Still record throttled request in PostgreSQL for analytics
                     async with get_db_connection(self._database_url) as conn:
-                        query, params = convert_query_to_postgres(
-                            """
+                        query = """
                             INSERT INTO user_request_history
                             (user_id, feature_name, requested_at, was_throttled, created_at)
                             VALUES ($1, $2, $3, 1, $4)
-                            """,
-                            (user_id, feature, current_ts, current_ts),
-                        )
+                        """
+                        params = (user_id, feature, current_ts, current_ts)
                         await conn.execute(query, *params)
                     return False, redis_retry_after, should_show_error
 
                 # Allowed - record successful request and return
                 async with get_db_connection(self._database_url) as conn:
-                    query, params = convert_query_to_postgres(
-                        """
+                    query = """
                         INSERT INTO user_request_history
                         (user_id, feature_name, requested_at, was_throttled, created_at)
                         VALUES ($1, $2, $3, 0, $4)
-                        """,
-                        (user_id, feature, current_ts, current_ts),
-                    )
+                    """
+                    params = (user_id, feature, current_ts, current_ts)
                     await conn.execute(query, *params)
 
                 telemetry.increment_counter(
@@ -232,21 +227,17 @@ class FeatureRateLimiter:
         async with self._lock:
             async with get_db_connection(self._database_url) as conn:
                 # Clean up old records
-                query, params = convert_query_to_postgres(
-                    "DELETE FROM feature_rate_limits WHERE window_start < $1",
-                    (window_start - window_seconds,),
-                )
+                query = "DELETE FROM feature_rate_limits WHERE window_start < $1"
+                params = (window_start - window_seconds,)
                 await conn.execute(query, *params)
 
                 # Check current count
-                query, params = convert_query_to_postgres(
-                    """
+                query = """
                     SELECT request_count
                     FROM feature_rate_limits
                     WHERE user_id = $1 AND feature_name = $2 AND window_start = $3
-                    """,
-                    (user_id, feature, window_start),
-                )
+                """
+                params = (user_id, feature, window_start)
                 row = await conn.fetchrow(query, *params)
 
                 if row and row["request_count"] >= limit_per_hour:
@@ -260,48 +251,40 @@ class FeatureRateLimiter:
                         error_shown=str(should_show_error),
                     )
                     # Record throttled request
-                    query, params = convert_query_to_postgres(
-                        """
+                    query = """
                         INSERT INTO user_request_history
                         (user_id, feature_name, requested_at, was_throttled, created_at)
                         VALUES ($1, $2, $3, 1, $4)
-                        """,
-                        (user_id, feature, current_ts, current_ts),
-                    )
+                    """
+                    params = (user_id, feature, current_ts, current_ts)
                     await conn.execute(query, *params)
                     return False, retry_after, should_show_error
 
                 # Increment count
                 if row:
-                    query, params = convert_query_to_postgres(
-                        """
+                    query = """
                         UPDATE feature_rate_limits
                         SET request_count = request_count + 1, last_request = $1
                         WHERE user_id = $2 AND feature_name = $3 AND window_start = $4
-                        """,
-                        (current_ts, user_id, feature, window_start),
-                    )
+                    """
+                    params = (current_ts, user_id, feature, window_start)
                     await conn.execute(query, *params)
                 else:
-                    query, params = convert_query_to_postgres(
-                        """
+                    query = """
                         INSERT INTO feature_rate_limits
                         (user_id, feature_name, window_start, request_count, last_request)
                         VALUES ($1, $2, $3, 1, $4)
-                        """,
-                        (user_id, feature, window_start, current_ts),
-                    )
+                    """
+                    params = (user_id, feature, window_start, current_ts)
                     await conn.execute(query, *params)
 
                 # Record successful request
-                query, params = convert_query_to_postgres(
-                    """
+                query = """
                     INSERT INTO user_request_history
                     (user_id, feature_name, requested_at, was_throttled, created_at)
                     VALUES ($1, $2, $3, 0, $4)
-                    """,
-                    (user_id, feature, current_ts, current_ts),
-                )
+                """
+                params = (user_id, feature, current_ts, current_ts)
                 await conn.execute(query, *params)
 
         telemetry.increment_counter(
@@ -343,14 +326,12 @@ class FeatureRateLimiter:
 
         async with self._lock:
             async with get_db_connection(self._database_url) as conn:
-                query, params = convert_query_to_postgres(
-                    """
+                query = """
                     SELECT last_used, cooldown_seconds
                     FROM feature_cooldowns
                     WHERE user_id = $1 AND feature_name = $2
-                    """,
-                    (user_id, feature),
-                )
+                """
+                params = (user_id, feature)
                 row = await conn.fetchrow(query, *params)
 
                 if row:
@@ -374,16 +355,14 @@ class FeatureRateLimiter:
                         return False, retry_after, should_show_error
 
                 # Update or insert cooldown record
-                query, params = convert_query_to_postgres(
-                    """
+                query = """
                     INSERT INTO feature_cooldowns
                     (user_id, feature_name, last_used, cooldown_seconds)
                     VALUES ($1, $2, $3, $4)
                     ON CONFLICT (user_id, feature_name) DO UPDATE SET
                         last_used = $3, cooldown_seconds = $4
-                    """,
-                    (user_id, feature, current_ts, cooldown_seconds),
-                )
+                """
+                params = (user_id, feature, current_ts, cooldown_seconds)
                 await conn.execute(query, *params)
 
         telemetry.increment_counter(
@@ -405,14 +384,12 @@ class FeatureRateLimiter:
 
         async with get_db_connection(self._database_url) as conn:
             # Get current rate limits
-            query, params = convert_query_to_postgres(
-                """
+            query = """
                 SELECT feature_name, request_count, last_request
                 FROM feature_rate_limits
                 WHERE user_id = $1 AND window_start = $2
-                """,
-                (user_id, window_start),
-            )
+            """
+            params = (user_id, window_start)
             rows = await conn.fetch(query, *params)
             rate_limits = {
                 row["feature_name"]: {
@@ -423,14 +400,12 @@ class FeatureRateLimiter:
             }
 
             # Get active cooldowns
-            query, params = convert_query_to_postgres(
-                """
+            query = """
                 SELECT feature_name, last_used, cooldown_seconds
                 FROM feature_cooldowns
                 WHERE user_id = $1
-                """,
-                (user_id,),
-            )
+            """
+            params = (user_id,)
             rows = await conn.fetch(query, *params)
             cooldowns = {
                 row["feature_name"]: {
@@ -444,16 +419,14 @@ class FeatureRateLimiter:
             }
 
             # Get request history (last hour)
-            query, params = convert_query_to_postgres(
-                """
+            query = """
                 SELECT feature_name, COUNT(*) as total,
                        SUM(CASE WHEN was_throttled = 1 THEN 1 ELSE 0 END) as throttled
                 FROM user_request_history
                 WHERE user_id = $1 AND requested_at > $2
                 GROUP BY feature_name
-                """,
-                (user_id, current_ts - 3600),
-            )
+            """
+            params = (user_id, current_ts - 3600)
             rows = await conn.fetch(query, *params)
             history = {
                 row["feature_name"]: {
@@ -494,15 +467,11 @@ class FeatureRateLimiter:
         async with self._lock:
             async with get_db_connection(self._database_url) as conn:
                 if feature:
-                    query, params = convert_query_to_postgres(
-                        "DELETE FROM feature_rate_limits WHERE user_id = $1 AND feature_name = $2",
-                        (user_id, feature),
-                    )
+                    query = "DELETE FROM feature_rate_limits WHERE user_id = $1 AND feature_name = $2"
+                    params = (user_id, feature)
                 else:
-                    query, params = convert_query_to_postgres(
-                        "DELETE FROM feature_rate_limits WHERE user_id = $1",
-                        (user_id,),
-                    )
+                    query = "DELETE FROM feature_rate_limits WHERE user_id = $1"
+                    params = (user_id,)
                 result = await conn.execute(query, *params)
                 pg_deleted = int(result.split()[-1]) if result.split()[-1].isdigit() else 0
                 deleted += pg_deleted
@@ -527,10 +496,8 @@ class FeatureRateLimiter:
 
         async with self._lock:
             async with get_db_connection(self._database_url) as conn:
-                query, params = convert_query_to_postgres(
-                    "DELETE FROM feature_rate_limits WHERE window_start < $1",
-                    (cutoff,),
-                )
+                query = "DELETE FROM feature_rate_limits WHERE window_start < $1"
+                params = (cutoff,)
                 result = await conn.execute(query, *params)
                 deleted = int(result.split()[-1]) if result.split()[-1].isdigit() else 0
 

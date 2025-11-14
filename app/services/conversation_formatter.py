@@ -425,10 +425,12 @@ def format_history_compact(
 
 def estimate_tokens(text: str) -> int:
     """
-    Estimate token count for text (rough approximation).
+    Estimate token count for text using accurate character-based heuristic.
 
-    Uses word count * 1.3 as a simple heuristic.
-    For better accuracy, use actual tokenizer.
+    Uses character-based estimation that accounts for:
+    - English: ~4 chars per token
+    - Ukrainian/Cyrillic: ~5 chars per token
+    - Code/symbols: ~3.5 chars per token
 
     Args:
         text: Text to estimate
@@ -436,10 +438,6 @@ def estimate_tokens(text: str) -> int:
     Returns:
         Estimated token count
     """
-    if not text:
-        return 0
+    from app.services.context.token_optimizer import estimate_tokens_accurate
 
-    # Simple word-based estimation
-    # Gemini tokens are roughly 1.3 words per token
-    words = len(text.split())
-    return int(words * 1.3)
+    return estimate_tokens_accurate(text)

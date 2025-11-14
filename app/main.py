@@ -12,13 +12,14 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.types import BotCommand
 
 from app.config import get_settings
-from app.constants import USER_COMMANDS
+from app.constants import USER_COMMANDS, CHECKERS_COMMANDS
 from app.handlers.admin import router as admin_router, ADMIN_COMMANDS
 from app.handlers.chat import router as chat_router
 from app.handlers.profile_admin import router as profile_admin_router, PROFILE_COMMANDS
 from app.handlers.chat_admin import router as chat_admin_router, CHAT_COMMANDS
 from app.handlers.prompt_admin import router as prompt_admin_router, PROMPT_COMMANDS
 from app.handlers.chat_members import router as chat_members_router
+from app.handlers.checkers import router as checkers_router
 from app.middlewares.chat_filter import ChatFilterMiddleware
 from app.middlewares.chat_meta import ChatMetaMiddleware
 from app.middlewares.command_throttle import CommandThrottleMiddleware
@@ -94,6 +95,7 @@ async def setup_bot_commands(bot: Bot) -> None:
         + PROFILE_COMMANDS
         + CHAT_COMMANDS
         + PROMPT_COMMANDS
+        + CHECKERS_COMMANDS
     )
 
     try:
@@ -446,6 +448,7 @@ async def main() -> None:
     dispatcher.include_router(chat_admin_router)
     dispatcher.include_router(prompt_admin_router)
     dispatcher.include_router(chat_members_router)
+    dispatcher.include_router(checkers_router)
     dispatcher.include_router(chat_router)
 
     # Setup bot commands with descriptions

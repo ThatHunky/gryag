@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, List, Optional
@@ -67,7 +68,7 @@ class MemoryRepository(Repository[UserMemory]):
 
         # First, check if the user is at the memory limit
         count_query = (
-            "SELECT COUNT(*) FROM user_memories WHERE user_id = ? AND chat_id = ?"
+            "SELECT COUNT(*) FROM user_memories WHERE user_id = $1 AND chat_id = $2"
         )
         row = await self._fetch_one(count_query, (user_id, chat_id))
         if row and row[0] >= 15:
@@ -76,35 +77,37 @@ class MemoryRepository(Repository[UserMemory]):
                 DELETE FROM user_memories 
                 WHERE id = (
                     SELECT id FROM user_memories 
-                    WHERE user_id = ? AND chat_id = ? 
+                    WHERE user_id = $1 AND chat_id = $2 
                     ORDER BY created_at ASC 
                     LIMIT 1
                 )
             """
             await self._execute(delete_oldest_query, (user_id, chat_id))
 
-        # Insert the new memory
+        # Insert the new memory with RETURNING clause to get the ID
         query = """
             INSERT INTO user_memories (user_id, chat_id, memory_text, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id
         """
         try:
-            cursor = await self._execute(
-                query, (user_id, chat_id, memory_text, now, now)
-            )
-            if cursor.lastrowid is None:
+            row = await self._fetch_one(query, (user_id, chat_id, memory_text, now, now))
+            if not row or row["id"] is None:
                 raise DatabaseError("Failed to get last row id.")
             return UserMemory(
-                id=cursor.lastrowid,
+                id=row["id"],
                 user_id=user_id,
                 chat_id=chat_id,
                 memory_text=memory_text,
                 created_at=now,
                 updated_at=now,
             )
+        except DatabaseError:
+            raise
         except Exception as e:
             # The UNIQUE constraint on (user_id, chat_id, memory_text) might fail
-            if "UNIQUE constraint failed" in str(e):
+            error_str = str(e).lower()
+            if "unique constraint" in error_str or "duplicate key" in error_str:
                 raise DatabaseError(f"This memory already exists for the user.")
             raise DatabaseError(f"Failed to add memory: {e}") from e
 
@@ -121,7 +124,7 @@ class MemoryRepository(Repository[UserMemory]):
         Returns:
             A list of UserMemory objects.
         """
-        query = "SELECT * FROM user_memories WHERE user_id = ? AND chat_id = ? ORDER BY created_at ASC"
+        query = "SELECT * FROM user_memories WHERE user_id = $1 AND chat_id = $2 ORDER BY created_at ASC"
         rows = await self._fetch_all(query, (user_id, chat_id))
         return [UserMemory(**row) for row in rows]
 
@@ -135,7 +138,7 @@ class MemoryRepository(Repository[UserMemory]):
         Returns:
             A UserMemory object if found, otherwise None.
         """
-        query = "SELECT * FROM user_memories WHERE id = ?"
+        query = "SELECT * FROM user_memories WHERE id = $1"
         row = await self._fetch_one(query, (memory_id,))
         return UserMemory(**row) if row else None
 
@@ -149,9 +152,14 @@ class MemoryRepository(Repository[UserMemory]):
         Returns:
             True if a memory was deleted, False otherwise.
         """
-        query = "DELETE FROM user_memories WHERE id = ?"
-        cursor = await self._execute(query, (memory_id,))
-        return cursor.rowcount > 0
+        query = "DELETE FROM user_memories WHERE id = $1"
+        result = await self._execute(query, (memory_id,))
+        # PostgreSQL execute returns string like "DELETE 1" or "DELETE 0"
+        # Extract the number to check if any rows were deleted
+        match = re.search(r'DELETE (\d+)', result)
+        if match:
+            return int(match.group(1)) > 0
+        return False
 
     async def delete_all_memories(self, user_id: int, chat_id: int) -> int:
         """
@@ -164,6 +172,11 @@ class MemoryRepository(Repository[UserMemory]):
         Returns:
             The number of memories deleted.
         """
-        query = "DELETE FROM user_memories WHERE user_id = ? AND chat_id = ?"
-        cursor = await self._execute(query, (user_id, chat_id))
-        return cursor.rowcount
+        query = "DELETE FROM user_memories WHERE user_id = $1 AND chat_id = $2"
+        result = await self._execute(query, (user_id, chat_id))
+        # PostgreSQL execute returns string like "DELETE 5"
+        # Extract the number to get count of deleted rows
+        match = re.search(r'DELETE (\d+)', result)
+        if match:
+            return int(match.group(1))
+        return 0

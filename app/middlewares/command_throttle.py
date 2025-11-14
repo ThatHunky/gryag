@@ -57,6 +57,10 @@ class CommandThrottleMiddleware(BaseMiddleware):
         "gryagresetprompt",
         "gryagprompthistory",
         "gryagactivateprompt",  # PROMPT_COMMANDS
+        "checkers",
+        "checkers_abandon",  # CHECKERS_COMMANDS
+        "шашки",  # Ukrainian alias
+        "шашки_покинути",  # Ukrainian alias
     }
 
     def __init__(self, settings: Settings, rate_limiter: FeatureRateLimiter) -> None:

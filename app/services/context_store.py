@@ -306,8 +306,7 @@ class ContextStore:
         async def insert_message():
             nonlocal message_id
             async with get_db_connection(self._database_url) as conn:
-                query, params = convert_query_to_postgres(
-                    """
+                query = """
                     INSERT INTO messages (
                         chat_id, thread_id, user_id, role, text, media, embedding, ts,
                         external_message_id, external_user_id, reply_to_external_message_id, reply_to_external_user_id,
@@ -315,25 +314,24 @@ class ContextStore:
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                     RETURNING id
-                    """,
-                    (
-                        chat_id,
-                        thread_id,
-                        user_id,
-                        role,
-                        text,
-                        media_json,
-                        json.dumps(embedding) if embedding else None,
-                        ts,
-                        ext_message_id,
-                        ext_user_id,
-                        reply_to_ext_message_id,
-                        reply_to_ext_user_id,
-                        sender_role,
-                        sender_name,
-                        sender_username,
-                        sender_is_bot,
-                    ),
+                """
+                params = (
+                    chat_id,
+                    thread_id,
+                    user_id,
+                    role,
+                    text,
+                    media_json,
+                    json.dumps(embedding) if embedding else None,
+                    ts,
+                    ext_message_id,
+                    ext_user_id,
+                    reply_to_ext_message_id,
+                    reply_to_ext_user_id,
+                    sender_role,
+                    sender_name,
+                    sender_username,
+                    sender_is_bot,
                 )
                 row = await conn.fetchrow(query, *params)
                 message_id = row["id"] if row else 0
@@ -599,7 +597,7 @@ class ContextStore:
 
         if thread_id is None:
             query = (
-                "SELECT role, text, media, external_user_id, user_id, "
+                "SELECT role, text, media, external_user_id, user_id, ts, "
                 "sender_role, sender_name, sender_username, sender_is_bot "
                 "FROM messages "
                 "WHERE chat_id = $1 AND thread_id IS NULL "
@@ -608,7 +606,7 @@ class ContextStore:
             params: tuple[Any, ...] = (chat_id, message_limit)
         else:
             query = (
-                "SELECT role, text, media, external_user_id, user_id, "
+                "SELECT role, text, media, external_user_id, user_id, ts, "
                 "sender_role, sender_name, sender_username, sender_is_bot "
                 "FROM messages "
                 "WHERE chat_id = $1 AND thread_id = $2 "
@@ -696,7 +694,11 @@ class ContextStore:
             # Media from recent context is disabled - only current message and replied-to message include media
             # if stored_media:
             #     parts.extend(stored_media)
-            history.append({"role": row["role"], "parts": parts or [{"text": ""}]})
+            msg_dict = {"role": row["role"], "parts": parts or [{"text": ""}]}
+            # Include timestamp if available
+            if row.get("ts") is not None:
+                msg_dict["ts"] = row["ts"]
+            history.append(msg_dict)
 
         # Cache the result for future requests
         if self._context_cache is not None:
@@ -866,7 +868,6 @@ class ContextStore:
                     )
                     # Continue with next chunk rather than failing completely
                     continue
-                raise
 
         self._last_prune_ts = int(time.time())
         return deleted_total

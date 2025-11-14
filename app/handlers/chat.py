@@ -106,7 +106,8 @@ MIN_MEMORY_TEXT_LENGTH = 3
 MAX_POLL_OPTIONS = 10
 DEFAULT_VIDEO_DESCRIPTION_MESSAGES = 20
 DEFAULT_MAX_FACTS = 10
-UNANSWERED_TRIGGER_THRESHOLD_SECONDS = 120
+UNANSWERED_TRIGGER_THRESHOLD_SECONDS = 60
+MAX_SKIP_ATTEMPTS = 3  # Allow message after this many consecutive skips
 
 # Legacy constant (kept for backward compatibility, use CONTEXT_TTL_SECONDS instead)
 _CONTEXT_TTL_SECONDS = CONTEXT_TTL_SECONDS
@@ -182,6 +183,98 @@ def _build_user_message_query(
     )
 
 
+# In-memory skip counter fallback (when Redis is not available)
+# Format: {(chat_id, user_id): (skip_count, last_skip_ts)}
+_skip_counters: dict[tuple[int, int], tuple[int, int]] = {}
+
+
+async def _get_skip_count(
+    chat_id: int,
+    user_id: int,
+    redis_client: RedisLike | None = None,
+) -> tuple[int, int]:
+    """
+    Get skip count and last skip timestamp for a user.
+    
+    Returns:
+        Tuple of (skip_count, last_skip_ts)
+    """
+    lock_key = (chat_id, user_id)
+    redis_key = f"gryag:skip_count:{chat_id}:{user_id}"
+    
+    # Try Redis first if available
+    if redis_client is not None:
+        try:
+            value = await redis_client.get(redis_key)
+            if value:
+                data = json.loads(value)
+                return (data.get("count", 0), data.get("last_skip_ts", 0))
+        except Exception:
+            LOGGER.debug(f"Failed to get skip count from Redis for {lock_key}, using fallback")
+    
+    # Fallback to in-memory
+    return _skip_counters.get(lock_key, (0, 0))
+
+
+async def _increment_skip_count(
+    chat_id: int,
+    user_id: int,
+    redis_client: RedisLike | None = None,
+) -> int:
+    """
+    Increment skip count for a user.
+    
+    Returns:
+        New skip count
+    """
+    lock_key = (chat_id, user_id)
+    redis_key = f"gryag:skip_count:{chat_id}:{user_id}"
+    current_ts = int(time.time())
+    
+    # Try Redis first if available
+    if redis_client is not None:
+        try:
+            value = await redis_client.get(redis_key)
+            if value:
+                data = json.loads(value)
+                count = data.get("count", 0) + 1
+            else:
+                count = 1
+            
+            data = {"count": count, "last_skip_ts": current_ts}
+            await redis_client.setex(redis_key, UNANSWERED_TRIGGER_THRESHOLD_SECONDS + 10, json.dumps(data))
+            return count
+        except Exception:
+            LOGGER.debug(f"Failed to increment skip count in Redis for {lock_key}, using fallback")
+    
+    # Fallback to in-memory
+    current_count, _ = _skip_counters.get(lock_key, (0, 0))
+    new_count = current_count + 1
+    _skip_counters[lock_key] = (new_count, current_ts)
+    return new_count
+
+
+async def _reset_skip_count(
+    chat_id: int,
+    user_id: int,
+    redis_client: RedisLike | None = None,
+) -> None:
+    """Reset skip count for a user."""
+    lock_key = (chat_id, user_id)
+    redis_key = f"gryag:skip_count:{chat_id}:{user_id}"
+    
+    # Try Redis first if available
+    if redis_client is not None:
+        try:
+            await redis_client.delete(redis_key)
+            return
+        except Exception:
+            LOGGER.debug(f"Failed to reset skip count in Redis for {lock_key}, using fallback")
+    
+    # Fallback to in-memory
+    _skip_counters.pop(lock_key, None)
+
+
 async def _check_unanswered_trigger(
     chat_id: int,
     thread_id: int | None,
@@ -200,8 +293,37 @@ async def _check_unanswered_trigger(
     1. ID-based queries (primary check)
     2. Timestamp-based queries (fallback for robustness)
     3. Retry mechanism with exponential backoff (handles DB visibility delays)
+    4. Attempt-based override: After MAX_SKIP_ATTEMPTS consecutive skips, allow message through
     """
     current_ts = int(time.time())
+    
+    # Get Redis client from data if available
+    redis_client = data.get("redis_client")
+    
+    # Get current skip count and check if we should override
+    skip_count, last_skip_ts = await _get_skip_count(chat_id, user_id, redis_client)
+    
+    # Reset skip count if it's been more than threshold_seconds since last skip
+    if last_skip_ts > 0 and (current_ts - last_skip_ts) > threshold_seconds:
+        await _reset_skip_count(chat_id, user_id, redis_client)
+        skip_count = 0
+        LOGGER.debug(
+            f"Reset skip count for user {user_id} in chat {chat_id} (threshold exceeded)"
+        )
+    
+    # Allow message if we've already skipped MAX_SKIP_ATTEMPTS times
+    if skip_count >= MAX_SKIP_ATTEMPTS:
+        LOGGER.info(
+            f"Allowing message after {skip_count} consecutive skips (override threshold reached)",
+            extra={
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "skip_count": skip_count,
+            },
+        )
+        # Reset skip count since we're allowing this message
+        await _reset_skip_count(chat_id, user_id, redis_client)
+        return False
 
     # Check if there's currently processing happening for this user
     # If so, we know a response is being generated, so don't skip the message
@@ -282,6 +404,8 @@ async def _check_unanswered_trigger(
                 LOGGER.debug(
                     f"Previous trigger from user {user_id} is old ({trigger_age}s), allowing response"
                 )
+                # Reset skip count since trigger is old
+                await _reset_skip_count(chat_id, user_id, redis_client)
             else:
                 # Found a recent user message from this user - check if there's ANY bot response after it
                 # Use retry mechanism to handle race conditions where DB write isn't yet visible
@@ -318,6 +442,8 @@ async def _check_unanswered_trigger(
                 # BUT: If processing is currently active for this user, we know a response is being generated,
                 # so don't skip the message (the response just hasn't been saved to DB yet)
                 if bot_response_count == 0 and not is_processing:
+                    # Increment skip count
+                    new_skip_count = await _increment_skip_count(chat_id, user_id, redis_client)
                     LOGGER.info(
                         "Skipping trigger message - previous trigger from this user was not answered (recent)",
                         extra={
@@ -329,6 +455,7 @@ async def _check_unanswered_trigger(
                             "is_processing": is_processing,
                             "bot_response_count": bot_response_count,
                             "retry_attempts": retry_attempt + 1,
+                            "skip_count": new_skip_count,
                         },
                     )
                     telemetry.increment_counter("chat.skipped_unanswered_trigger")
@@ -346,6 +473,8 @@ async def _check_unanswered_trigger(
                             "bot_response_count": bot_response_count,
                         },
                     )
+                    # Reset skip count since we're allowing this message
+                    await _reset_skip_count(chat_id, user_id, redis_client)
                 elif bot_response_count > 0:
                     LOGGER.debug(
                         f"Found {bot_response_count} bot response(s) after user {user_id}'s previous trigger - allowing message",
@@ -356,6 +485,8 @@ async def _check_unanswered_trigger(
                             "bot_response_count": bot_response_count,
                         },
                     )
+                    # Reset skip count since bot responded
+                    await _reset_skip_count(chat_id, user_id, redis_client)
 
     return False
 

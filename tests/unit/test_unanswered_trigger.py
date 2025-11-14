@@ -17,7 +17,11 @@ from app.handlers.chat import (
     _check_unanswered_trigger,
     _check_and_handle_rate_limit,
     UNANSWERED_TRIGGER_THRESHOLD_SECONDS,
+    MAX_SKIP_ATTEMPTS,
     _build_user_message_query,
+    _get_skip_count,
+    _increment_skip_count,
+    _reset_skip_count,
 )
 from app.services.context_store import ContextStore, MessageSender
 
@@ -502,4 +506,227 @@ async def test_unanswered_trigger_retry_mechanism(context_store):
     # The retry mechanism should have found the response after the delay
     # So should_skip should be False
     assert should_skip is False
+
+
+@pytest.mark.asyncio
+async def test_unanswered_trigger_allows_after_max_skip_attempts(context_store):
+    """Test that unanswered trigger check allows message after MAX_SKIP_ATTEMPTS consecutive skips."""
+    chat_id = 123
+    user_id = 456
+    thread_id = None
+    data = {}
+
+    # Add user message without bot response
+    await context_store.add_message(
+        chat_id=chat_id,
+        thread_id=thread_id,
+        user_id=user_id,
+        role="user",
+        text="Hello bot",
+        media=None,
+        metadata=None,
+        embedding=None,
+        retention_days=None,
+        sender=MessageSender(
+            role="user",
+            name="TestUser",
+            username="testuser",
+            is_bot=False,
+        ),
+    )
+
+    # Simulate MAX_SKIP_ATTEMPTS consecutive skips
+    # First MAX_SKIP_ATTEMPTS - 1 calls should skip, then the next one should allow
+    for attempt in range(MAX_SKIP_ATTEMPTS):
+        should_skip = await _check_unanswered_trigger(
+            chat_id=chat_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            store=context_store,
+            data=data,
+        )
+        # Should skip for first MAX_SKIP_ATTEMPTS attempts
+        assert should_skip is True, f"Should skip on attempt {attempt + 1}"
+    
+    # The next call (after MAX_SKIP_ATTEMPTS skips) should allow due to override
+    should_skip = await _check_unanswered_trigger(
+        chat_id=chat_id,
+        thread_id=thread_id,
+        user_id=user_id,
+        store=context_store,
+        data=data,
+    )
+    assert should_skip is False, f"Should allow after {MAX_SKIP_ATTEMPTS} skips (override)"
+
+
+@pytest.mark.asyncio
+async def test_skip_count_resets_after_threshold(context_store):
+    """Test that skip count resets after threshold seconds."""
+    chat_id = 123
+    user_id = 456
+    thread_id = None
+    data = {}
+
+    # Manually increment skip count
+    await _increment_skip_count(chat_id, user_id, None)
+    skip_count, _ = await _get_skip_count(chat_id, user_id, None)
+    assert skip_count == 1
+
+    # Add user message with old timestamp (beyond threshold)
+    old_ts = int(time.time()) - UNANSWERED_TRIGGER_THRESHOLD_SECONDS - 10
+
+    import aiosqlite
+    async with aiosqlite.connect(context_store._database_url) as conn:
+        await conn.execute(
+            """
+            INSERT INTO messages (
+                chat_id, thread_id, user_id, role, text, ts,
+                sender_role, sender_name, sender_username, sender_is_bot
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chat_id,
+                thread_id,
+                user_id,
+                "user",
+                "Hello bot",
+                old_ts,
+                "user",
+                "TestUser",
+                "testuser",
+                0,
+            ),
+        )
+        await conn.commit()
+
+    # Check should reset skip count because message is old
+    should_skip = await _check_unanswered_trigger(
+        chat_id=chat_id,
+        thread_id=thread_id,
+        user_id=user_id,
+        store=context_store,
+        data=data,
+    )
+    assert should_skip is False
+
+    # Verify skip count was reset
+    skip_count, _ = await _get_skip_count(chat_id, user_id, None)
+    assert skip_count == 0
+
+
+@pytest.mark.asyncio
+async def test_skip_count_resets_when_bot_responds(context_store):
+    """Test that skip count resets when bot responds."""
+    chat_id = 123
+    user_id = 456
+    thread_id = None
+    data = {}
+
+    # Manually increment skip count
+    await _increment_skip_count(chat_id, user_id, None)
+    skip_count, _ = await _get_skip_count(chat_id, user_id, None)
+    assert skip_count == 1
+
+    # Add user message
+    await context_store.add_message(
+        chat_id=chat_id,
+        thread_id=thread_id,
+        user_id=user_id,
+        role="user",
+        text="Hello bot",
+        media=None,
+        metadata=None,
+        embedding=None,
+        retention_days=None,
+        sender=MessageSender(
+            role="user",
+            name="TestUser",
+            username="testuser",
+            is_bot=False,
+        ),
+    )
+
+    # Add bot response
+    await context_store.add_message(
+        chat_id=chat_id,
+        thread_id=thread_id,
+        user_id=None,
+        role="model",
+        text="Hello!",
+        media=None,
+        metadata=None,
+        embedding=None,
+        retention_days=None,
+        sender=MessageSender(
+            role="assistant",
+            name="gryag",
+            username="gryag",
+            is_bot=True,
+        ),
+    )
+
+    # Check should allow and reset skip count
+    should_skip = await _check_unanswered_trigger(
+        chat_id=chat_id,
+        thread_id=thread_id,
+        user_id=user_id,
+        store=context_store,
+        data=data,
+    )
+    assert should_skip is False
+
+    # Verify skip count was reset
+    skip_count, _ = await _get_skip_count(chat_id, user_id, None)
+    assert skip_count == 0
+
+
+@pytest.mark.asyncio
+async def test_skip_count_resets_when_processing_active(context_store):
+    """Test that skip count resets when processing is active."""
+    chat_id = 123
+    user_id = 456
+    thread_id = None
+
+    # Manually increment skip count
+    await _increment_skip_count(chat_id, user_id, None)
+    skip_count, _ = await _get_skip_count(chat_id, user_id, None)
+    assert skip_count == 1
+
+    # Add user message
+    await context_store.add_message(
+        chat_id=chat_id,
+        thread_id=thread_id,
+        user_id=user_id,
+        role="user",
+        text="Hello bot",
+        media=None,
+        metadata=None,
+        embedding=None,
+        retention_days=None,
+        sender=MessageSender(
+            role="user",
+            name="TestUser",
+            username="testuser",
+            is_bot=False,
+        ),
+    )
+
+    # Simulate processing is active
+    lock_key = (chat_id, user_id)
+    processing_check = AsyncMock(return_value=True)  # Processing is active
+    data = {"_processing_lock_check": processing_check}
+
+    should_skip = await _check_unanswered_trigger(
+        chat_id=chat_id,
+        thread_id=thread_id,
+        user_id=user_id,
+        store=context_store,
+        data=data,
+    )
+    assert should_skip is False  # Should allow because processing is active
+
+    # Verify skip count was reset
+    skip_count, _ = await _get_skip_count(chat_id, user_id, None)
+    assert skip_count == 0
 

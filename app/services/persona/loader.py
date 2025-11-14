@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -109,14 +111,33 @@ class PersonaLoader:
 
     @staticmethod
     def _ensure_plain_system_prompt(prompt: str) -> None:
-        """Ensure the system prompt does not contain template placeholders."""
+        """Validate system prompt template for well-formed variable placeholders.
+        
+        Allows variable placeholders like {timestamp}, {current_year}, etc.
+        Only warns about unclosed braces or malformed placeholders.
+        """
         if not prompt:
             return
 
-        if "{" in prompt or "}" in prompt:
-            raise ValueError(
-                "System prompt templates must not contain placeholders or braces."
+        # Check for unclosed braces (malformed placeholders)
+        open_braces = prompt.count("{")
+        close_braces = prompt.count("}")
+        
+        if open_braces != close_braces:
+            LOGGER.warning(
+                f"System prompt has mismatched braces: {open_braces} open, {close_braces} close"
             )
+        
+        # Check for malformed placeholders (e.g., {{ or }} without proper escaping)
+        # Allow {variable} format
+        placeholder_pattern = r"\{[^}]*\}"
+        matches = re.findall(placeholder_pattern, prompt)
+        for match in matches:
+            # Valid placeholder should be {variable_name}
+            if not re.match(r"^\{[a-zA-Z_][a-zA-Z0-9_]*\}$", match):
+                LOGGER.warning(
+                    f"Potentially malformed placeholder in system prompt: {match}"
+                )
 
     def _load_response_templates(self, json_path: str) -> dict[str, str]:
         """Load response templates from JSON file."""
@@ -166,17 +187,90 @@ class PersonaLoader:
         return {}
 
     def get_system_prompt(self, **kwargs: Any) -> str:
-        """Return the configured system prompt.
-
-        Legacy callers may still pass keyword arguments. These are ignored to
-        prevent placeholder substitution and avoid leaking template variables.
+        """Return the configured system prompt with variable substitution.
+        
+        Supports the following variables:
+        - {timestamp} - Full formatted timestamp (e.g., "Monday, January 15, 2025 at 14:30:45")
+        - {current_year} - Just the year (extracted from timestamp)
+        - {current_date} - Date portion only (e.g., "Monday, January 15, 2025")
+        - Any other variables passed via kwargs
+        
+        Args:
+            **kwargs: Variables for template substitution. Special handling for 'current_time'.
+        
+        Returns:
+            System prompt with variables substituted
         """
-        if kwargs:
-            LOGGER.debug(
-                "Ignoring system prompt kwargs %s because persona templates are plain text",
-                list(kwargs.keys()),
+        prompt = self.persona.system_prompt
+        
+        # If no variables in prompt, return as-is
+        if "{" not in prompt:
+            return prompt
+        
+        # Prepare substitution variables
+        substitution_vars: dict[str, Any] = {}
+        
+        # Extract timestamp-related variables from current_time if provided
+        current_time = kwargs.get("current_time")
+        if current_time:
+            substitution_vars["timestamp"] = current_time
+            
+            # Extract year from timestamp (format: "Monday, January 15, 2025 at 14:30:45")
+            year_match = re.search(r"\b(19|20)\d{2}\b", current_time)
+            if year_match:
+                substitution_vars["current_year"] = year_match.group(0)
+            else:
+                # Fallback: try to extract from datetime if parsing fails
+                try:
+                    # Try to parse the timestamp string
+                    dt = datetime.strptime(current_time.split(" at ")[0], "%A, %B %d, %Y")
+                    substitution_vars["current_year"] = str(dt.year)
+                except (ValueError, IndexError):
+                    # If parsing fails, use current year as fallback
+                    substitution_vars["current_year"] = str(datetime.now().year)
+            
+            # Extract date portion (everything before " at ")
+            if " at " in current_time:
+                substitution_vars["current_date"] = current_time.split(" at ")[0]
+            else:
+                substitution_vars["current_date"] = current_time
+        else:
+            # Fallback: generate timestamp if not provided
+            now = datetime.now()
+            kyiv_tz = None
+            try:
+                import pytz
+                kyiv_tz = pytz.timezone("Europe/Kyiv")
+                now = datetime.now(kyiv_tz)
+            except ImportError:
+                # If pytz not available, use local time
+                pass
+            except Exception:
+                # If timezone fails, use local time
+                pass
+            
+            timestamp_str = now.strftime("%A, %B %d, %Y at %H:%M:%S")
+            substitution_vars["timestamp"] = timestamp_str
+            substitution_vars["current_year"] = str(now.year)
+            substitution_vars["current_date"] = now.strftime("%A, %B %d, %Y")
+        
+        # Add any other kwargs as variables
+        substitution_vars.update({k: v for k, v in kwargs.items() if k != "current_time"})
+        
+        # Perform substitution
+        try:
+            prompt = prompt.format(**substitution_vars)
+        except KeyError as e:
+            LOGGER.warning(
+                f"Missing variable in system prompt template: {e}. "
+                f"Available variables: {list(substitution_vars.keys())}"
             )
-        return self.persona.system_prompt
+            # Leave placeholder as-is if variable not found
+        except ValueError as e:
+            LOGGER.warning(f"Error formatting system prompt: {e}")
+            # Return original if formatting fails
+        
+        return prompt
 
     def get_response(self, key: str, **kwargs: Any) -> str:
         """Get localized response with variable substitution.

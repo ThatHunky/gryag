@@ -47,15 +47,15 @@ def get_admin_commands(prefix: str = "gryag") -> list[BotCommand]:
 # Keep for backwards compatibility (used in main.py)
 ADMIN_COMMANDS = get_admin_commands()
 
-# Default responses removed - rely solely on PersonaLoader and persona instructions
-# If PersonaLoader is not available, these will be empty strings
-ADMIN_ONLY = ""
-BAN_SUCCESS = ""
-UNBAN_SUCCESS = ""
-ALREADY_BANNED = ""
-NOT_BANNED = ""
-MISSING_TARGET = ""
-RESET_DONE = ""
+# Default responses - fallback when PersonaLoader is unavailable
+# These should match response templates but provide safe fallbacks
+ADMIN_ONLY = "Тільки адміни можуть це робити."
+BAN_SUCCESS = "Забанено користувача {user}."
+UNBAN_SUCCESS = "Розбанено користувача {user}."
+ALREADY_BANNED = "Користувач вже забанений."
+NOT_BANNED = "Користувач не забанений."
+MISSING_TARGET = "Вкажи користувача для цієї дії."
+RESET_DONE = "Квоти скинуто."
 
 
 # Import get_response from shared utility (replaces local _get_response)

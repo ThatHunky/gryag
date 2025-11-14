@@ -47,8 +47,8 @@ def get_prompt_commands(prefix: str = "gryag") -> list[BotCommand]:
 # Keep for backwards compatibility (used in main.py)
 PROMPT_COMMANDS = get_prompt_commands()
 
-# Default admin-only message removed - rely solely on PersonaLoader and persona instructions
-ADMIN_ONLY = ""
+# Default admin-only message - fallback when PersonaLoader is unavailable
+ADMIN_ONLY = "Тільки адміни можуть це робити."
 
 
 def _is_admin(user_id: int, settings: Settings) -> bool:

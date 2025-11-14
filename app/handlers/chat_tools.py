@@ -28,6 +28,9 @@ from app.services.weather import weather_tool, WEATHER_TOOL_DEFINITION
 from app.services.currency import currency_tool, CURRENCY_TOOL_DEFINITION
 from app.services.polls import polls_tool, POLLS_TOOL_DEFINITION
 from app.services.search_tool import (
+    analyze_image_results,
+    analyze_text_results,
+    analyze_video_results,
     fetch_web_content_tool,
     FETCH_WEB_CONTENT_TOOL_DEFINITION,
     search_web_tool,
@@ -426,7 +429,7 @@ def build_tool_callbacks(
     if settings.enable_web_search:
         # Create wrapper that downloads and sends images for image searches
         async def search_web_callback(params: dict[str, Any]) -> str:
-            """Search web and send images if applicable."""
+            """Search web and send images if applicable. Also analyzes results if enabled."""
             # Log search_type for debugging
             search_type = params.get("search_type", "text")
             query = params.get("query", "")
@@ -450,6 +453,73 @@ def build_tool_callbacks(
             # Check if this was an image search and we have bot/chat_id
             search_type = params.get("search_type", "text")
             results = result.get("results", [])
+            
+            # Smart search analysis (if enabled)
+            analysis_result = None
+            if settings.enable_smart_search_analysis and gemini_client and results:
+                max_to_analyze = min(
+                    settings.smart_search_max_results_to_analyze,
+                    len(results)
+                )
+                
+                try:
+                    if search_type in ("text", "news"):
+                        # Fetch content from top results
+                        fetched_content = []
+                        for idx in range(max_to_analyze):
+                            result_item = results[idx]
+                            url = result_item.get("url", "")
+                            if not url:
+                                continue
+                            
+                            try:
+                                # Fetch content using fetch_web_content_tool
+                                content_params = {
+                                    "url": url,
+                                    "result_index": idx,
+                                    "search_query": query,
+                                }
+                                content_json = await fetch_web_content_tool(content_params)
+                                content_data = json.loads(content_json)
+                                
+                                if "error" not in content_data:
+                                    fetched_content.append({
+                                        "url": url,
+                                        "title": content_data.get("title", result_item.get("title", "")),
+                                        "content": content_data.get("content", ""),
+                                    })
+                            except Exception as e:
+                                logger.warning(f"Failed to fetch content from {url}: {e}")
+                                # Fallback to using description from search result
+                                fetched_content.append({
+                                    "url": url,
+                                    "title": result_item.get("title", ""),
+                                    "content": result_item.get("description", ""),
+                                })
+                        
+                        if fetched_content:
+                            analysis_result = await analyze_text_results(
+                                query=query,
+                                results=results,
+                                fetched_content=fetched_content,
+                                gemini_client=gemini_client,
+                            )
+                    
+                    elif search_type == "videos":
+                        # Analyze video metadata
+                        videos_to_analyze = results[:max_to_analyze]
+                        if videos_to_analyze:
+                            analysis_result = await analyze_video_results(
+                                query=query,
+                                results=videos_to_analyze,
+                                gemini_client=gemini_client,
+                            )
+                    
+                    # Note: Image analysis happens after downloading (see below)
+                    
+                except Exception as e:
+                    logger.warning(f"Smart search analysis failed: {e}", exc_info=True)
+                    # Continue without analysis - return original results
 
             if (
                 search_type == "images"
@@ -596,7 +666,33 @@ def build_tool_callbacks(
                 result["_images_sent"] = sent_count
                 if failed_urls:
                     result["_failed_urls"] = failed_urls[:3]  # Keep first 3 for debugging
-
+                
+                # Analyze images if smart search is enabled
+                if settings.enable_smart_search_analysis and gemini_client and downloaded_images:
+                    try:
+                        max_to_analyze = min(
+                            settings.smart_search_max_results_to_analyze,
+                            len(downloaded_images)
+                        )
+                        images_to_analyze = downloaded_images[:max_to_analyze]
+                        results_to_analyze = results[:max_to_analyze]
+                        
+                        analysis_result = await analyze_image_results(
+                            query=query,
+                            results=results_to_analyze,
+                            downloaded_images=images_to_analyze,
+                            gemini_client=gemini_client,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Image analysis failed: {e}", exc_info=True)
+                        analysis_result = None
+            
+            # Add analysis results to response if available
+            if analysis_result:
+                result["analysis"] = analysis_result
+                # Preserve original results
+                result["original_results"] = results.copy()
+            
             return json.dumps(result)
 
         callbacks["search_web"] = make_tracked_callback("search_web", search_web_callback)

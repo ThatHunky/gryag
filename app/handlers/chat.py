@@ -89,11 +89,12 @@ from app.utils.persona_helpers import get_response
 
 router = Router()
 
-# Default responses removed - rely solely on PersonaLoader and persona instructions
-ERROR_FALLBACK = ""
-EMPTY_REPLY = ""
-BANNED_REPLY = ""
-THROTTLED_REPLY = ""
+# Default responses - fallback when PersonaLoader is unavailable
+# These should match response templates but provide safe fallbacks
+ERROR_FALLBACK = "Ґеміні знову тупить. Спробуй пізніше."
+EMPTY_REPLY = "Скажи конкретніше, бо зараз з цього нічого не зробити."
+BANNED_REPLY = "Ти для {bot_name} в бані. Йди погуляй."
+THROTTLED_REPLY = "Занадто багато повідомлень. Почекай {seconds} секунд."
 
 
 LOGGER = logging.getLogger(__name__)

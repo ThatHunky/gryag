@@ -363,6 +363,12 @@ class Settings(BaseSettings):
     max_tool_response_tokens: int = Field(
         300, alias="MAX_TOOL_RESPONSE_TOKENS", ge=100, le=1000
     )  # Maximum tokens per tool response
+    enable_smart_search_analysis: bool = Field(
+        True, alias="ENABLE_SMART_SEARCH_ANALYSIS"
+    )  # Automatically analyze and summarize search results
+    smart_search_max_results_to_analyze: int = Field(
+        3, alias="SMART_SEARCH_MAX_RESULTS_TO_ANALYZE", ge=1, le=5
+    )  # How many top results to fetch and analyze
 
     # Compact Conversation Format (Phase 6 - October 2025)
     enable_compact_conversation_format: bool = Field(

@@ -32,8 +32,8 @@ from app.utils.persona_helpers import get_response
 router = Router()
 logger = logging.getLogger(__name__)
 
-# Default admin-only message removed - rely solely on PersonaLoader and persona instructions
-ADMIN_ONLY = ""
+# Default admin-only message - fallback when PersonaLoader is unavailable
+ADMIN_ONLY = "Тільки адміни можуть це робити."
 
 
 async def _check_banned(

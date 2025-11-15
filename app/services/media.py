@@ -28,10 +28,15 @@ YOUTUBE_REGEX = re.compile(
 
 
 async def _download(bot: Bot, file_id: str) -> bytes:
-    """Download a file from Telegram servers."""
+    """Download a file from Telegram servers with retries and validation.
+    
+    Returns:
+        bytes: File content, or empty bytes if download failed
+    """
     # Resolve file path first (may raise) and then perform HTTP GET with retries
+    file = None
     try:
-        # Add timeout to bot.get_file() call (15 seconds)
+        # Add timeout to bot.get_file() call (15 seconds for metadata)
         file = await asyncio.wait_for(bot.get_file(file_id), timeout=15.0)
     except asyncio.TimeoutError:
         LOGGER.warning(
@@ -46,31 +51,75 @@ async def _download(bot: Bot, file_id: str) -> bytes:
 
     file_path = file.file_path
     if not file_path:
+        LOGGER.warning("File path not available for file_id %s", file_id)
         return b""
 
+    # Validate file size before downloading (warn if >20MB, but still try)
+    file_size = getattr(file, "file_size", None)
+    if file_size and file_size > MAX_INLINE_SIZE:
+        LOGGER.warning(
+            "File size %d bytes exceeds inline limit %d for file_id %s. "
+            "Download will proceed but may fail at Gemini API.",
+            file_size,
+            MAX_INLINE_SIZE,
+            file_id,
+        )
+
     url = f"https://api.telegram.org/file/bot{bot.token}/{quote(file_path)}"
-    timeout = aiohttp.ClientTimeout(total=15, connect=5)  # Reduced from 60s to 15s
+    
+    # Progressive timeout: 60s for download (longer for large files)
+    # Connect timeout: 10s (increased from 5s for better reliability)
+    timeout = aiohttp.ClientTimeout(total=60, connect=10)
 
     # Retry loop for transient network errors (DNS, TCP resets, timeouts)
-    # Reduced from 3 to 1 attempt to fail fast
-    max_attempts = 1
+    max_attempts = 3
+    last_exception = None
+    
     for attempt in range(1, max_attempts + 1):
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(url) as resp:
                     resp.raise_for_status()
                     data = await resp.read()
+                    
+                    # Validate downloaded data size matches expected (if available)
+                    if file_size and len(data) != file_size:
+                        LOGGER.warning(
+                            "Downloaded file size mismatch for %s: expected %d, got %d",
+                            file_id,
+                            file_size,
+                            len(data),
+                        )
+                        # Still return data if it's close (within 10% tolerance)
+                        if abs(len(data) - file_size) > file_size * 0.1:
+                            raise ValueError(
+                                f"File size mismatch: expected {file_size}, got {len(data)}"
+                            )
+                    
+                    # Validate minimum size (empty files are suspicious)
+                    if len(data) == 0:
+                        LOGGER.warning("Downloaded empty file for file_id %s", file_id)
+                        if attempt < max_attempts:
+                            # Apply exponential backoff before retrying empty file
+                            backoff_time = 0.5 * (2 ** (attempt - 1))  # 0.5s, 1s, 2s
+                            await asyncio.sleep(backoff_time)
+                            continue  # Retry on empty file
+                        return b""
+                    
                     return data
 
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
+            last_exception = exc
             LOGGER.warning(
-                "Timed out downloading Telegram file %s (timeout: %ss) attempt=%d/%d",
+                "Timed out downloading Telegram file %s (timeout: %ss) attempt=%d/%d: %s",
                 file_id,
                 timeout.total,
                 attempt,
                 max_attempts,
+                exc,
             )
         except aiohttp.ClientError as exc:
+            last_exception = exc
             # Includes ClientConnectorError, ClientOSError, etc.
             LOGGER.warning(
                 "HTTP error downloading Telegram file %s on attempt %d/%d: %s",
@@ -81,6 +130,7 @@ async def _download(bot: Bot, file_id: str) -> bytes:
                 exc_info=(attempt == max_attempts),
             )
         except OSError as exc:
+            last_exception = exc
             # Low-level socket errors (Connection reset, DNS failures)
             LOGGER.warning(
                 "OS error downloading Telegram file %s on attempt %d/%d: %s",
@@ -90,15 +140,112 @@ async def _download(bot: Bot, file_id: str) -> bytes:
                 exc,
                 exc_info=(attempt == max_attempts),
             )
+        except ValueError as exc:
+            # File size validation error
+            last_exception = exc
+            LOGGER.warning(
+                "File validation error for %s on attempt %d/%d: %s",
+                file_id,
+                attempt,
+                max_attempts,
+                exc,
+            )
+            if attempt < max_attempts:
+                # Apply exponential backoff before retrying validation error
+                backoff_time = 0.5 * (2 ** (attempt - 1))  # 0.5s, 1s, 2s
+                await asyncio.sleep(backoff_time)
+                continue  # Retry on validation error
+            return b""
 
-        # Backoff before next attempt (avoid tight retry loops)
+        # Exponential backoff before next attempt (avoid tight retry loops)
         if attempt < max_attempts:
-            await asyncio.sleep(0.1 * (2 ** (attempt - 1)))
+            backoff_time = 0.5 * (2 ** (attempt - 1))  # 0.5s, 1s, 2s
+            await asyncio.sleep(backoff_time)
 
     LOGGER.error(
-        "Failed to download Telegram file %s after %d attempts", file_id, max_attempts
+        "Failed to download Telegram file %s after %d attempts%s",
+        file_id,
+        max_attempts,
+        f": {last_exception}" if last_exception else "",
     )
     return b""
+
+
+def _validate_media_data(data: bytes, mime: str) -> bool:
+    """
+    Validate media data by checking file signatures (magic bytes) and size.
+    
+    Args:
+        data: File content bytes
+        mime: Expected MIME type
+        
+    Returns:
+        True if data appears valid, False otherwise
+    """
+    if not data or len(data) < 4:
+        return False
+    
+    mime_lower = mime.lower()
+    
+    # Check file signatures (magic bytes)
+    if mime_lower.startswith("image/"):
+        # JPEG: FF D8 FF
+        if data[:3] == b"\xff\xd8\xff":
+            return True
+        # PNG: 89 50 4E 47
+        if data[:4] == b"\x89PNG":
+            return True
+        # GIF: 47 49 46 38 (GIF8)
+        if data[:4] == b"GIF8":
+            return True
+        # WebP: RIFF...WEBP
+        if data[:4] == b"RIFF" and len(data) > 8 and data[8:12] == b"WEBP":
+            return True
+        # HEIC/HEIF: ftyp...heic/heif
+        if data[4:8] in (b"ftyp", b"heic", b"heif"):
+            return True
+        # If it's an image MIME but doesn't match known signatures, still allow
+        # (might be a valid format we don't recognize)
+        return True
+    
+    elif mime_lower.startswith("video/"):
+        # MP4: ftyp...isom/mp41/mp42
+        if data[4:8] == b"ftyp":
+            # Check for common MP4 brands
+            if b"isom" in data[8:20] or b"mp41" in data[8:20] or b"mp42" in data[8:20]:
+                return True
+        # WebM: 1A 45 DF A3 (EBML header)
+        if data[:4] == b"\x1a\x45\xdf\xa3":
+            return True
+        # AVI: RIFF...AVI
+        if data[:4] == b"RIFF" and len(data) > 8 and data[8:12] == b"AVI ":
+            return True
+        # MOV/QuickTime: ftyp...qt
+        if data[4:8] == b"ftyp" and b"qt" in data[8:20]:
+            return True
+        # If it's a video MIME but doesn't match known signatures, still allow
+        # (might be a valid format we don't recognize)
+        return True
+    
+    elif mime_lower.startswith("audio/"):
+        # MP3: FF FB or FF F3 or ID3 tag
+        if data[:2] in (b"\xff\xfb", b"\xff\xf3") or data[:3] == b"ID3":
+            return True
+        # OGG: OggS
+        if data[:4] == b"OggS":
+            return True
+        # WAV: RIFF...WAVE
+        if data[:4] == b"RIFF" and len(data) > 8 and data[8:12] == b"WAVE":
+            return True
+        # FLAC: fLaC
+        if data[:4] == b"fLaC":
+            return True
+        # If it's an audio MIME but doesn't match known signatures, still allow
+        # (might be a valid format we don't recognize)
+        return True
+    
+    # For unknown MIME types, just check minimum size
+    return len(data) > 0
 
 
 def _maybe_downscale_image(data: bytes, mime: str) -> tuple[bytes, str, int]:
@@ -180,6 +327,7 @@ async def collect_media_parts(bot: Bot, message: Message) -> list[dict[str, Any]
     - size: file size in bytes (optional)
     """
     parts: list[dict[str, Any]] = []
+    download_failures: list[tuple[str, str]] = []  # Track (media_type, file_id) failures
 
     try:
         # Photos (compressed by Telegram)
@@ -188,12 +336,28 @@ async def collect_media_parts(bot: Bot, message: Message) -> list[dict[str, Any]
             photo = message.photo[-1]
             data = await _download(bot, photo.file_id)
             if data:
-                # Downscale/compress to reduce payload
-                data, mime, size = _maybe_downscale_image(data, DEFAULT_PHOTO_MIME)
-                parts.append(
-                    {"bytes": data, "mime": mime, "kind": "image", "size": size}
+                # Validate downloaded data
+                if not _validate_media_data(data, DEFAULT_PHOTO_MIME):
+                    download_failures.append(("photo", photo.file_id))
+                    LOGGER.warning(
+                        "Downloaded photo data failed validation (file_id=%s) from message %s",
+                        photo.file_id,
+                        message.message_id,
+                    )
+                else:
+                    # Downscale/compress to reduce payload
+                    data, mime, size = _maybe_downscale_image(data, DEFAULT_PHOTO_MIME)
+                    parts.append(
+                        {"bytes": data, "mime": mime, "kind": "image", "size": size}
+                    )
+                    LOGGER.debug("Collected photo: %d bytes, %s", size, mime)
+            else:
+                download_failures.append(("photo", photo.file_id))
+                LOGGER.warning(
+                    "Failed to download photo (file_id=%s) from message %s",
+                    photo.file_id,
+                    message.message_id,
                 )
-                LOGGER.debug("Collected photo: %d bytes, %s", size, mime)
 
         # Stickers (WebP, TGS animated, or WebM video)
         if message.sticker:
@@ -207,46 +371,91 @@ async def collect_media_parts(bot: Bot, message: Message) -> list[dict[str, Any]
                     data = await _download(bot, sticker.thumbnail.file_id)
                     if data:
                         mime = "image/jpeg"  # Thumbnails are JPEG
-                        data, mime, size = _maybe_downscale_image(data, mime)
-                        parts.append(
-                            {"bytes": data, "mime": mime, "kind": "image", "size": size}
-                        )
-                        LOGGER.debug(
-                            "Collected animated sticker thumbnail: %d bytes, %s",
-                            size,
-                            mime,
+                        if not _validate_media_data(data, mime):
+                            download_failures.append(("animated_sticker_thumbnail", sticker.thumbnail.file_id))
+                            LOGGER.warning(
+                                "Downloaded animated sticker thumbnail data failed validation (file_id=%s) from message %s",
+                                sticker.thumbnail.file_id,
+                                message.message_id,
+                            )
+                        else:
+                            data, mime, size = _maybe_downscale_image(data, mime)
+                            parts.append(
+                                {"bytes": data, "mime": mime, "kind": "image", "size": size}
+                            )
+                            LOGGER.debug(
+                                "Collected animated sticker thumbnail: %d bytes, %s",
+                                size,
+                                mime,
+                            )
+                    else:
+                        download_failures.append(("animated_sticker_thumbnail", sticker.thumbnail.file_id))
+                        LOGGER.warning(
+                            "Failed to download animated sticker thumbnail (file_id=%s) from message %s",
+                            sticker.thumbnail.file_id,
+                            message.message_id,
                         )
                 else:
                     LOGGER.debug(
-                        "Skipping animated sticker (TGS format not supported by Gemini)"
+                        "Skipping animated sticker (TGS format not supported by Gemini, no thumbnail available)"
                     )
             elif sticker.is_video:
                 # Video stickers are WebM format
                 data = await _download(bot, sticker.file_id)
                 if data:
                     mime = "video/webm"
-                    parts.append(
-                        {
-                            "bytes": data,
-                            "mime": mime,
-                            "kind": "video",
-                            "size": len(data),
-                        }
-                    )
-                    LOGGER.debug(
-                        "Collected video sticker: %d bytes, %s", len(data), mime
+                    if not _validate_media_data(data, mime):
+                        download_failures.append(("video_sticker", sticker.file_id))
+                        LOGGER.warning(
+                            "Downloaded video sticker data failed validation (file_id=%s) from message %s",
+                            sticker.file_id,
+                            message.message_id,
+                        )
+                    else:
+                        parts.append(
+                            {
+                                "bytes": data,
+                                "mime": mime,
+                                "kind": "video",
+                                "size": len(data),
+                            }
+                        )
+                        LOGGER.debug(
+                            "Collected video sticker: %d bytes, %s", len(data), mime
+                        )
+                else:
+                    download_failures.append(("video_sticker", sticker.file_id))
+                    LOGGER.warning(
+                        "Failed to download video sticker (file_id=%s) from message %s",
+                        sticker.file_id,
+                        message.message_id,
                     )
             else:
                 # Static stickers are WebP format
                 data = await _download(bot, sticker.file_id)
                 if data:
                     mime = "image/webp"
-                    # For WebP, try converting to JPEG if it helps reduce size
-                    data, mime, size = _maybe_downscale_image(data, mime)
-                    parts.append(
-                        {"bytes": data, "mime": mime, "kind": "image", "size": size}
+                    if not _validate_media_data(data, mime):
+                        download_failures.append(("static_sticker", sticker.file_id))
+                        LOGGER.warning(
+                            "Downloaded static sticker data failed validation (file_id=%s) from message %s",
+                            sticker.file_id,
+                            message.message_id,
+                        )
+                    else:
+                        # For WebP, try converting to JPEG if it helps reduce size
+                        data, mime, size = _maybe_downscale_image(data, mime)
+                        parts.append(
+                            {"bytes": data, "mime": mime, "kind": "image", "size": size}
+                        )
+                        LOGGER.debug("Collected static sticker: %d bytes, %s", size, mime)
+                else:
+                    download_failures.append(("static_sticker", sticker.file_id))
+                    LOGGER.warning(
+                        "Failed to download static sticker (file_id=%s) from message %s",
+                        sticker.file_id,
+                        message.message_id,
                     )
-                    LOGGER.debug("Collected static sticker: %d bytes, %s", size, mime)
 
         # Voice messages (OGG/Opus)
         if message.voice:
@@ -254,14 +463,29 @@ async def collect_media_parts(bot: Bot, message: Message) -> list[dict[str, Any]
             mime = voice.mime_type or "audio/ogg"
             data = await _download(bot, voice.file_id)
             if data:
-                parts.append(
-                    {"bytes": data, "mime": mime, "kind": "audio", "size": len(data)}
-                )
-                LOGGER.debug(
-                    "Collected voice message: %d bytes, %s, duration=%ds",
-                    len(data),
-                    mime,
-                    voice.duration or 0,
+                if not _validate_media_data(data, mime):
+                    download_failures.append(("voice", voice.file_id))
+                    LOGGER.warning(
+                        "Downloaded voice message data failed validation (file_id=%s) from message %s",
+                        voice.file_id,
+                        message.message_id,
+                    )
+                else:
+                    parts.append(
+                        {"bytes": data, "mime": mime, "kind": "audio", "size": len(data)}
+                    )
+                    LOGGER.debug(
+                        "Collected voice message: %d bytes, %s, duration=%ds",
+                        len(data),
+                        mime,
+                        voice.duration or 0,
+                    )
+            else:
+                download_failures.append(("voice", voice.file_id))
+                LOGGER.warning(
+                    "Failed to download voice message (file_id=%s) from message %s",
+                    voice.file_id,
+                    message.message_id,
                 )
 
         # Audio files
@@ -270,14 +494,29 @@ async def collect_media_parts(bot: Bot, message: Message) -> list[dict[str, Any]
             mime = audio.mime_type or DEFAULT_AUDIO_MIME
             data = await _download(bot, audio.file_id)
             if data:
-                parts.append(
-                    {"bytes": data, "mime": mime, "kind": "audio", "size": len(data)}
-                )
-                LOGGER.debug(
-                    "Collected audio file: %d bytes, %s, duration=%ds",
-                    len(data),
-                    mime,
-                    audio.duration or 0,
+                if not _validate_media_data(data, mime):
+                    download_failures.append(("audio", audio.file_id))
+                    LOGGER.warning(
+                        "Downloaded audio file data failed validation (file_id=%s) from message %s",
+                        audio.file_id,
+                        message.message_id,
+                    )
+                else:
+                    parts.append(
+                        {"bytes": data, "mime": mime, "kind": "audio", "size": len(data)}
+                    )
+                    LOGGER.debug(
+                        "Collected audio file: %d bytes, %s, duration=%ds",
+                        len(data),
+                        mime,
+                        audio.duration or 0,
+                    )
+            else:
+                download_failures.append(("audio", audio.file_id))
+                LOGGER.warning(
+                    "Failed to download audio file (file_id=%s) from message %s",
+                    audio.file_id,
+                    message.message_id,
                 )
 
         # Video files
@@ -286,16 +525,31 @@ async def collect_media_parts(bot: Bot, message: Message) -> list[dict[str, Any]
             mime = video.mime_type or DEFAULT_VIDEO_MIME
             data = await _download(bot, video.file_id)
             if data:
-                parts.append(
-                    {"bytes": data, "mime": mime, "kind": "video", "size": len(data)}
-                )
-                LOGGER.debug(
-                    "Collected video: %d bytes, %s, duration=%ds, %dx%d",
-                    len(data),
-                    mime,
-                    video.duration or 0,
-                    video.width or 0,
-                    video.height or 0,
+                if not _validate_media_data(data, mime):
+                    download_failures.append(("video", video.file_id))
+                    LOGGER.warning(
+                        "Downloaded video data failed validation (file_id=%s) from message %s",
+                        video.file_id,
+                        message.message_id,
+                    )
+                else:
+                    parts.append(
+                        {"bytes": data, "mime": mime, "kind": "video", "size": len(data)}
+                    )
+                    LOGGER.debug(
+                        "Collected video: %d bytes, %s, duration=%ds, %dx%d",
+                        len(data),
+                        mime,
+                        video.duration or 0,
+                        video.width or 0,
+                        video.height or 0,
+                    )
+            else:
+                download_failures.append(("video", video.file_id))
+                LOGGER.warning(
+                    "Failed to download video (file_id=%s) from message %s",
+                    video.file_id,
+                    message.message_id,
                 )
 
         # Video notes (round videos)
@@ -304,14 +558,29 @@ async def collect_media_parts(bot: Bot, message: Message) -> list[dict[str, Any]
             mime = DEFAULT_VIDEO_MIME
             data = await _download(bot, video_note.file_id)
             if data:
-                parts.append(
-                    {"bytes": data, "mime": mime, "kind": "video", "size": len(data)}
-                )
-                LOGGER.debug(
-                    "Collected video note: %d bytes, %s, duration=%ds",
-                    len(data),
-                    mime,
-                    video_note.duration or 0,
+                if not _validate_media_data(data, mime):
+                    download_failures.append(("video_note", video_note.file_id))
+                    LOGGER.warning(
+                        "Downloaded video note data failed validation (file_id=%s) from message %s",
+                        video_note.file_id,
+                        message.message_id,
+                    )
+                else:
+                    parts.append(
+                        {"bytes": data, "mime": mime, "kind": "video", "size": len(data)}
+                    )
+                    LOGGER.debug(
+                        "Collected video note: %d bytes, %s, duration=%ds",
+                        len(data),
+                        mime,
+                        video_note.duration or 0,
+                    )
+            else:
+                download_failures.append(("video_note", video_note.file_id))
+                LOGGER.warning(
+                    "Failed to download video note (file_id=%s) from message %s",
+                    video_note.file_id,
+                    message.message_id,
                 )
 
         # Animations (GIFs, sent as MP4)
@@ -320,19 +589,34 @@ async def collect_media_parts(bot: Bot, message: Message) -> list[dict[str, Any]
             mime = animation.mime_type or DEFAULT_VIDEO_MIME
             data = await _download(bot, animation.file_id)
             if data:
-                parts.append(
-                    {
-                        "bytes": data,
-                        "mime": mime,
-                        "kind": "video",  # GIFs are treated as videos by Gemini
-                        "size": len(data),
-                    }
-                )
-                LOGGER.debug(
-                    "Collected animation/GIF: %d bytes, %s, duration=%ds",
-                    len(data),
-                    mime,
-                    animation.duration or 0,
+                if not _validate_media_data(data, mime):
+                    download_failures.append(("animation", animation.file_id))
+                    LOGGER.warning(
+                        "Downloaded animation/GIF data failed validation (file_id=%s) from message %s",
+                        animation.file_id,
+                        message.message_id,
+                    )
+                else:
+                    parts.append(
+                        {
+                            "bytes": data,
+                            "mime": mime,
+                            "kind": "video",  # GIFs are treated as videos by Gemini
+                            "size": len(data),
+                        }
+                    )
+                    LOGGER.debug(
+                        "Collected animation/GIF: %d bytes, %s, duration=%ds",
+                        len(data),
+                        mime,
+                        animation.duration or 0,
+                    )
+            else:
+                download_failures.append(("animation", animation.file_id))
+                LOGGER.warning(
+                    "Failed to download animation/GIF (file_id=%s) from message %s",
+                    animation.file_id,
+                    message.message_id,
                 )
 
         # Documents (can be images, audio, video, or other files)
@@ -344,48 +628,65 @@ async def collect_media_parts(bot: Bot, message: Message) -> list[dict[str, Any]
             if mime.startswith(("image/", "audio/", "video/")):
                 data = await _download(bot, document.file_id)
                 if data:
-                    # Determine kind from MIME type
-                    if mime.startswith("image/"):
-                        kind = "image"
-                        data, mime, size = _maybe_downscale_image(data, mime)
-                        parts.append(
-                            {"bytes": data, "mime": mime, "kind": kind, "size": size}
-                        )
-                    elif mime.startswith("audio/"):
-                        kind = "audio"
-                        parts.append(
-                            {
-                                "bytes": data,
-                                "mime": mime,
-                                "kind": kind,
-                                "size": len(data),
-                            }
-                        )
-                    elif mime.startswith("video/"):
-                        kind = "video"
-                        parts.append(
-                            {
-                                "bytes": data,
-                                "mime": mime,
-                                "kind": kind,
-                                "size": len(data),
-                            }
+                    if not _validate_media_data(data, mime):
+                        download_failures.append(("document", document.file_id))
+                        LOGGER.warning(
+                            "Downloaded document data failed validation (file_id=%s, mime=%s) from message %s",
+                            document.file_id,
+                            mime,
+                            message.message_id,
                         )
                     else:
-                        kind = "document"
-                        parts.append(
-                            {
-                                "bytes": data,
-                                "mime": mime,
-                                "kind": kind,
-                                "size": len(data),
-                            }
+                        # Determine kind from MIME type
+                        if mime.startswith("image/"):
+                            kind = "image"
+                            data, mime, size = _maybe_downscale_image(data, mime)
+                            parts.append(
+                                {"bytes": data, "mime": mime, "kind": kind, "size": size}
+                            )
+                        elif mime.startswith("audio/"):
+                            kind = "audio"
+                            parts.append(
+                                {
+                                    "bytes": data,
+                                    "mime": mime,
+                                    "kind": kind,
+                                    "size": len(data),
+                                }
+                            )
+                        elif mime.startswith("video/"):
+                            kind = "video"
+                            parts.append(
+                                {
+                                    "bytes": data,
+                                    "mime": mime,
+                                    "kind": kind,
+                                    "size": len(data),
+                                }
+                            )
+                        else:
+                            kind = "document"
+                            parts.append(
+                                {
+                                    "bytes": data,
+                                    "mime": mime,
+                                    "kind": kind,
+                                    "size": len(data),
+                                }
+                            )
+                        LOGGER.debug(
+                            "Collected document: %d bytes, %s, kind=%s",
+                            (size if kind == "image" else len(data)),
+                            mime,
+                            kind,
                         )
-                    LOGGER.debug(
-                        "Collected document: %d bytes, %s, kind=%s",
-                        (size if kind == "image" else len(data)),
+                else:
+                    download_failures.append(("document", document.file_id))
+                    LOGGER.warning(
+                        "Failed to download document (file_id=%s, mime=%s) from message %s",
+                        document.file_id,
                         mime,
-                        kind,
+                        message.message_id,
                     )
             else:
                 LOGGER.debug(f"Skipping unsupported document MIME type: {mime}")
@@ -398,6 +699,16 @@ async def collect_media_parts(bot: Bot, message: Message) -> list[dict[str, Any]
                 "Large files may fail. Consider implementing Files API.",
                 total_size,
                 MAX_INLINE_SIZE // (1024 * 1024),
+            )
+
+        # Log summary of download failures
+        if download_failures:
+            failure_summary = ", ".join(f"{media_type}({file_id[:8]}...)" for media_type, file_id in download_failures)
+            LOGGER.warning(
+                "Media collection completed with %d failure(s) for message %s: %s",
+                len(download_failures),
+                message.message_id,
+                failure_summary,
             )
 
     except Exception as e:  # pragma: no cover - downstream fetch issues

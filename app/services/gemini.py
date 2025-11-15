@@ -515,7 +515,14 @@ class GeminiClient:
             if "file_uri" in item:
                 file_uri = item["file_uri"]
                 if file_uri:
-                    parts.append({"file_data": {"file_uri": file_uri}})
+                    # Preserve metadata for easier extraction later
+                    kind = item.get("kind", "video")  # YouTube URLs are typically videos
+                    mime = item.get("mime", "video/mp4")  # Default for YouTube
+                    parts.append({
+                        "file_data": {"file_uri": file_uri},
+                        "mime": mime,
+                        "kind": kind,
+                    })
                     if logger:
                         logger.debug(f"Added file_uri media: {file_uri}")
                 continue
@@ -548,7 +555,12 @@ class GeminiClient:
                 continue
 
             data = base64.b64encode(blob).decode("ascii")
-            parts.append({"inline_data": {"mime_type": mime, "data": data}})
+            # Preserve metadata as top-level fields for easier extraction
+            parts.append({
+                "inline_data": {"mime_type": mime, "data": data},
+                "mime": mime,
+                "kind": kind,
+            })
             if logger:
                 logger.debug(
                     f"Added inline media: mime={mime}, kind={kind}, size={size} bytes, base64_len={len(data)}",

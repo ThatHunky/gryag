@@ -184,6 +184,25 @@ def _build_user_message_query(
     )
 
 
+def _build_last_bot_response_query(
+    chat_id: int, thread_id: int | None
+) -> tuple[str, tuple]:
+    """Build query for fetching most recent bot response in chat/thread."""
+    if thread_id is None:
+        return (
+            "SELECT id, ts FROM messages "
+            "WHERE chat_id = $1 AND thread_id IS NULL AND role = 'model' "
+            "ORDER BY id DESC LIMIT 1",
+            (chat_id,),
+        )
+    return (
+        "SELECT id, ts FROM messages "
+        "WHERE chat_id = $1 AND thread_id = $2 AND role = 'model' "
+        "ORDER BY id DESC LIMIT 1",
+        (chat_id, thread_id),
+    )
+
+
 # In-memory skip counter fallback (when Redis is not available)
 # Format: {(chat_id, user_id): (skip_count, last_skip_ts)}
 _skip_counters: dict[tuple[int, int], tuple[int, int]] = {}
@@ -392,102 +411,134 @@ async def _check_unanswered_trigger(
         return max(id_count, ts_count)
 
     async with get_db_connection(store._database_url) as conn:
+        # Query for the most recent bot response in this chat/thread
+        bot_query, bot_params = _build_last_bot_response_query(chat_id, thread_id)
+        last_bot_row = await conn.fetchrow(bot_query, *bot_params)
+
         # Query for the most recent message from this user in this chat/thread
         # This will be the PREVIOUS message (before the current one being processed)
         query, params = _build_user_message_query(chat_id, thread_id, user_id)
         user_last_row = await conn.fetchrow(query, *params)
 
         if user_last_row and user_last_row["role"] == "user":
-            # Check if the unanswered trigger is recent enough to still block
-            trigger_age = current_ts - user_last_row["ts"]
-            if trigger_age > threshold_seconds:
-                # Trigger is old enough - allow responses again (reset)
-                LOGGER.debug(
-                    f"Previous trigger from user {user_id} is old ({trigger_age}s), allowing response"
-                )
-                # Reset skip count since trigger is old
-                await _reset_skip_count(chat_id, user_id, redis_client)
+            # Only check for unanswered trigger if the user's last message came AFTER the last bot response
+            # If the last bot response came after the user's last message, that message was already answered
+            # (or was a non-trigger message, which doesn't need a response)
+            should_check_trigger = False
+            if last_bot_row is None:
+                # No bot response exists yet - check first message as potential trigger
+                should_check_trigger = True
+            elif user_last_row["id"] > last_bot_row["id"]:
+                # User message came after last bot response - this could be an unanswered trigger
+                should_check_trigger = True
             else:
-                # Found a recent user message from this user - check if there's ANY bot response after it
-                # Use retry mechanism to handle race conditions where DB write isn't yet visible
-                bot_response_count = 0
-                max_retries = 3
-                retry_delays = [0.05, 0.1, 0.2]  # 50ms, 100ms, 200ms
+                # Last bot response came after user message - previous message was already answered
+                # (or was a non-trigger). Allow this trigger.
+                LOGGER.debug(
+                    f"Last bot response (id={last_bot_row['id']}) came after user message "
+                    f"(id={user_last_row['id']}) - previous was answered or non-trigger, allowing trigger",
+                    extra={
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "last_bot_id": last_bot_row["id"],
+                        "last_user_id": user_last_row["id"],
+                    },
+                )
+                # Reset skip count since we're allowing this message
+                await _reset_skip_count(chat_id, user_id, redis_client)
 
-                for retry_attempt in range(max_retries):
-                    bot_response_count = await _check_bot_response(
-                        conn,
-                        user_last_row["id"],
-                        user_last_row["ts"],
-                        retry_attempt,
-                    )
-
-                    # If we found a response, no need to retry
-                    if bot_response_count > 0:
-                        if retry_attempt > 0:
-                            LOGGER.debug(
-                                f"Found bot response after {retry_attempt} retries for user {user_id} in chat {chat_id}"
-                            )
-                        break
-
-                    # If processing is active, don't retry - response is being generated
-                    if is_processing:
-                        break
-
-                    # If this isn't the last retry, wait before retrying
-                    if retry_attempt < max_retries - 1:
-                        await asyncio.sleep(retry_delays[retry_attempt])
-
-                # If there's no bot message after the user's message (count = 0),
-                # that means the user's trigger wasn't answered (and it's recent)
-                # BUT: If processing is currently active for this user, we know a response is being generated,
-                # so don't skip the message (the response just hasn't been saved to DB yet)
-                if bot_response_count == 0 and not is_processing:
-                    # Increment skip count
-                    new_skip_count = await _increment_skip_count(chat_id, user_id, redis_client)
-                    LOGGER.info(
-                        "Skipping trigger message - previous trigger from this user was not answered (recent)",
-                        extra={
-                            "chat_id": chat_id,
-                            "user_id": user_id,
-                            "previous_trigger_id": user_last_row["id"],
-                            "previous_trigger_ts": user_last_row["ts"],
-                            "trigger_age_seconds": trigger_age,
-                            "is_processing": is_processing,
-                            "bot_response_count": bot_response_count,
-                            "retry_attempts": retry_attempt + 1,
-                            "skip_count": new_skip_count,
-                        },
-                    )
-                    telemetry.increment_counter("chat.skipped_unanswered_trigger")
-                    # Do NOT store this message - it would create a blocking chain
-                    # Only the first unanswered trigger should block subsequent ones
-                    return True
-                elif bot_response_count == 0 and is_processing:
+            if should_check_trigger:
+                # Check if the unanswered trigger is recent enough to still block
+                trigger_age = current_ts - user_last_row["ts"]
+                if trigger_age > threshold_seconds:
+                    # Trigger is old enough - allow responses again (reset)
                     LOGGER.debug(
-                        "Previous trigger from this user appears unanswered, but processing is active - allowing message",
-                        extra={
-                            "chat_id": chat_id,
-                            "user_id": user_id,
-                            "previous_trigger_id": user_last_row["id"],
-                            "previous_trigger_ts": user_last_row["ts"],
-                            "bot_response_count": bot_response_count,
-                        },
+                        f"Previous trigger from user {user_id} is old ({trigger_age}s), allowing response"
                     )
-                    # Reset skip count since we're allowing this message
+                    # Reset skip count since trigger is old
                     await _reset_skip_count(chat_id, user_id, redis_client)
-                elif bot_response_count > 0:
-                    LOGGER.debug(
-                        f"Found {bot_response_count} bot response(s) after user {user_id}'s previous trigger - allowing message",
-                        extra={
-                            "chat_id": chat_id,
-                            "user_id": user_id,
-                            "previous_trigger_id": user_last_row["id"],
-                            "bot_response_count": bot_response_count,
-                        },
-                    )
-                    # Reset skip count since bot responded
-                    await _reset_skip_count(chat_id, user_id, redis_client)
+                else:
+                    # Found a recent user message from this user that came after last bot response
+                    # Check if there's ANY bot response after it
+                    # Use retry mechanism to handle race conditions where DB write isn't yet visible
+                    bot_response_count = 0
+                    max_retries = 3
+                    retry_delays = [0.05, 0.1, 0.2]  # 50ms, 100ms, 200ms
+
+                    for retry_attempt in range(max_retries):
+                        bot_response_count = await _check_bot_response(
+                            conn,
+                            user_last_row["id"],
+                            user_last_row["ts"],
+                            retry_attempt,
+                        )
+
+                        # If we found a response, no need to retry
+                        if bot_response_count > 0:
+                            if retry_attempt > 0:
+                                LOGGER.debug(
+                                    f"Found bot response after {retry_attempt} retries for user {user_id} in chat {chat_id}"
+                                )
+                            break
+
+                        # If processing is active, don't retry - response is being generated
+                        if is_processing:
+                            break
+
+                        # If this isn't the last retry, wait before retrying
+                        if retry_attempt < max_retries - 1:
+                            await asyncio.sleep(retry_delays[retry_attempt])
+
+                    # If there's no bot message after the user's message (count = 0),
+                    # that means the user's trigger wasn't answered (and it's recent)
+                    # BUT: If processing is currently active for this user, we know a response is being generated,
+                    # so don't skip the message (the response just hasn't been saved to DB yet)
+                    if bot_response_count == 0 and not is_processing:
+                        # Increment skip count
+                        new_skip_count = await _increment_skip_count(chat_id, user_id, redis_client)
+                        LOGGER.info(
+                            "Skipping trigger message - previous trigger from this user was not answered (recent)",
+                            extra={
+                                "chat_id": chat_id,
+                                "user_id": user_id,
+                                "previous_trigger_id": user_last_row["id"],
+                                "previous_trigger_ts": user_last_row["ts"],
+                                "trigger_age_seconds": trigger_age,
+                                "is_processing": is_processing,
+                                "bot_response_count": bot_response_count,
+                                "retry_attempts": retry_attempt + 1,
+                                "skip_count": new_skip_count,
+                            },
+                        )
+                        telemetry.increment_counter("chat.skipped_unanswered_trigger")
+                        # Do NOT store this message - it would create a blocking chain
+                        # Only the first unanswered trigger should block subsequent ones
+                        return True
+                    elif bot_response_count == 0 and is_processing:
+                        LOGGER.debug(
+                            "Previous trigger from this user appears unanswered, but processing is active - allowing message",
+                            extra={
+                                "chat_id": chat_id,
+                                "user_id": user_id,
+                                "previous_trigger_id": user_last_row["id"],
+                                "previous_trigger_ts": user_last_row["ts"],
+                                "bot_response_count": bot_response_count,
+                            },
+                        )
+                        # Reset skip count since we're allowing this message
+                        await _reset_skip_count(chat_id, user_id, redis_client)
+                    elif bot_response_count > 0:
+                        LOGGER.debug(
+                            f"Found {bot_response_count} bot response(s) after user {user_id}'s previous trigger - allowing message",
+                            extra={
+                                "chat_id": chat_id,
+                                "user_id": user_id,
+                                "previous_trigger_id": user_last_row["id"],
+                                "bot_response_count": bot_response_count,
+                            },
+                        )
+                        # Reset skip count since bot responded
+                        await _reset_skip_count(chat_id, user_id, redis_client)
 
     return False
 
@@ -1376,6 +1427,39 @@ def _extract_message_id_from_history(msg: dict[str, Any]) -> int | None:
                     except (ValueError, TypeError):
                         pass
     return None
+
+
+def _extract_mime_from_media_item(media_item: dict[str, Any]) -> str:
+    """
+    Extract MIME type from a media item in Gemini API format.
+    
+    Supports both formats:
+    - New format: {"inline_data": {...}, "mime": "video/mp4", "kind": "video"}
+    - Legacy format: {"inline_data": {"mime_type": "video/mp4", ...}}
+    - File URI format: {"file_data": {"file_uri": "..."}, "mime": "video/mp4"}
+    
+    Returns empty string if MIME type cannot be determined.
+    """
+    # First check for top-level mime field (preserved by build_media_parts)
+    mime = media_item.get("mime")
+    if mime:
+        return mime
+    
+    # Fallback: check inline_data.mime_type
+    inline_data = media_item.get("inline_data", {})
+    if isinstance(inline_data, dict):
+        mime = inline_data.get("mime_type")
+        if mime:
+            return mime
+    
+    # Fallback: check file_data.file_uri (YouTube URLs are typically video/mp4)
+    file_data = media_item.get("file_data", {})
+    if isinstance(file_data, dict) and file_data.get("file_uri"):
+        # YouTube URLs are videos
+        if "youtube.com" in file_data.get("file_uri", "") or "youtu.be" in file_data.get("file_uri", ""):
+            return "video/mp4"
+    
+    return ""
 
 
 def _filter_current_message_from_history(
@@ -2666,7 +2750,38 @@ async def _build_message_context(
             )
 
     # Build Gemini-compatible media parts
+    media_parts_before_filter = len(media_raw)
     media_parts = ctx.gemini_client.build_media_parts(media_raw, logger=LOGGER)
+    media_parts_after_filter = len(media_parts)
+    
+    # Check if media was filtered out
+    filtered_media_count = media_parts_before_filter - media_parts_after_filter
+    
+    # Check if media was expected but not collected
+    has_expected_media = (
+        ctx.message.photo
+        or ctx.message.video
+        or ctx.message.animation
+        or ctx.message.sticker
+        or ctx.message.voice
+        or ctx.message.audio
+        or ctx.message.video_note
+        or (ctx.message.document and ctx.message.document.mime_type and 
+            ctx.message.document.mime_type.startswith(("image/", "audio/", "video/")))
+    )
+    
+    # Build user-facing error messages if needed
+    media_error_messages = []
+    if has_expected_media and len(media_raw) == 0:
+        # Media was expected but nothing was collected (download failures)
+        media_error_messages.append(
+            "[Примітка: Не вдалося завантажити медіа з повідомлення. Спробуйте надіслати ще раз.]"
+        )
+    elif filtered_media_count > 0:
+        # Some media was filtered out (likely due to model limitations)
+        media_error_messages.append(
+            f"[Примітка: {filtered_media_count} медіа-файл(ів) не підтримується поточною моделлю.]"
+        )
 
     # Log media types for debugging
     if media_parts:
@@ -2717,6 +2832,12 @@ async def _build_message_context(
                     reply_context = item
                     if item.get("media_parts"):
                         reply_media_parts_for_block = item.get("media_parts")
+                        reply_media_parts = item.get("media_parts")  # Also set for consistency
+                        LOGGER.debug(
+                            "Retrieved %d media part(s) from cached reply context for message %s",
+                            len(reply_media_parts_for_block),
+                            reply.message_id,
+                        )
                     break
 
         # If we have a reply but no cached context, or cached context has no media,
@@ -2771,6 +2892,9 @@ async def _build_message_context(
                         else:
                             # Update existing context with media
                             reply_context["media_parts"] = reply_media_parts
+                            # Ensure reply_media_parts_for_block is set if it wasn't already
+                            if not reply_media_parts_for_block:
+                                reply_media_parts_for_block = reply_media_parts
 
                         LOGGER.debug(
                             "Collected %d media part(s) from reply message %s",
@@ -2811,9 +2935,18 @@ async def _build_message_context(
         if reply_context:
             reply_context_for_block = dict(reply_context)
 
-    # Always store reply context for history injection if enabled and present
-    if reply_context and ctx.settings.include_reply_excerpt:
-        reply_context_for_history = reply_context
+    # Always store reply context for history injection if it has media, regardless of include_reply_excerpt setting
+    # This ensures reply media is available for all format paths (compact, JSON, system context block)
+    if reply_context:
+        # Set reply_context_for_history if:
+        # 1. include_reply_excerpt is enabled (for text excerpts), OR
+        # 2. reply has media_parts (for media context)
+        if ctx.settings.include_reply_excerpt or reply_context.get("media_parts"):
+            reply_context_for_history = reply_context
+            if reply_context.get("media_parts") and not ctx.settings.include_reply_excerpt:
+                LOGGER.debug(
+                    "Stored reply context for history injection due to media presence (include_reply_excerpt=False)"
+                )
 
     if use_system_context_block:
         target_thread_for_block = (
@@ -3138,6 +3271,11 @@ async def _build_message_context(
                 full_conversation = f"{current_message_line}\n[RESPOND]"
             else:
                 full_conversation = conversation_text or "[RESPOND]"
+            
+            # Add media error messages if any
+            if media_error_messages:
+                error_text = "\n".join(media_error_messages)
+                full_conversation = f"{full_conversation}\n{error_text}"
 
             user_parts = [{"text": full_conversation}]
 
@@ -3157,7 +3295,7 @@ async def _build_message_context(
             # Priority 1: Current message media (highest priority)
             if media_parts:
                 for media_item in media_parts:
-                    mime = media_item.get("mime", "")
+                    mime = _extract_mime_from_media_item(media_item)
                     is_video = mime.startswith("video/")
 
                     if is_video and video_count >= max_videos:
@@ -3173,11 +3311,26 @@ async def _build_message_context(
 
             # Priority 2: Reply message media (if replying to older message not in context)
             reply_media_parts = []
-            if reply_context_for_history and reply_context_for_history.get(
-                "media_parts"
-            ):
+            # Check both reply_context_for_history and reply_media_parts_for_block for reply media
+            # This ensures media is included even if reply_context_for_history wasn't set due to include_reply_excerpt=False
+            reply_media_source = None
+            if reply_context_for_history and reply_context_for_history.get("media_parts"):
+                reply_media_source = reply_context_for_history["media_parts"]
+            elif reply_media_parts_for_block:
+                # Fallback: use reply_media_parts_for_block if reply_context_for_history doesn't have media
+                reply_media_source = reply_media_parts_for_block
+                LOGGER.debug(
+                    "Using reply_media_parts_for_block as fallback for compact format (reply_context_for_history has no media)"
+                )
+            
+            if reply_media_source:
                 # Phase 1: Check if reply message is already in historical_media
-                reply_msg_id = reply_context_for_history.get("message_id")
+                # Get reply_msg_id from reply_context_for_history if available, otherwise from reply_context
+                reply_msg_id = None
+                if reply_context_for_history:
+                    reply_msg_id = reply_context_for_history.get("message_id")
+                elif reply_context:
+                    reply_msg_id = reply_context.get("message_id")
                 historical_media = formatted_context.get("historical_media", [])
 
                 # Check if reply message is in historical context by checking message IDs
@@ -3206,44 +3359,82 @@ async def _build_message_context(
                                     break
 
                 if not reply_media_in_history:
-                    reply_media_parts = reply_context_for_history["media_parts"]
-                    LOGGER.debug(
-                        "Reply message %s not in historical context, including reply media (%d items)",
-                        reply_msg_id,
-                        len(reply_media_parts),
-                    )
-                    for media_item in reply_media_parts:
-                        mime = media_item.get("mime", "")
-                        is_video = mime.startswith("video/")
-
-                        if is_video and video_count >= max_videos:
-                            # Skip this video but try to get description
-                            if reply_msg_id:
-                                description = await _get_video_description_from_history(
-                                    store=ctx.store,
-                                    chat_id=ctx.chat_id,
-                                    thread_id=ctx.thread_id,
-                                    message_id=reply_msg_id,
-                                )
-                                if description:
-                                    video_descriptions.append(
-                                        f"[Раніше про відео в повідомленні {reply_msg_id}]: {description[:200]}"
-                                    )
-                                LOGGER.debug(
-                                    f"Skipping reply video (limit {max_videos} reached), description: {bool(description)}"
-                                )
+                    # Validate media format before processing
+                    valid_reply_media = []
+                    invalid_count = 0
+                    for media_item in reply_media_source:
+                        if not isinstance(media_item, dict):
+                            invalid_count += 1
+                            LOGGER.warning(
+                                "Invalid reply media item in compact format (not a dict): %s", type(media_item)
+                            )
                             continue
+                        if "inline_data" not in media_item and "file_data" not in media_item:
+                            invalid_count += 1
+                            LOGGER.warning(
+                                "Invalid reply media item in compact format (missing inline_data or file_data): %s",
+                                list(media_item.keys()),
+                            )
+                            continue
+                        valid_reply_media.append(media_item)
+                    
+                    if invalid_count > 0:
+                        telemetry.increment_counter("context.reply_media_invalid", invalid_count)
+                        LOGGER.warning(
+                            "Filtered out %d invalid reply media item(s) in compact format", invalid_count
+                        )
+                    
+                    if not valid_reply_media:
+                        LOGGER.warning(
+                            "No valid reply media items to add in compact format after validation (message_id=%s)",
+                            reply_msg_id,
+                        )
+                    else:
+                        reply_media_parts = valid_reply_media
+                        LOGGER.debug(
+                            "Reply message %s not in historical context, including reply media (%d items, %d valid)",
+                            reply_msg_id,
+                            len(reply_media_source),
+                            len(reply_media_parts),
+                        )
+                        added_count = 0
+                        for media_item in reply_media_parts:
+                            mime = _extract_mime_from_media_item(media_item)
+                            is_video = mime.startswith("video/")
 
-                        all_media.append(media_item)
-                        if is_video:
-                            video_count += 1
+                            if is_video and video_count >= max_videos:
+                                # Skip this video but try to get description
+                                if reply_msg_id:
+                                    description = await _get_video_description_from_history(
+                                        store=ctx.store,
+                                        chat_id=ctx.chat_id,
+                                        thread_id=ctx.thread_id,
+                                        message_id=reply_msg_id,
+                                    )
+                                    if description:
+                                        video_descriptions.append(
+                                            f"[Раніше про відео в повідомленні {reply_msg_id}]: {description[:200]}"
+                                        )
+                                    LOGGER.debug(
+                                        f"Skipping reply video (limit {max_videos} reached), description: {bool(description)}"
+                                    )
+                                continue
 
-                    LOGGER.debug(
-                        "Added %d media items from replied message (message_id=%s), videos: %d",
-                        len([m for m in reply_media_parts if m in all_media]),
-                        reply_msg_id,
-                        video_count,
-                    )
+                            all_media.append(media_item)
+                            added_count += 1
+                            if is_video:
+                                video_count += 1
+
+                        LOGGER.debug(
+                            "Added %d media items from replied message (message_id=%s), videos: %d",
+                            added_count,
+                            reply_msg_id,
+                            video_count,
+                        )
+                        if added_count == 0:
+                            LOGGER.warning(
+                                "No reply media items were added in compact format (all filtered or skipped)"
+                            )
 
             # Priority 3: Historical media from context (limited to max_historical)
             historical_media = formatted_context.get("historical_media", [])
@@ -3256,7 +3447,7 @@ async def _build_message_context(
                     # Add historical media up to remaining slots, respecting video limit
                     historical_kept = 0
                     for media_item in historical_media[:remaining_slots]:
-                        mime = media_item.get("mime", "")
+                        mime = _extract_mime_from_media_item(media_item)
                         is_video = mime.startswith("video/")
 
                         if is_video and video_count >= max_videos:
@@ -3337,7 +3528,7 @@ async def _build_message_context(
                             [
                                 m
                                 for m in all_media
-                                if m.get("mime", "").startswith("video/")
+                                if _extract_mime_from_media_item(m).startswith("video/")
                             ]
                         ),
                         video_count,
@@ -3503,72 +3694,132 @@ async def _build_message_context(
                 )
 
     # In JSON mode, attach reply media directly to user_parts (respecting total media cap)
-    if (
-        not ctx.settings.enable_compact_conversation_format
-    ) and reply_context_for_history:
+    # Check both reply_context_for_history and reply_media_parts_for_block to ensure media is included
+    if not ctx.settings.enable_compact_conversation_format:
         try:
-            reply_media = reply_context_for_history.get("media_parts") or []
-            if reply_media:
-                # Count media already in user_parts
-                current_media_count = sum(
-                    1
-                    for p in user_parts
-                    if isinstance(p, dict) and ("inline_data" in p or "file_data" in p)
+            # Get reply media from either source
+            reply_media = []
+            if reply_context_for_history and reply_context_for_history.get("media_parts"):
+                reply_media = reply_context_for_history.get("media_parts")
+            elif reply_media_parts_for_block:
+                reply_media = reply_media_parts_for_block
+                LOGGER.debug(
+                    "Using reply_media_parts_for_block for JSON format (reply_context_for_history has no media)"
                 )
-                max_total = ctx.settings.gemini_max_media_items
-                remaining = max(0, max_total - current_media_count)
-                if remaining > 0:
-                    # Phase 4: Deduplicate reply media before adding
-                    reply_media = _deduplicate_media_by_content(reply_media, logger=LOGGER)
-                    # Also check against current message media
-                    current_media_keys = set()
-                    for p in user_parts:
-                        if isinstance(p, dict):
-                            if "inline_data" in p:
-                                data = p["inline_data"].get("data", "")
-                                if data:
-                                    current_media_keys.add(f"inline_{data[:100]}")
-                            elif "file_data" in p:
-                                file_uri = p["file_data"].get("file_uri", "")
-                                if file_uri:
-                                    current_media_keys.add(f"file_{file_uri}")
-                    # Filter out any reply media that matches current media
-                    filtered_reply_media = []
-                    for media_item in reply_media:
-                        key: str | None = None
-                        if "inline_data" in media_item:
-                            data = media_item["inline_data"].get("data", "")
-                            if data:
-                                key = f"inline_{data[:100]}"
-                        elif "file_data" in media_item:
-                            file_uri = media_item["file_data"].get("file_uri", "")
-                            if file_uri:
-                                key = f"file_{file_uri}"
-                        if key and key not in current_media_keys:
-                            filtered_reply_media.append(media_item)
-                        elif key:
-                            LOGGER.debug(
-                                "Skipped reply media duplicate (already in current message media)"
-                            )
-                    to_add = filtered_reply_media[:remaining]
-                    user_parts.extend(to_add)
-                    dropped = len(reply_media) - len(to_add)
-                    if dropped > 0:
-                        user_parts.append(
-                            {
-                                "text": "[Деякі прикріплення з відповіді опущено для ефективності]",
-                            }
+            
+            if reply_media:
+                # Validate media format before processing
+                valid_reply_media = []
+                invalid_count = 0
+                for media_item in reply_media:
+                    if not isinstance(media_item, dict):
+                        invalid_count += 1
+                        LOGGER.warning(
+                            "Invalid reply media item (not a dict): %s", type(media_item)
                         )
-                    telemetry.increment_counter(
-                        "context.reply_included_media", len(to_add)
+                        continue
+                    if "inline_data" not in media_item and "file_data" not in media_item:
+                        invalid_count += 1
+                        LOGGER.warning(
+                            "Invalid reply media item (missing inline_data or file_data): %s",
+                            list(media_item.keys()),
+                        )
+                        continue
+                    valid_reply_media.append(media_item)
+                
+                if invalid_count > 0:
+                    telemetry.increment_counter("context.reply_media_invalid", invalid_count)
+                    LOGGER.warning(
+                        "Filtered out %d invalid reply media item(s)", invalid_count
                     )
-                    LOGGER.debug(
-                        "Attached %d reply media item(s) to user_parts (dropped: %d)",
-                        len(to_add),
-                        max(dropped, 0),
+                
+                if not valid_reply_media:
+                    LOGGER.warning(
+                        "No valid reply media items to add after validation"
                     )
+                else:
+                    # Count media already in user_parts
+                    current_media_count = sum(
+                        1
+                        for p in user_parts
+                        if isinstance(p, dict) and ("inline_data" in p or "file_data" in p)
+                    )
+                    max_total = ctx.settings.gemini_max_media_items
+                    remaining = max(0, max_total - current_media_count)
+                    if remaining > 0:
+                        # Phase 4: Deduplicate reply media before adding
+                        valid_reply_media = _deduplicate_media_by_content(valid_reply_media, logger=LOGGER)
+                        # Also check against current message media
+                        current_media_keys = set()
+                        for p in user_parts:
+                            if isinstance(p, dict):
+                                if "inline_data" in p:
+                                    data = p["inline_data"].get("data", "")
+                                    if data:
+                                        current_media_keys.add(f"inline_{data[:100]}")
+                                elif "file_data" in p:
+                                    file_uri = p["file_data"].get("file_uri", "")
+                                    if file_uri:
+                                        current_media_keys.add(f"file_{file_uri}")
+                        # Filter out any reply media that matches current media
+                        filtered_reply_media = []
+                        for media_item in valid_reply_media:
+                            key: str | None = None
+                            if "inline_data" in media_item:
+                                data = media_item["inline_data"].get("data", "")
+                                if data:
+                                    key = f"inline_{data[:100]}"
+                            elif "file_data" in media_item:
+                                file_uri = media_item["file_data"].get("file_uri", "")
+                                if file_uri:
+                                    key = f"file_{file_uri}"
+                            if key and key not in current_media_keys:
+                                filtered_reply_media.append(media_item)
+                            elif key:
+                                LOGGER.debug(
+                                    "Skipped reply media duplicate (already in current message media)"
+                                )
+                        to_add = filtered_reply_media[:remaining]
+                        if to_add:
+                            user_parts.extend(to_add)
+                            # Calculate dropped items: items in filtered_reply_media that weren't added due to limit
+                            dropped = len(filtered_reply_media) - len(to_add)
+                            if dropped > 0:
+                                user_parts.append(
+                                    {
+                                        "text": "[Деякі прикріплення з відповіді опущено для ефективності]",
+                                    }
+                                )
+                            telemetry.increment_counter(
+                                "context.reply_included_media", len(to_add)
+                            )
+                            LOGGER.debug(
+                                "Attached %d reply media item(s) to user_parts (dropped: %d)",
+                                len(to_add),
+                                max(dropped, 0),
+                            )
+                        else:
+                            LOGGER.warning(
+                                "No reply media items to add after deduplication and filtering"
+                            )
+                    else:
+                        LOGGER.warning(
+                            "Cannot add reply media: media limit reached (current: %d, max: %d)",
+                            current_media_count,
+                            max_total,
+                        )
+                        telemetry.increment_counter("context.reply_media_limit_exceeded")
+            elif reply_media_parts_for_block or (reply_context_for_history and reply_context_for_history.get("media_parts")):
+                # Media was expected but not found - log for debugging
+                LOGGER.warning(
+                    "Reply media was expected but not found in valid format (reply_media_parts_for_block: %s, reply_context_for_history.media_parts: %s)",
+                    bool(reply_media_parts_for_block),
+                    bool(reply_context_for_history and reply_context_for_history.get("media_parts")),
+                )
+                telemetry.increment_counter("context.reply_media_expected_but_missing")
         except Exception:
             LOGGER.exception("Failed to attach reply media to user_parts in JSON mode")
+            telemetry.increment_counter("context.reply_media_attachment_failed")
 
     system_context_block_text = None
     if use_system_context_block:

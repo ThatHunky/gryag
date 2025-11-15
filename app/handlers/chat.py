@@ -1362,6 +1362,103 @@ def _extract_meta_value(meta_text: str, key: str) -> str | None:
     return match.group(1) or match.group(2)
 
 
+def _extract_message_id_from_history(msg: dict[str, Any]) -> int | None:
+    """Extract message_id from a history message by checking metadata in parts."""
+    parts = msg.get("parts", [])
+    for part in parts:
+        if isinstance(part, dict) and "text" in part:
+            text = part["text"]
+            if isinstance(text, str) and text.startswith("[meta"):
+                message_id_str = _extract_meta_value(text, "message_id")
+                if message_id_str:
+                    try:
+                        return int(message_id_str)
+                    except (ValueError, TypeError):
+                        pass
+    return None
+
+
+def _filter_current_message_from_history(
+    history: list[dict[str, Any]], current_message_id: int
+) -> list[dict[str, Any]]:
+    """Filter out current message from history to prevent duplication."""
+    filtered = []
+    removed_count = 0
+    for msg in history:
+        msg_id = _extract_message_id_from_history(msg)
+        if msg_id == current_message_id:
+            removed_count += 1
+            LOGGER.debug(
+                "Filtered current message (id=%s) from history to prevent duplication",
+                current_message_id,
+            )
+            continue
+        filtered.append(msg)
+    if removed_count > 0:
+        LOGGER.info(
+            "Removed %d occurrence(s) of current message (id=%s) from history",
+            removed_count,
+            current_message_id,
+        )
+        telemetry.increment_counter("context.current_message_filtered", removed_count)
+    return filtered
+
+
+def _extract_message_ids_from_media(media_parts: list[dict[str, Any]]) -> set[int]:
+    """Extract message_ids from historical media parts (if metadata is embedded)."""
+    message_ids: set[int] = set()
+    # Note: Historical media doesn't currently store message_id in the media part itself
+    # This function is a placeholder for future enhancement
+    # For now, we'll rely on comparing with reply message_id directly
+    return message_ids
+
+
+def _deduplicate_media_by_content(
+    media_list: list[dict[str, Any]], logger: logging.Logger | None = None
+) -> list[dict[str, Any]]:
+    """Deduplicate media items by content (base64 data hash or file_uri)."""
+    seen: set[str] = set()
+    deduplicated: list[dict[str, Any]] = []
+    removed_count = 0
+
+    for media_item in media_list:
+        # Create a unique key for this media item
+        key: str | None = None
+
+        if "inline_data" in media_item:
+            # Use first 100 chars of base64 data as key (unique enough for deduplication)
+            data = media_item["inline_data"].get("data", "")
+            if data:
+                key = f"inline_{data[:100]}"
+        elif "file_data" in media_item:
+            # Use file_uri as key
+            file_uri = media_item["file_data"].get("file_uri", "")
+            if file_uri:
+                key = f"file_{file_uri}"
+
+        if key and key in seen:
+            removed_count += 1
+            if logger:
+                logger.debug(
+                    "Deduplicated media item (key=%s...)",
+                    key[:50] if len(key) > 50 else key,
+                )
+            continue
+
+        if key:
+            seen.add(key)
+        deduplicated.append(media_item)
+
+    if removed_count > 0:
+        if logger:
+            logger.info(
+                "Deduplicated %d media item(s) by content", removed_count
+            )
+        telemetry.increment_counter("context.media_deduplicated", removed_count)
+
+    return deduplicated
+
+
 def _extract_meta_and_text(
     parts: list[dict[str, Any]],
 ) -> tuple[str | None, str | None]:
@@ -2500,6 +2597,11 @@ async def _build_message_context(
             },
         )
 
+        # Phase 2: Filter current message from history to prevent duplication
+        history = _filter_current_message_from_history(
+            history, ctx.message.message_id
+        )
+
         # Apply token-based truncation to prevent overflow
         history = _truncate_history_to_tokens(
             history, max_tokens=ctx.settings.context_token_budget
@@ -2951,6 +3053,17 @@ async def _build_message_context(
             ctx.settings.enable_compact_conversation_format
             and not use_system_context_block
         ):
+            # Phase 2: Filter current message from context before formatting
+            # Filter from immediate and recent messages
+            if context_assembly.immediate:
+                context_assembly.immediate.messages = _filter_current_message_from_history(
+                    context_assembly.immediate.messages, ctx.message.message_id
+                )
+            if context_assembly.recent:
+                context_assembly.recent.messages = _filter_current_message_from_history(
+                    context_assembly.recent.messages, ctx.message.message_id
+                )
+
             # Use compact plain text format (70-80% token savings)
             formatted_context = context_manager.format_for_gemini_compact(
                 context_assembly
@@ -3063,17 +3176,42 @@ async def _build_message_context(
             if reply_context_for_history and reply_context_for_history.get(
                 "media_parts"
             ):
-                # Check if reply message is already in historical_media
+                # Phase 1: Check if reply message is already in historical_media
                 reply_msg_id = reply_context_for_history.get("message_id")
                 historical_media = formatted_context.get("historical_media", [])
 
-                # Check if reply media is already in historical_media by comparing message_id in metadata
+                # Check if reply message is in historical context by checking message IDs
                 reply_media_in_history = False
-                # For now, we'll always include reply media to ensure it's visible
-                # (historical_media doesn't track message_id, so we can't reliably detect duplicates)
+                if reply_msg_id:
+                    # Check if reply message appears in immediate or recent context
+                    if context_assembly:
+                        for msg in context_assembly.immediate.messages:
+                            msg_id = _extract_message_id_from_history(msg)
+                            if msg_id == reply_msg_id:
+                                reply_media_in_history = True
+                                LOGGER.debug(
+                                    "Reply message %s found in immediate context, skipping reply media",
+                                    reply_msg_id,
+                                )
+                                break
+                        if not reply_media_in_history and context_assembly.recent:
+                            for msg in context_assembly.recent.messages:
+                                msg_id = _extract_message_id_from_history(msg)
+                                if msg_id == reply_msg_id:
+                                    reply_media_in_history = True
+                                    LOGGER.debug(
+                                        "Reply message %s found in recent context, skipping reply media",
+                                        reply_msg_id,
+                                    )
+                                    break
 
                 if not reply_media_in_history:
                     reply_media_parts = reply_context_for_history["media_parts"]
+                    LOGGER.debug(
+                        "Reply message %s not in historical context, including reply media (%d items)",
+                        reply_msg_id,
+                        len(reply_media_parts),
+                    )
                     for media_item in reply_media_parts:
                         mime = media_item.get("mime", "")
                         is_video = mime.startswith("video/")
@@ -3182,8 +3320,9 @@ async def _build_message_context(
                     f"Added {len(video_descriptions)} video descriptions to conversation"
                 )
 
-            # Add all media to user_parts (respecting total limit)
+            # Phase 3: Deduplicate media by content before adding to user_parts
             if all_media:
+                all_media = _deduplicate_media_by_content(all_media, logger=LOGGER)
                 user_parts.extend(all_media[:max_media_total])
 
                 if len(all_media) > max_media_total:
@@ -3218,6 +3357,11 @@ async def _build_message_context(
             # Use traditional JSON format
             formatted_context = context_manager.format_for_gemini(context_assembly)
             history = formatted_context["history"]
+
+            # Phase 2: Filter current message from history to prevent duplication
+            history = _filter_current_message_from_history(
+                history, ctx.message.message_id
+            )
 
             # Append multi-level system context
             if formatted_context.get("system_context"):
@@ -3374,7 +3518,39 @@ async def _build_message_context(
                 max_total = ctx.settings.gemini_max_media_items
                 remaining = max(0, max_total - current_media_count)
                 if remaining > 0:
-                    to_add = reply_media[:remaining]
+                    # Phase 4: Deduplicate reply media before adding
+                    reply_media = _deduplicate_media_by_content(reply_media, logger=LOGGER)
+                    # Also check against current message media
+                    current_media_keys = set()
+                    for p in user_parts:
+                        if isinstance(p, dict):
+                            if "inline_data" in p:
+                                data = p["inline_data"].get("data", "")
+                                if data:
+                                    current_media_keys.add(f"inline_{data[:100]}")
+                            elif "file_data" in p:
+                                file_uri = p["file_data"].get("file_uri", "")
+                                if file_uri:
+                                    current_media_keys.add(f"file_{file_uri}")
+                    # Filter out any reply media that matches current media
+                    filtered_reply_media = []
+                    for media_item in reply_media:
+                        key: str | None = None
+                        if "inline_data" in media_item:
+                            data = media_item["inline_data"].get("data", "")
+                            if data:
+                                key = f"inline_{data[:100]}"
+                        elif "file_data" in media_item:
+                            file_uri = media_item["file_data"].get("file_uri", "")
+                            if file_uri:
+                                key = f"file_{file_uri}"
+                        if key and key not in current_media_keys:
+                            filtered_reply_media.append(media_item)
+                        elif key:
+                            LOGGER.debug(
+                                "Skipped reply media duplicate (already in current message media)"
+                            )
+                    to_add = filtered_reply_media[:remaining]
                     user_parts.extend(to_add)
                     dropped = len(reply_media) - len(to_add)
                     if dropped > 0:

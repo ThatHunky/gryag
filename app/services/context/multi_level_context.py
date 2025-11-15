@@ -1117,6 +1117,7 @@ class MultiLevelContextManager:
                 new_msg.pop(k, None)
 
         # Sanitize parts (text and placeholders). Keep minimal structure.
+        # Preserve media parts (inline_data and file_data) so Gemini can see historical media.
         parts = []
         for part in new_msg.get("parts", []):
             if isinstance(part, dict):
@@ -1124,12 +1125,13 @@ class MultiLevelContextManager:
                     clean = self._sanitize_text(part.get("text"))
                     parts.append({"text": clean})
                 elif "inline_data" in part:
-                    # Replace inline media with a harmless placeholder (no binary data)
-                    mime = part.get("inline_data", {}).get("mime_type", "media")
-                    parts.append({"text": f"[media: {mime}]"})
+                    # Preserve inline media (already base64-encoded, safe for API)
+                    # This allows Gemini to see historical images/videos/audio
+                    parts.append(part)
                 elif "file_data" in part:
-                    uri = part.get("file_data", {}).get("file_uri", "file")
-                    parts.append({"text": f"[file: {uri}]"})
+                    # Preserve file_data (file URIs like YouTube URLs, safe for API)
+                    # This allows Gemini to see historical file references
+                    parts.append(part)
                 else:
                     # Fallback: stringify small values
                     text = " ".join(

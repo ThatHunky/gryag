@@ -582,6 +582,7 @@ class ContextStore:
         chat_id: int,
         thread_id: int | None,
         max_messages: int,
+        exclude_message_id: int | None = None,
     ) -> list[dict[str, Any]]:
         await self.init()
 
@@ -596,23 +597,45 @@ class ContextStore:
         message_limit = max_messages
 
         if thread_id is None:
-            query = (
-                "SELECT role, text, media, external_user_id, user_id, ts, "
-                "sender_role, sender_name, sender_username, sender_is_bot "
-                "FROM messages "
-                "WHERE chat_id = $1 AND thread_id IS NULL "
-                "ORDER BY id DESC LIMIT $2"
-            )
-            params: tuple[Any, ...] = (chat_id, message_limit)
+            if exclude_message_id is not None:
+                query = (
+                    "SELECT role, text, media, external_user_id, user_id, ts, "
+                    "sender_role, sender_name, sender_username, sender_is_bot "
+                    "FROM messages "
+                    "WHERE chat_id = $1 AND thread_id IS NULL "
+                    "AND (external_message_id IS NULL OR external_message_id != $2) "
+                    "ORDER BY id DESC LIMIT $3"
+                )
+                params: tuple[Any, ...] = (chat_id, str(exclude_message_id), message_limit)
+            else:
+                query = (
+                    "SELECT role, text, media, external_user_id, user_id, ts, "
+                    "sender_role, sender_name, sender_username, sender_is_bot "
+                    "FROM messages "
+                    "WHERE chat_id = $1 AND thread_id IS NULL "
+                    "ORDER BY id DESC LIMIT $2"
+                )
+                params: tuple[Any, ...] = (chat_id, message_limit)
         else:
-            query = (
-                "SELECT role, text, media, external_user_id, user_id, ts, "
-                "sender_role, sender_name, sender_username, sender_is_bot "
-                "FROM messages "
-                "WHERE chat_id = $1 AND thread_id = $2 "
-                "ORDER BY id DESC LIMIT $3"
-            )
-            params = (chat_id, thread_id, message_limit)
+            if exclude_message_id is not None:
+                query = (
+                    "SELECT role, text, media, external_user_id, user_id, ts, "
+                    "sender_role, sender_name, sender_username, sender_is_bot "
+                    "FROM messages "
+                    "WHERE chat_id = $1 AND thread_id = $2 "
+                    "AND (external_message_id IS NULL OR external_message_id != $3) "
+                    "ORDER BY id DESC LIMIT $4"
+                )
+                params = (chat_id, thread_id, str(exclude_message_id), message_limit)
+            else:
+                query = (
+                    "SELECT role, text, media, external_user_id, user_id, ts, "
+                    "sender_role, sender_name, sender_username, sender_is_bot "
+                    "FROM messages "
+                    "WHERE chat_id = $1 AND thread_id = $2 "
+                    "ORDER BY id DESC LIMIT $3"
+                )
+                params = (chat_id, thread_id, message_limit)
 
         async with get_db_connection(self._database_url) as conn:
             rows = await conn.fetch(query, *params)

@@ -355,14 +355,28 @@ async def broadcast_donate_command(
 
     This command is not registered in Telegram's command menu and is only accessible
     by typing the command directly. It broadcasts the donation message to all private chats.
+    Requires confirmation before proceeding.
     """
     # Check if user is authorized (hardcoded user_id check)
     if not message.from_user or message.from_user.id != 392817811:
         # Silently ignore - don't reveal the command exists
         return
 
-    # Send initial confirmation
-    await message.reply("🔄 Починаю трансляцію повідомлення про донат до всіх приватних чатів...")
+    # Check if this is a confirmation
+    command_text = (message.text or "").strip().lower()
+    is_confirmation = False
+    
+    # Check if command has confirm/yes flag (e.g., "/broadcastdonate confirm" or "/broadcastdonate yes")
+    if "confirm" in command_text or command_text.endswith(" yes"):
+        is_confirmation = True
+    
+    # Check if message is a reply to a confirmation message from the bot
+    if message.reply_to_message and message.reply_to_message.from_user:
+        # Verify it's a reply to the bot's message
+        if message.reply_to_message.from_user.is_bot:
+            reply_text = (message.text or "").strip().lower()
+            if reply_text in ["yes", "так", "y", "т"]:
+                is_confirmation = True
 
     try:
         # Query all distinct private chat IDs (chat_id > 0)
@@ -380,6 +394,23 @@ async def broadcast_donate_command(
         if total_chats == 0:
             await message.reply("❌ Не знайдено жодного приватного чату в базі даних.")
             return
+
+        # If not confirmed, show confirmation prompt
+        if not is_confirmation:
+            confirmation_msg = (
+                f"⚠️ <b>Підтвердження трансляції</b>\n\n"
+                f"Ви збираєтеся надіслати повідомлення про донат до <b>{total_chats}</b> приватних чатів.\n\n"
+                f"Для підтвердження надішліть:\n"
+                f"• <code>/broadcastdonate confirm</code> або\n"
+                f"• <code>/broadcastdonate yes</code> або\n"
+                f"• Надішліть <code>yes</code> або <code>так</code> у відповідь на це повідомлення.\n\n"
+                f"Для скасування просто проігноруйте це повідомлення."
+            )
+            await message.reply(confirmation_msg, parse_mode="HTML")
+            return
+
+        # Confirmation received - proceed with broadcast
+        await message.reply("🔄 Починаю трансляцію повідомлення про донат до всіх приватних чатів...")
 
         LOGGER.info(
             f"User {message.from_user.id} starting broadcast to {total_chats} private chats"

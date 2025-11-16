@@ -380,6 +380,57 @@ class GeminiClient:
         """Check if tools were disabled during the last API call due to errors."""
         return self._tools_fallback_disabled
 
+    def _clean_media_parts_for_api(
+        self, contents: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """
+        Remove internal metadata fields (mime, kind) from media parts before sending to API.
+        
+        The build_media_parts method adds mime and kind fields for internal use, but these
+        are not part of the Gemini API schema and cause Pydantic validation errors.
+        
+        Args:
+            contents: List of Content objects with parts that may contain media
+            
+        Returns:
+            Contents with mime and kind fields removed from all media parts
+        """
+        cleaned_contents = []
+        for content in contents:
+            if not isinstance(content, dict):
+                cleaned_contents.append(content)
+                continue
+                
+            cleaned_content = {}
+            for key, value in content.items():
+                if key == "parts" and isinstance(value, list):
+                    # Recursively clean parts
+                    cleaned_parts = []
+                    for part in value:
+                        if isinstance(part, dict):
+                            cleaned_part = {}
+                            for part_key, part_value in part.items():
+                                # Skip internal metadata fields (not part of Gemini API schema)
+                                if part_key in ("mime", "kind"):
+                                    continue
+                                # Recursively clean nested parts if present
+                                elif part_key == "parts" and isinstance(part_value, list):
+                                    cleaned_part[part_key] = self._clean_media_parts_for_api(
+                                        [{"parts": part_value}]
+                                    )[0].get("parts", [])
+                                else:
+                                    # Preserve all other fields (inline_data, file_data, text, etc.)
+                                    cleaned_part[part_key] = part_value
+                            cleaned_parts.append(cleaned_part)
+                        else:
+                            cleaned_parts.append(part)
+                    cleaned_content[key] = cleaned_parts
+                else:
+                    cleaned_content[key] = value
+            cleaned_contents.append(cleaned_content)
+        
+        return cleaned_contents
+
     async def _invoke_model(
         self,
         contents: list[dict[str, Any]],
@@ -429,8 +480,10 @@ class GeminiClient:
             # Retry loop for transient server errors
             for retry in range(server_error_retries):
                 try:
+                    # Clean media parts to remove internal metadata (mime, kind) before sending to API
+                    cleaned_contents = self._clean_media_parts_for_api(contents)
                     # New SDK uses client.models.generate_content (async by default)
-                    payload = cast(types.ContentListUnionDict, contents)
+                    payload = cast(types.ContentListUnionDict, cleaned_contents)
                     response = await asyncio.wait_for(
                         client.aio.models.generate_content(
                             model=self._model_name,

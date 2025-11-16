@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -171,13 +172,13 @@ def _build_user_message_query(
     """Build query for fetching most recent user message."""
     if thread_id is None:
         return (
-            "SELECT id, role, user_id, external_user_id, ts FROM messages "
+            "SELECT id, role, user_id, external_user_id, ts, text, reply_to_external_message_id FROM messages "
             "WHERE chat_id = $1 AND thread_id IS NULL AND user_id = $2 "
             "ORDER BY id DESC LIMIT 1",
             (chat_id, user_id),
         )
     return (
-        "SELECT id, role, user_id, external_user_id, ts FROM messages "
+        "SELECT id, role, user_id, external_user_id, ts, text, reply_to_external_message_id FROM messages "
         "WHERE chat_id = $1 AND thread_id = $2 AND user_id = $3 "
         "ORDER BY id DESC LIMIT 1",
         (chat_id, thread_id, user_id),
@@ -201,6 +202,81 @@ def _build_last_bot_response_query(
         "ORDER BY id DESC LIMIT 1",
         (chat_id, thread_id),
     )
+
+
+async def _was_message_trigger(
+    conn: Any,
+    message_row: dict[str, Any],
+    chat_id: int,
+    thread_id: int | None,
+    bot_username: str | None,
+    bot_id: int | None,
+) -> bool:
+    """
+    Check if a message from the database was addressed to the bot (a trigger).
+    
+    Args:
+        conn: Database connection
+        message_row: Database row with message data (must have text, reply_to_external_message_id)
+        chat_id: Chat ID
+        thread_id: Thread ID (optional)
+        bot_username: Bot username (without @)
+        bot_id: Bot user ID
+        
+    Returns:
+        True if the message was a trigger, False otherwise
+    """
+    text = message_row.get("text")
+    reply_to_external_message_id = message_row.get("reply_to_external_message_id")
+    
+    # Check 1: If message is a reply to a bot message
+    if reply_to_external_message_id:
+        # Query to check if the replied-to message is from the bot
+        if thread_id is None:
+            reply_query = """
+                SELECT role FROM messages
+                WHERE chat_id = $1 AND thread_id IS NULL 
+                AND external_message_id = $2
+                LIMIT 1
+            """
+            reply_params = (chat_id, reply_to_external_message_id)
+        else:
+            reply_query = """
+                SELECT role FROM messages
+                WHERE chat_id = $1 AND thread_id = $2 
+                AND external_message_id = $3
+                LIMIT 1
+            """
+            reply_params = (chat_id, thread_id, reply_to_external_message_id)
+        
+        reply_row = await conn.fetchrow(reply_query, *reply_params)
+        if reply_row and reply_row.get("role") == "model":
+            return True
+    
+    # Check 2: If text contains trigger keywords (гряг, gryag, etc.)
+    if text:
+        # Use the same pattern as triggers.py
+        trigger_pattern = re.compile(
+            r"\b(?:гр[яи]г[аоуеєіїюяьґ]*|gr[yi]ag\w*)\b", re.IGNORECASE | re.UNICODE
+        )
+        if trigger_pattern.search(text):
+            return True
+        
+        # Check 3: If text contains @mention of bot
+        if bot_username:
+            username_lower = bot_username.lstrip("@").lower()
+            # Simple pattern match for @username in text
+            mention_pattern = re.compile(
+                rf"@?{re.escape(username_lower)}\b", re.IGNORECASE | re.UNICODE
+            )
+            if mention_pattern.search(text):
+                return True
+    
+    # Check 4: In personal chats (chat_id > 0), all messages are triggers
+    if chat_id > 0:
+        return True
+    
+    return False
 
 
 # In-memory skip counter fallback (when Redis is not available)
@@ -448,6 +524,35 @@ async def _check_unanswered_trigger(
                 await _reset_skip_count(chat_id, user_id, redis_client)
 
             if should_check_trigger:
+                # CRITICAL: Check if the previous message was actually a trigger (addressed to bot)
+                # Only block if it was a trigger - regular messages shouldn't block subsequent triggers
+                bot_username = data.get("bot_username")
+                bot_id = data.get("bot_id")
+                was_trigger = await _was_message_trigger(
+                    conn,
+                    user_last_row,
+                    chat_id,
+                    thread_id,
+                    bot_username,
+                    bot_id,
+                )
+                
+                if not was_trigger:
+                    # Previous message was NOT a trigger - allow this message
+                    LOGGER.debug(
+                        f"Previous user message (id={user_last_row['id']}) was not a trigger - allowing current message",
+                        extra={
+                            "chat_id": chat_id,
+                            "user_id": user_id,
+                            "previous_message_id": user_last_row["id"],
+                            "previous_message_text": user_last_row.get("text", "")[:100] if user_last_row.get("text") else None,
+                        },
+                    )
+                    # Reset skip count since we're allowing this message
+                    await _reset_skip_count(chat_id, user_id, redis_client)
+                    return False
+                
+                # Previous message WAS a trigger - proceed with checking if it was answered
                 # Check if the unanswered trigger is recent enough to still block
                 trigger_age = current_ts - user_last_row["ts"]
                 if trigger_age > threshold_seconds:
@@ -1500,7 +1605,14 @@ def _extract_message_ids_from_media(media_parts: list[dict[str, Any]]) -> set[in
 def _deduplicate_media_by_content(
     media_list: list[dict[str, Any]], logger: logging.Logger | None = None
 ) -> list[dict[str, Any]]:
-    """Deduplicate media items by content (base64 data hash or file_uri)."""
+    """
+    Deduplicate media items by content (base64 data hash or file_uri).
+    
+    Uses a more robust key generation:
+    - For inline_data: hash of full base64 data + mime_type for better uniqueness
+    - For file_data: file_uri (already unique)
+    - Falls back to first 200 chars if hash computation fails
+    """
     seen: set[str] = set()
     deduplicated: list[dict[str, Any]] = []
     removed_count = 0
@@ -1510,12 +1622,25 @@ def _deduplicate_media_by_content(
         key: str | None = None
 
         if "inline_data" in media_item:
-            # Use first 100 chars of base64 data as key (unique enough for deduplication)
             data = media_item["inline_data"].get("data", "")
+            mime_type = media_item["inline_data"].get("mime_type", "")
             if data:
-                key = f"inline_{data[:100]}"
+                # Use hash of full base64 data for better uniqueness
+                # This catches duplicates even if files are processed differently
+                try:
+                    # Hash the full data for maximum uniqueness
+                    data_hash = hashlib.sha256(data.encode("ascii")).hexdigest()[:32]
+                    # Include mime_type to distinguish different formats of same content
+                    key = f"inline_{mime_type}_{data_hash}"
+                except Exception:
+                    # Fallback: use longer prefix (200 chars) if hash fails
+                    if logger:
+                        logger.warning(
+                            "Failed to hash media data, using prefix fallback", exc_info=True
+                        )
+                    key = f"inline_{mime_type}_{data[:200]}"
         elif "file_data" in media_item:
-            # Use file_uri as key
+            # Use file_uri as key (already unique)
             file_uri = media_item["file_data"].get("file_uri", "")
             if file_uri:
                 key = f"file_{file_uri}"
@@ -1525,7 +1650,7 @@ def _deduplicate_media_by_content(
             if logger:
                 logger.debug(
                     "Deduplicated media item (key=%s...)",
-                    key[:50] if len(key) > 50 else key,
+                    key[:80] if len(key) > 80 else key,
                 )
             continue
 
@@ -1536,7 +1661,10 @@ def _deduplicate_media_by_content(
     if removed_count > 0:
         if logger:
             logger.info(
-                "Deduplicated %d media item(s) by content", removed_count
+                "Deduplicated %d media item(s) by content (total: %d, unique: %d)",
+                removed_count,
+                len(media_list),
+                len(deduplicated),
             )
         telemetry.increment_counter("context.media_deduplicated", removed_count)
 
@@ -1774,6 +1902,7 @@ async def _remember_context_message(
     media_parts: list[dict[str, Any]] = []
 
     try:
+        # Note: chat_id and thread_id not available here, album detection will be skipped
         media_raw = await collect_media_parts(bot, message)
 
         # Also check for YouTube URLs in unaddressed messages
@@ -2712,8 +2841,11 @@ async def _build_message_context(
     use_system_context_block = ctx.settings.enable_system_context_block
 
     # Collect media from message (photos, videos, audio, etc.)
+    # Pass chat_id and thread_id for album detection
     media_collect_start = time.time()
-    media_raw = await collect_media_parts(ctx.bot, ctx.message)
+    media_raw = await collect_media_parts(
+        ctx.bot, ctx.message, chat_id=ctx.chat_id, thread_id=ctx.thread_id
+    )
     media_collect_time = int((time.time() - media_collect_start) * 1000)
     ctx.perf_timings["media_collect_time_ms"] = media_collect_time
     if media_collect_time > 1000:  # Log if takes more than 1 second
@@ -2844,7 +2976,9 @@ async def _build_message_context(
         # try to collect media directly from the reply message
         if not reply_context or not reply_context.get("media_parts"):
             try:
-                reply_media_raw = await collect_media_parts(ctx.bot, reply)
+                reply_media_raw = await collect_media_parts(
+                    ctx.bot, reply, chat_id=ctx.chat_id, thread_id=ctx.thread_id
+                )
                 if reply_media_raw:
                     reply_media_raw_for_block = reply_media_raw
                     reply_media_parts = ctx.gemini_client.build_media_parts(
@@ -3513,7 +3647,17 @@ async def _build_message_context(
 
             # Phase 3: Deduplicate media by content before adding to user_parts
             if all_media:
+                media_count_before_dedup = len(all_media)
                 all_media = _deduplicate_media_by_content(all_media, logger=LOGGER)
+                media_count_after_dedup = len(all_media)
+                if media_count_before_dedup != media_count_after_dedup:
+                    LOGGER.info(
+                        "Compact format: Deduplicated media before adding to user_parts "
+                        "(before: %d, after: %d, removed: %d)",
+                        media_count_before_dedup,
+                        media_count_after_dedup,
+                        media_count_before_dedup - media_count_after_dedup,
+                    )
                 user_parts.extend(all_media[:max_media_total])
 
                 if len(all_media) > max_media_total:
@@ -3748,27 +3892,51 @@ async def _build_message_context(
                     remaining = max(0, max_total - current_media_count)
                     if remaining > 0:
                         # Phase 4: Deduplicate reply media before adding
+                        reply_media_count_before_dedup = len(valid_reply_media)
                         valid_reply_media = _deduplicate_media_by_content(valid_reply_media, logger=LOGGER)
-                        # Also check against current message media
+                        reply_media_count_after_dedup = len(valid_reply_media)
+                        if reply_media_count_before_dedup != reply_media_count_after_dedup:
+                            LOGGER.info(
+                                "JSON format: Deduplicated reply media (before: %d, after: %d, removed: %d)",
+                                reply_media_count_before_dedup,
+                                reply_media_count_after_dedup,
+                                reply_media_count_before_dedup - reply_media_count_after_dedup,
+                            )
+                        # Also check against current message media using same key generation as deduplication
                         current_media_keys = set()
                         for p in user_parts:
                             if isinstance(p, dict):
                                 if "inline_data" in p:
                                     data = p["inline_data"].get("data", "")
+                                    mime_type = p["inline_data"].get("mime_type", "")
                                     if data:
-                                        current_media_keys.add(f"inline_{data[:100]}")
+                                        try:
+                                            # Use same hash-based key as deduplication function
+                                            data_hash = hashlib.sha256(data.encode("ascii")).hexdigest()[:32]
+                                            current_media_keys.add(f"inline_{mime_type}_{data_hash}")
+                                        except Exception:
+                                            # Fallback to prefix if hash fails
+                                            current_media_keys.add(f"inline_{mime_type}_{data[:200]}")
                                 elif "file_data" in p:
                                     file_uri = p["file_data"].get("file_uri", "")
                                     if file_uri:
                                         current_media_keys.add(f"file_{file_uri}")
                         # Filter out any reply media that matches current media
                         filtered_reply_media = []
+                        duplicate_count = 0
                         for media_item in valid_reply_media:
                             key: str | None = None
                             if "inline_data" in media_item:
                                 data = media_item["inline_data"].get("data", "")
+                                mime_type = media_item["inline_data"].get("mime_type", "")
                                 if data:
-                                    key = f"inline_{data[:100]}"
+                                    try:
+                                        # Use same hash-based key as deduplication function
+                                        data_hash = hashlib.sha256(data.encode("ascii")).hexdigest()[:32]
+                                        key = f"inline_{mime_type}_{data_hash}"
+                                    except Exception:
+                                        # Fallback to prefix if hash fails
+                                        key = f"inline_{mime_type}_{data[:200]}"
                             elif "file_data" in media_item:
                                 file_uri = media_item["file_data"].get("file_uri", "")
                                 if file_uri:
@@ -3776,9 +3944,18 @@ async def _build_message_context(
                             if key and key not in current_media_keys:
                                 filtered_reply_media.append(media_item)
                             elif key:
+                                duplicate_count += 1
                                 LOGGER.debug(
-                                    "Skipped reply media duplicate (already in current message media)"
+                                    "Skipped reply media duplicate (already in current message media, key=%s...)",
+                                    key[:80] if len(key) > 80 else key,
                                 )
+                        
+                        if duplicate_count > 0:
+                            LOGGER.info(
+                                "Filtered %d duplicate reply media item(s) that match current message media",
+                                duplicate_count,
+                            )
+                            telemetry.increment_counter("context.reply_media_duplicate_filtered", duplicate_count)
                         to_add = filtered_reply_media[:remaining]
                         if to_add:
                             user_parts.extend(to_add)

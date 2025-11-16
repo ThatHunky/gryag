@@ -25,6 +25,7 @@ from app.infrastructure.query_converter import convert_query_to_postgres
 
 from app.config import Settings
 from app.infrastructure.db_utils import get_db_connection
+from app.services.redis_types import RedisLike
 
 LOGGER = logging.getLogger(__name__)
 
@@ -74,10 +75,12 @@ class HybridSearchEngine:
         db_path: Path | str,
         settings: Settings,
         gemini_client: Any,
+        redis_client: RedisLike | None = None,
     ):
         self.database_url = str(db_path)  # Accept database_url string
         self.settings = settings
         self.gemini = gemini_client
+        self.redis: RedisLike | None = redis_client
 
         # Weights for score combination
         self.semantic_weight = settings.semantic_weight
@@ -119,6 +122,29 @@ class HybridSearchEngine:
             return await self._semantic_search_only(
                 query, chat_id, thread_id, limit, time_range_days
             )
+
+        # Check Redis cache if enabled
+        if self.settings.enable_result_caching and self.redis is not None:
+            cache_key = self._build_cache_key(
+                query=query,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                user_id=user_id,
+                limit=limit,
+                time_range_days=time_range_days,
+            )
+            try:
+                cached = await self.redis.get(cache_key)
+                if cached:
+                    try:
+                        payload = json.loads(cached)
+                        return [SearchResult(**item) for item in payload]
+                    except Exception:
+                        # Corrupt cache entry; ignore
+                        pass
+            except Exception:
+                # Redis errors should not break search
+                pass
 
         try:
             # Execute searches in parallel with timeout protection
@@ -181,7 +207,26 @@ class HybridSearchEngine:
         # Sort by final score
         boosted.sort(key=lambda r: r.final_score, reverse=True)
 
-        return boosted[:limit]
+        results = boosted[:limit]
+
+        # Store in Redis cache
+        if self.settings.enable_result_caching and self.redis is not None:
+            cache_key = self._build_cache_key(
+                query=query,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                user_id=user_id,
+                limit=limit,
+                time_range_days=time_range_days,
+            )
+            try:
+                serialized = json.dumps([r.__dict__ for r in results], ensure_ascii=False)
+                await self.redis.set(cache_key, serialized, ex=self.settings.cache_ttl_seconds)
+            except Exception:
+                # Ignore cache set failures
+                pass
+
+        return results
 
     async def _semantic_search(
         self,
@@ -588,3 +633,25 @@ class HybridSearchEngine:
         from app.utils.text_processing import extract_keywords
 
         return extract_keywords(query)
+
+    def _build_cache_key(
+        self,
+        query: str,
+        chat_id: int,
+        thread_id: int | None,
+        user_id: int | None,
+        limit: int,
+        time_range_days: int | None,
+    ) -> str:
+        # Normalize components for key stability
+        q = re.sub(r"\s+", " ", query.strip().lower())[:200]
+        parts = [
+            "hybrid_search",
+            f"c:{chat_id}",
+            f"t:{thread_id or 'none'}",
+            f"u:{user_id or 'none'}",
+            f"l:{limit}",
+            f"d:{time_range_days or 'none'}",
+            f"q:{q}",
+        ]
+        return "|".join(parts)

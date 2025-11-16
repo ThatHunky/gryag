@@ -20,6 +20,7 @@ from app.handlers.chat_admin import router as chat_admin_router, CHAT_COMMANDS
 from app.handlers.prompt_admin import router as prompt_admin_router, PROMPT_COMMANDS
 from app.handlers.chat_members import router as chat_members_router
 from app.handlers.checkers import router as checkers_router
+from app.handlers.handlers import router as handlers_router
 from app.middlewares.chat_filter import ChatFilterMiddleware
 from app.middlewares.chat_meta import ChatMetaMiddleware
 from app.middlewares.command_throttle import CommandThrottleMiddleware
@@ -50,6 +51,7 @@ from app.services.bot_profile import BotProfileStore
 from app.services.bot_learning import BotLearningEngine
 from app.repositories.memory_repository import MemoryRepository
 from app.services.telegram_service import TelegramService
+from app.observability.metrics import start_metrics_server
 
 
 async def get_public_ip() -> str:
@@ -114,6 +116,9 @@ async def main() -> None:
     from app.core.logging_config import setup_logging
 
     setup_logging(settings)
+
+    # Start metrics server if enabled
+    start_metrics_server(settings)
 
     public_ip = await get_public_ip()
     logging.info(f"Bot starting on public IP {public_ip}")
@@ -246,6 +251,7 @@ async def main() -> None:
         db_path=settings.database_url,
         gemini_client=gemini_client,
         settings=settings,
+        redis_client=redis_client,
     )
 
     episodic_memory = EpisodicMemoryStore(
@@ -446,6 +452,7 @@ async def main() -> None:
     dispatcher.include_router(chat_members_router)
     dispatcher.include_router(checkers_router)
     dispatcher.include_router(chat_router)
+    dispatcher.include_router(handlers_router)
 
     # Setup bot commands with descriptions
     await setup_bot_commands(bot)

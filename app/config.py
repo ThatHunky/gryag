@@ -39,8 +39,7 @@ class Settings(BaseSettings):
     )
     # PostgreSQL connection (replaces SQLite db_path)
     database_url: str = Field(
-        "postgresql://gryag:gryag@localhost:5433/gryag",
-        alias="DATABASE_URL"
+        "postgresql://gryag:gryag@localhost:5433/gryag", alias="DATABASE_URL"
     )
     max_messages: int = Field(
         40, alias="MAX_MESSAGES", ge=1
@@ -83,7 +82,9 @@ class Settings(BaseSettings):
     # Pruning configuration
     retention_enabled: bool = Field(True, alias="RETENTION_ENABLED")
     retention_prune_interval_seconds: int = Field(
-        172800, alias="RETENTION_PRUNE_INTERVAL_SECONDS", ge=60  # Default: 2 days (was 1 day)
+        172800,
+        alias="RETENTION_PRUNE_INTERVAL_SECONDS",
+        ge=60,  # Default: 2 days (was 1 day)
     )  # Default: run once per day
     enable_web_search: bool = Field(False, alias="ENABLE_WEB_SEARCH")
 
@@ -220,6 +221,7 @@ class Settings(BaseSettings):
     health_check_interval: int = Field(
         300, alias="HEALTH_CHECK_INTERVAL", ge=60, le=3600
     )  # Seconds between health checks
+    metrics_port: int = Field(9100, alias="METRICS_PORT", ge=1024, le=65535)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Memory and Context Improvements (Phase 1+)
@@ -315,7 +317,7 @@ class Settings(BaseSettings):
     episode_monitor_interval: int = Field(
         300, alias="EPISODE_MONITOR_INTERVAL", ge=60, le=3600
     )  # Background check interval (5 minutes)
-    
+
     # Episode Summarization (CPU optimization)
     enable_episode_gemini_summarization: bool = Field(
         False, alias="ENABLE_EPISODE_GEMINI_SUMMARIZATION"
@@ -589,7 +591,7 @@ class Settings(BaseSettings):
     log_backup_count: int = Field(5, alias="LOG_BACKUP_COUNT", ge=1, le=30)
     enable_console_logging: bool = Field(True, alias="ENABLE_CONSOLE_LOGGING")
     enable_file_logging: bool = Field(True, alias="ENABLE_FILE_LOGGING")
-    
+
     # Database migrations
     run_db_migrations: bool = Field(True, alias="RUN_DB_MIGRATIONS")
 

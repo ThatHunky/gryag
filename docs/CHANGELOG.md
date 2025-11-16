@@ -1,3 +1,4 @@
+- 2025-11-16: P1 implementations: added `app/handlers/handlers.py` and router inclusion, Redis-backed hybrid search caching, Prometheus metrics server (`app/observability/metrics.py`), modernized `Makefile` and added GitHub Actions CI (`.github/workflows/ci.yml`), and pre-commit hooks.
 # Changelog
 
 ## 2025-11-01

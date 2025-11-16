@@ -1,6 +1,6 @@
 # Makefile for gryag development
 
-.PHONY: help install install-dev test test-unit test-integration test-cov lint format type-check clean run docker-build docker-up docker-down
+.PHONY: help venv install install-dev test test-unit test-integration test-cov lint format type-check clean run docker-build docker-up docker-down ci docker-logs docker-test db-migrate db-version db-rollback
 
 help:  ## Show this help message
 	@echo 'Usage: make [target]'
@@ -8,38 +8,43 @@ help:  ## Show this help message
 	@echo 'Available targets:'
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-install:  ## Install production dependencies
-	pip install -r requirements.txt
+venv:  ## Create virtualenv and install base dependencies
+	python3 -m venv .venv
+	. .venv/bin/activate && pip install --upgrade pip
+	. .venv/bin/activate && pip install -r requirements.txt
 
-install-dev:  ## Install development dependencies
-	pip install -r requirements.txt
-	pip install -r requirements-dev.txt
+install: venv ## Install production dependencies
+	. .venv/bin/activate && pip install -r requirements.txt
+
+install-dev: venv ## Install development dependencies
+	. .venv/bin/activate && pip install -r requirements.txt
+	. .venv/bin/activate && pip install -r requirements-dev.txt
 
 test:  ## Run all tests
-	pytest tests/ -v
+	. .venv/bin/activate && pytest tests/ -v
 
 test-unit:  ## Run unit tests only
-	pytest tests/unit/ -v
+	. .venv/bin/activate && pytest tests/unit/ -v
 
 test-integration:  ## Run integration tests only
-	pytest tests/integration/ -v
+	. .venv/bin/activate && pytest tests/integration/ -v
 
 test-cov:  ## Run tests with coverage report
-	pytest tests/ -v --cov=app --cov-report=html --cov-report=term
+	. .venv/bin/activate && pytest tests/ -v --cov=app --cov-report=html --cov-report=term
 	@echo "Coverage report generated in htmlcov/index.html"
 
 lint:  ## Run linters
-	black --check app/ tests/
-	ruff check app/ tests/
-	isort --check-only app/ tests/
+	. .venv/bin/activate && black --check app/ tests/
+	. .venv/bin/activate && ruff check app/ tests/
+	. .venv/bin/activate && isort --check-only app/ tests/
 
 format:  ## Auto-format code
-	black app/ tests/
-	isort app/ tests/
-	ruff check --fix app/ tests/
+	. .venv/bin/activate && black app/ tests/
+	. .venv/bin/activate && isort app/ tests/
+	. .venv/bin/activate && ruff check --fix app/ tests/
 
 type-check:  ## Run type checker
-	mypy app/ --ignore-missing-imports
+	. .venv/bin/activate && mypy app/ --ignore-missing-imports
 
 clean:  ## Clean up generated files
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
@@ -51,28 +56,35 @@ clean:  ## Clean up generated files
 	rm -f gryag.db
 
 db-migrate:  ## Run database migrations
-	python -m app.infrastructure.database.cli migrate
+	. .venv/bin/activate && python -m app.infrastructure.database.cli migrate
 
 db-version:  ## Show current database version
-	python -m app.infrastructure.database.cli version
+	. .venv/bin/activate && python -m app.infrastructure.database.cli version
 
 db-rollback:  ## Rollback database (specify VERSION=N)
-	python -m app.infrastructure.database.cli rollback $(VERSION)
+	. .venv/bin/activate && python -m app.infrastructure.database.cli rollback $(VERSION)
 
 run:  ## Run the bot locally
-	python -m app.main
+	. .venv/bin/activate && python -m app.main
 
 docker-build:  ## Build Docker image
-	docker-compose build
+	docker compose build
 
 docker-up:  ## Start Docker containers
-	docker-compose up -d
+	docker compose up -d
 
 docker-down:  ## Stop Docker containers
-	docker-compose down
+	docker compose down
 
 docker-logs:  ## Show Docker logs
-	docker-compose logs -f bot
+	docker compose logs -f bot
 
 docker-test:  ## Run tests in Docker
-	docker-compose run --rm bot pytest tests/ -v
+	docker compose run --rm bot pytest tests/ -v
+
+ci: ## CI entrypoint: lint, type-check, tests with coverage gate
+	. .venv/bin/activate && ruff check app/ tests/
+	. .venv/bin/activate && black --check app/ tests/
+	. .venv/bin/activate && isort --check-only app/ tests/
+	. .venv/bin/activate && mypy app/ --ignore-missing-imports
+	. .venv/bin/activate && pytest tests/ --cov=app --cov-fail-under=80 -q

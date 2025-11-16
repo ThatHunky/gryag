@@ -23,6 +23,15 @@ Structure recommended:
 .venv/bin/pytest tests/ --cov=app --cov-fail-under=80
 ```
 
+**November 16, 2025**: P2 Docker/Runtime & Images finalized — Multi‑stage Dockerfile (non‑root), dev/prod compose with HTTP healthchecks (via Prometheus metrics on METRICS_PORT), and entrypoint script. Image generation via Gemini 2.5 Flash Image with optional separate key (`IMAGE_GENERATION_API_KEY`) gated by `ENABLE_IMAGE_GENERATION=true`. Verification:
+
+```bash
+docker compose build && docker compose up -d bot
+curl -fsS http://127.0.0.1:${METRICS_PORT:-9100}/metrics | head -n1
+docker compose -f docker-compose.prod.yml build
+.venv/bin/pytest tests/unit/test_chat_tools_image.py -q
+```
+
 **November 9, 2025**: **🎮 Telegram Checkers Redesign** — Replaced AI matches with public user-vs-user challenges, added in-chat join/cancel/forfeit/rematch controls, refreshed board UI, and updated persistence. Verification: `.venv/bin/pytest tests/unit/test_checkers_game_store.py`
 
 **2025-11-01**: Moved three root-level documentation files into `docs/archived_root_docs/` to tidy the repository root: `README_INTEGRATION.md`, `IMPLEMENTATION_INDEX.md`, `IMPLEMENTATION_STATUS_COMPARISON.md`. Verification: `ls docs/archived_root_docs/`

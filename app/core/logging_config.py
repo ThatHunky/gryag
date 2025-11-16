@@ -21,9 +21,72 @@ class JSONFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
 
-        # Add extra fields if present
-        if hasattr(record, "extra") and record.extra:
-            log_data["extra"] = record.extra
+        # Add extra fields by scanning record.__dict__ (logging injects extras as attributes)
+        std_attrs = {
+            "name",
+            "msg",
+            "args",
+            "levelname",
+            "levelno",
+            "pathname",
+            "filename",
+            "module",
+            "exc_info",
+            "exc_text",
+            "stack_info",
+            "lineno",
+            "funcName",
+            "created",
+            "msecs",
+            "relativeCreated",
+            "thread",
+            "threadName",
+            "processName",
+            "process",
+            "message",
+            "asctime",
+        }
+        extras: dict[str, object] = {}
+
+        def _mask(val: str) -> str:
+            if not isinstance(val, str) or len(val) < 6:
+                return "***"
+            return val[:3] + "..." + val[-2:]
+
+        for key, value in record.__dict__.items():
+            if key in std_attrs:
+                continue
+            # Mask sensitive keys
+            lk = key.lower()
+            if any(s in lk for s in ("token", "api_key", "apikey", "secret", "password")):
+                try:
+                    extras[key] = _mask(value)  # type: ignore[arg-type]
+                except Exception:
+                    extras[key] = "***"
+                continue
+            # Ensure JSON-safe (fallback to str for unsupported types)
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                extras[key] = value
+            else:
+                try:
+                    # Basic containers: make best effort shallow conversion
+                    if isinstance(value, (list, tuple)):
+                        extras[key] = [
+                            (v if isinstance(v, (str, int, float, bool)) or v is None else str(v))
+                            for v in value
+                        ]
+                    elif isinstance(value, dict):
+                        extras[key] = {
+                            str(k): (v if isinstance(v, (str, int, float, bool)) or v is None else str(v))
+                            for k, v in value.items()
+                        }
+                    else:
+                        extras[key] = str(value)
+                except Exception:
+                    extras[key] = str(value)
+
+        if extras:
+            log_data["extra"] = extras
 
         # Add exception info if present
         if record.exc_info:
@@ -64,11 +127,10 @@ def setup_logging(settings: Settings) -> None:
         console_handler.setFormatter(formatter)
         root_logger.addHandler(console_handler)
 
-    # File handler with rotation
+    # File handler with time-based rotation (daily at midnight)
     if settings.enable_file_logging:
         log_file = settings.log_dir / "gryag.log"
 
-        # Time-based rotation (daily at midnight)
         file_handler = logging.handlers.TimedRotatingFileHandler(
             filename=log_file,
             when="midnight",
@@ -77,10 +139,6 @@ def setup_logging(settings: Settings) -> None:
             encoding="utf-8",
         )
         file_handler.setFormatter(formatter)
-
-        # Also add size-based backup rotation
-        file_handler.maxBytes = settings.log_max_bytes
-
         root_logger.addHandler(file_handler)
 
     # Suppress noisy third-party loggers

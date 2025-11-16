@@ -233,6 +233,23 @@ class Settings(BaseSettings):
     context_token_budget: int = Field(
         8000, alias="CONTEXT_TOKEN_BUDGET", ge=1000, le=30000
     )
+    # Optional static budget allocations (percentages, 0.0–1.0). If all are non-zero,
+    # these form the base for dynamic adjustments in calculate_dynamic_budget.
+    context_budget_immediate_pct: float = Field(
+        0.20, alias="CONTEXT_BUDGET_IMMEDIATE_PCT", ge=0.0, le=1.0
+    )
+    context_budget_recent_pct: float = Field(
+        0.30, alias="CONTEXT_BUDGET_RECENT_PCT", ge=0.0, le=1.0
+    )
+    context_budget_relevant_pct: float = Field(
+        0.25, alias="CONTEXT_BUDGET_RELEVANT_PCT", ge=0.0, le=1.0
+    )
+    context_budget_background_pct: float = Field(
+        0.15, alias="CONTEXT_BUDGET_BACKGROUND_PCT", ge=0.0, le=1.0
+    )
+    context_budget_episodic_pct: float = Field(
+        0.10, alias="CONTEXT_BUDGET_EPISODIC_PCT", ge=0.0, le=1.0
+    )
 
     # Hybrid Search
     enable_hybrid_search: bool = Field(True, alias="ENABLE_HYBRID_SEARCH")
@@ -572,6 +589,9 @@ class Settings(BaseSettings):
     log_backup_count: int = Field(5, alias="LOG_BACKUP_COUNT", ge=1, le=30)
     enable_console_logging: bool = Field(True, alias="ENABLE_CONSOLE_LOGGING")
     enable_file_logging: bool = Field(True, alias="ENABLE_FILE_LOGGING")
+    
+    # Database migrations
+    run_db_migrations: bool = Field(True, alias="RUN_DB_MIGRATIONS")
 
     @property
     def db_path_str(self) -> str:

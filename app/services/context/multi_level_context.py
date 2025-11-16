@@ -196,12 +196,22 @@ class MultiLevelContextManager:
             except Exception:
                 pass
 
-        # Calculate dynamic budgets
+        # Prepare base budgets from settings (percentages), used by dynamic allocator
+        base_budgets = {
+            "immediate": getattr(self.settings, "context_budget_immediate_pct", 0.20),
+            "recent": getattr(self.settings, "context_budget_recent_pct", 0.30),
+            "relevant": getattr(self.settings, "context_budget_relevant_pct", 0.25),
+            "background": getattr(self.settings, "context_budget_background_pct", 0.15),
+            "episodic": getattr(self.settings, "context_budget_episodic_pct", 0.10),
+        }
+
+        # Calculate dynamic budgets using query/activity signals and base settings
         budget_percentages = calculate_dynamic_budget(
             query_text=query_text,
             recent_message_count=recent_message_count,
             has_profile_facts=has_profile_facts,
             has_episodes=has_episodes,
+            base_budgets=base_budgets,
         )
 
         # Convert percentages to token budgets

@@ -137,9 +137,14 @@ async def main() -> None:
     dispatcher = Dispatcher()
 
     # Initialize PostgreSQL database
-    from app.infrastructure.db_utils import init_database
+    from app.infrastructure.db_utils import init_database, apply_migrations
 
     await init_database(settings.database_url)
+    if settings.run_db_migrations:
+        await apply_migrations(settings.database_url)
+        logging.info("Database migrations applied")
+    else:
+        logging.info("RUN_DB_MIGRATIONS=false; skipping migrations")
 
     store = ContextStore(settings.database_url)
     await store.init()

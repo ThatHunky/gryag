@@ -9,6 +9,17 @@ All notable changes to gryag's memory, context, and learning systems.
 
 ## [Unreleased]
 
+### 2025-11-16 — P0 Improvements (Context, Migrations, Persona, Tests, Security)
+
+- Context budgets configurable via `CONTEXT_BUDGET_*_PCT`; dynamic allocator now respects base budgets.
+- Automated PostgreSQL migrations runner added; runs at startup when `RUN_DB_MIGRATIONS=true`.
+- Persona enforcement: plain-text Ukrainian output enforced; Markdown/code stripped before sending.
+- Logging masks secrets in `extra` fields (tokens, api keys, passwords).
+- Tests added: token budget base allocations, persona plaintext enforcement, migration runner, minimal chat flow.
+- Verification:
+  - Run: `.venv/bin/python3 -m app.main` (applies schema + migrations)
+  - Tests: `.venv/bin/pytest tests/ --cov=app --cov-fail-under=80`
+
 ### 2025-11-09 — Telegram Checkers Redesign
 
 **Summary**: Rebuilt the Telegram checkers experience around user-vs-user challenges with improved UI and persistence.

@@ -994,6 +994,7 @@ async def _process_and_send_response(
     # Comprehensive response cleaning
     original_reply = reply_text
     reply_text = _clean_response_text(reply_text)
+    reply_text = _enforce_plaintext_ukrainian(reply_text)
 
     # Log if we had to clean metadata from the response
     if original_reply != reply_text and original_reply:
@@ -1134,10 +1135,8 @@ async def _process_and_send_response(
         )
 
     reply_trimmed = reply_text[:TELEGRAM_MESSAGE_LIMIT]
-    # Convert markdown to HTML (handles bold, italic, strikethrough, spoilers)
-    formatted = _format_for_telegram(reply_trimmed)
-    # Telegram HTML mode handles newlines automatically - no br tags needed
-    reply_payload = _safe_html_payload(formatted, already_html=True)
+    # Do not apply markdown formatting; send as plain text via HTML mode-safe payload
+    reply_payload = _safe_html_payload(reply_trimmed, already_html=False)
 
     response_message: Message | None = None
 
@@ -2172,6 +2171,34 @@ def _clean_response_text(text: str) -> str:
     return cleaned
 
 
+def _enforce_plaintext_ukrainian(text: str) -> str:
+    """
+    Enforce plain-text, Ukrainian-style output:
+    - Strip Markdown/code formatting (**, __, `code`, ```blocks```)
+    - Remove HTML tags if any slipped through
+    - Collapse excessive whitespace
+    """
+    if not text:
+        return text
+    # Remove code blocks ```...```
+    text = re.sub(r"```[\s\S]*?```", "", text)
+    # Remove inline code `...`
+    text = re.sub(r"`([^`]*)`", r"\1", text)
+    # Replace common markdown emphasis markers (paired only); preserves snake_case (no paired underscores)
+    # Bold/strong and italics
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"(?<!\w)__(.+?)__(?!\w)", r"\1", text)
+    text = re.sub(r"\*(.+?)\*", r"\1", text)
+    text = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"\1", text)
+    # Strikethrough
+    text = re.sub(r"~~(.+?)~~", r"\1", text)
+    # Strip HTML tags if present
+    text = re.sub(r"<[^>]+>", "", text)
+    # Collapse spaces
+    text = "\n".join(" ".join(line.split()) for line in text.splitlines()).strip()
+    return text
+
+
 async def _get_video_description_from_history(
     store: ContextStore,
     chat_id: int,
@@ -2760,6 +2787,12 @@ async def _build_message_context(
                     "chat_id": ctx.chat_id,
                     "user_id": ctx.user_id,
                     "total_tokens": context_assembly.total_tokens,
+                    "budget_total_tokens": ctx.settings.context_token_budget,
+                    "budget_pct_immediate": getattr(ctx.settings, "context_budget_immediate_pct", None),
+                    "budget_pct_recent": getattr(ctx.settings, "context_budget_recent_pct", None),
+                    "budget_pct_relevant": getattr(ctx.settings, "context_budget_relevant_pct", None),
+                    "budget_pct_background": getattr(ctx.settings, "context_budget_background_pct", None),
+                    "budget_pct_episodic": getattr(ctx.settings, "context_budget_episodic_pct", None),
                     "immediate_count": len(context_assembly.immediate.messages),
                     "recent_count": (
                         len(context_assembly.recent.messages)

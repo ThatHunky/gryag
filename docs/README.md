@@ -16,6 +16,13 @@ Structure recommended:
 
 ## Recent Changes
 
+**November 16, 2025**: P0 Improvements delivered — context budgets (configurable), automated PostgreSQL migrations at startup, persona plain‑text enforcement (Ukrainian, no Markdown/code), secret masking in logs, plus new unit/integration tests. Verification:
+
+```bash
+.venv/bin/python3 -m app.main          # initializes schema and applies migrations
+.venv/bin/pytest tests/ --cov=app --cov-fail-under=80
+```
+
 **November 9, 2025**: **🎮 Telegram Checkers Redesign** — Replaced AI matches with public user-vs-user challenges, added in-chat join/cancel/forfeit/rematch controls, refreshed board UI, and updated persistence. Verification: `.venv/bin/pytest tests/unit/test_checkers_game_store.py`
 
 **2025-11-01**: Moved three root-level documentation files into `docs/archived_root_docs/` to tidy the repository root: `README_INTEGRATION.md`, `IMPLEMENTATION_INDEX.md`, `IMPLEMENTATION_STATUS_COMPARISON.md`. Verification: `ls docs/archived_root_docs/`

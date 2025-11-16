@@ -129,3 +129,71 @@ async def init_database(database_url: str) -> None:
             else:
                 logger.error(f"Failed to initialize PostgreSQL database: {e}")
                 raise
+
+
+async def apply_migrations(database_url: str) -> None:
+    """
+    Apply versioned SQL migrations from db/migrations/ directory.
+    
+    - Creates a tracking table migrations_applied(filename TEXT PRIMARY KEY, applied_at BIGINT)
+    - Applies any .sql files not yet recorded, in lexical order
+    - Runs each migration in its own transaction
+    """
+    import time
+    from pathlib import Path
+    
+    migrations_dir_candidates = [
+        Path(__file__).resolve().parents[2] / "db" / "migrations",
+        Path(__file__).resolve().parent.parent / "db" / "migrations",
+    ]
+    migrations_dir = None
+    for p in migrations_dir_candidates:
+        if p.exists():
+            migrations_dir = p
+            break
+    if migrations_dir is None:
+        logger.info("No migrations directory found; skipping migrations")
+        return
+    
+    migration_files = sorted([f for f in migrations_dir.iterdir() if f.suffix.lower() == ".sql"])
+    if not migration_files:
+        logger.info("No migration files found; nothing to apply")
+        return
+    
+    async with get_db_connection(database_url) as conn:
+        # Ensure tracking table exists
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS migrations_applied (
+                filename TEXT PRIMARY KEY,
+                applied_at BIGINT NOT NULL
+            )
+            """
+        )
+        rows = await conn.fetch("SELECT filename FROM migrations_applied")
+        already_applied = {r["filename"] for r in rows}
+        
+        to_apply = [mf for mf in migration_files if mf.name not in already_applied]
+        if not to_apply:
+            logger.info("All migrations already applied")
+            return
+        
+        logger.info(
+            "Applying migrations",
+            extra={"count": len(to_apply), "files": [f.name for f in to_apply]},
+        )
+        
+        for mf in to_apply:
+            sql = mf.read_text(encoding="utf-8")
+            try:
+                async with conn.transaction():
+                    await conn.execute(sql)
+                    await conn.execute(
+                        "INSERT INTO migrations_applied (filename, applied_at) VALUES ($1, $2)",
+                        mf.name,
+                        int(time.time()),
+                    )
+                logger.info(f"Applied migration {mf.name}")
+            except Exception as e:
+                logger.error(f"Failed to apply migration {mf.name}: {e}", exc_info=True)
+                raise

@@ -6,11 +6,11 @@
 
 -- Feature-specific rate limiting (weather, currency, images, polls, memory, etc.)
 CREATE TABLE IF NOT EXISTS feature_rate_limits (
-    user_id INTEGER NOT NULL,
+    user_id BIGINT NOT NULL,
     feature_name TEXT NOT NULL,
-    window_start INTEGER NOT NULL,
+    window_start BIGINT NOT NULL,
     request_count INTEGER NOT NULL DEFAULT 0,
-    last_request INTEGER NOT NULL,
+    last_request BIGINT NOT NULL,
     PRIMARY KEY (user_id, feature_name, window_start)
 );
 
@@ -33,9 +33,9 @@ CREATE INDEX IF NOT EXISTS idx_feature_rate_limits_last_request
 
 -- Cooldown tracking for per-request cooldowns (e.g., image generation)
 CREATE TABLE IF NOT EXISTS feature_cooldowns (
-    user_id INTEGER NOT NULL,
+    user_id BIGINT NOT NULL,
     feature_name TEXT NOT NULL,
-    last_used INTEGER NOT NULL,
+    last_used BIGINT NOT NULL,
     cooldown_seconds INTEGER NOT NULL,
     PRIMARY KEY (user_id, feature_name)
 );
@@ -45,16 +45,16 @@ CREATE INDEX IF NOT EXISTS idx_feature_cooldowns_last_used
 
 -- User reputation and throttle adjustment
 CREATE TABLE IF NOT EXISTS user_throttle_metrics (
-    user_id INTEGER PRIMARY KEY,
+    user_id BIGINT PRIMARY KEY,
     throttle_multiplier REAL DEFAULT 1.0,  -- 0.5-2.0 range (higher = more lenient)
     spam_score REAL DEFAULT 0.0,           -- 0.0-1.0 (higher = more spammy)
     total_requests INTEGER DEFAULT 0,
     throttled_requests INTEGER DEFAULT 0,
     burst_requests INTEGER DEFAULT 0,      -- Requests in short time spans
     avg_request_spacing_seconds REAL DEFAULT 0.0,
-    last_reputation_update INTEGER NOT NULL,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    last_reputation_update BIGINT NOT NULL,
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_throttle_metrics_multiplier
@@ -65,12 +65,12 @@ CREATE INDEX IF NOT EXISTS idx_user_throttle_metrics_spam_score
 
 -- Request history for pattern analysis
 CREATE TABLE IF NOT EXISTS user_request_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
     feature_name TEXT NOT NULL,
-    requested_at INTEGER NOT NULL,
+    requested_at BIGINT NOT NULL,
     was_throttled INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL
+    created_at BIGINT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_request_history_user_time
@@ -84,9 +84,18 @@ CREATE INDEX IF NOT EXISTS idx_user_request_history_throttled
 
 -- Cleanup trigger: auto-delete request history older than 7 days
 -- This keeps the table from growing indefinitely
-CREATE TRIGGER IF NOT EXISTS cleanup_old_request_history
-AFTER INSERT ON user_request_history
+-- PostgreSQL requires a function first, then the trigger
+CREATE OR REPLACE FUNCTION cleanup_old_request_history()
+RETURNS TRIGGER AS $$
 BEGIN
     DELETE FROM user_request_history
-    WHERE requested_at < (strftime('%s', 'now') - 604800); -- 7 days in seconds
+    WHERE requested_at < (EXTRACT(EPOCH FROM NOW())::BIGINT - 604800); -- 7 days in seconds
+    RETURN NEW;
 END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS cleanup_old_request_history ON user_request_history;
+CREATE TRIGGER cleanup_old_request_history
+AFTER INSERT ON user_request_history
+FOR EACH ROW
+EXECUTE FUNCTION cleanup_old_request_history();

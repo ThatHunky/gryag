@@ -217,7 +217,7 @@ class Settings(BaseSettings):
     )  # Minimum time between proactive responses
 
     # System health monitoring
-    enable_health_metrics: bool = Field(True, alias="ENABLE_HEALTH_METRICS")
+    enable_health_metrics: bool = Field(False, alias="ENABLE_HEALTH_METRICS")
     health_check_interval: int = Field(
         300, alias="HEALTH_CHECK_INTERVAL", ge=60, le=3600
     )  # Seconds between health checks

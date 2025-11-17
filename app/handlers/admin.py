@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -350,6 +351,7 @@ async def broadcast_donate_command(
     message: Message,
     bot: Bot,
     settings: Settings,
+    bot_id: int | None = None,
 ) -> None:
     """Hidden command to broadcast donation message to all private chats (user_id 392817811 only).
 
@@ -359,25 +361,50 @@ async def broadcast_donate_command(
     """
     # Check if user is authorized (hardcoded user_id check)
     if not message.from_user or message.from_user.id != 392817811:
-        # Silently ignore - don't reveal the command exists
+        # Log authorization failure for debugging (but don't reveal command exists to user)
+        LOGGER.debug(
+            f"Unauthorized broadcastdonate attempt from user {message.from_user.id if message.from_user else 'unknown'}"
+        )
         return
 
     # Check if this is a confirmation
     command_text = (message.text or "").strip().lower()
     is_confirmation = False
     
-    # Check if command has confirm/yes flag (e.g., "/broadcastdonate confirm" or "/broadcastdonate yes")
-    if "confirm" in command_text or command_text.endswith(" yes"):
-        is_confirmation = True
+    # Improved confirmation text matching: check for exact patterns
+    # Matches: "/broadcastdonate confirm", "/broadcastdonate yes", "/broadcastdonate confirm something"
+    if command_text.startswith("/broadcastdonate"):
+        parts = command_text.split()
+        if len(parts) >= 2 and parts[1] in ["confirm", "yes"]:
+            is_confirmation = True
     
     # Check if message is a reply to a confirmation message from the bot
     if message.reply_to_message and message.reply_to_message.from_user:
-        # Verify it's a reply to the bot's message
-        if message.reply_to_message.from_user.is_bot:
-            reply_text = (message.text or "").strip().lower()
-            if reply_text in ["yes", "так", "y", "т"]:
-                is_confirmation = True
+        # Verify it's a reply to THIS bot's message (not just any bot)
+        reply_user = message.reply_to_message.from_user
+        if reply_user.is_bot and bot_id is not None and reply_user.id == bot_id:
+            # Also verify the reply is to a confirmation message by checking text content
+            reply_to_text = (message.reply_to_message.text or "").lower()
+            if "підтвердження трансляції" in reply_to_text or "подтверждение трансляции" in reply_to_text:
+                reply_text = (message.text or "").strip().lower()
+                if reply_text in ["yes", "так", "y", "т"]:
+                    is_confirmation = True
 
+    # If not confirmed, show confirmation prompt (without querying database yet)
+    if not is_confirmation:
+        confirmation_msg = (
+            "⚠️ <b>Підтвердження трансляції</b>\n\n"
+            "Ви збираєтеся надіслати повідомлення про донат до всіх приватних чатів.\n\n"
+            "Для підтвердження надішліть:\n"
+            "• <code>/broadcastdonate confirm</code> або\n"
+            "• <code>/broadcastdonate yes</code> або\n"
+            "• Надішліть <code>yes</code> або <code>так</code> у відповідь на це повідомлення.\n\n"
+            "Для скасування просто проігноруйте це повідомлення."
+        )
+        await message.reply(confirmation_msg, parse_mode="HTML")
+        return
+
+    # Confirmation received - now query database and proceed with broadcast
     try:
         # Query all distinct private chat IDs (chat_id > 0)
         query, params = convert_query_to_postgres(
@@ -395,28 +422,13 @@ async def broadcast_donate_command(
             await message.reply("❌ Не знайдено жодного приватного чату в базі даних.")
             return
 
-        # If not confirmed, show confirmation prompt
-        if not is_confirmation:
-            confirmation_msg = (
-                f"⚠️ <b>Підтвердження трансляції</b>\n\n"
-                f"Ви збираєтеся надіслати повідомлення про донат до <b>{total_chats}</b> приватних чатів.\n\n"
-                f"Для підтвердження надішліть:\n"
-                f"• <code>/broadcastdonate confirm</code> або\n"
-                f"• <code>/broadcastdonate yes</code> або\n"
-                f"• Надішліть <code>yes</code> або <code>так</code> у відповідь на це повідомлення.\n\n"
-                f"Для скасування просто проігноруйте це повідомлення."
-            )
-            await message.reply(confirmation_msg, parse_mode="HTML")
-            return
-
-        # Confirmation received - proceed with broadcast
         await message.reply("🔄 Починаю трансляцію повідомлення про донат до всіх приватних чатів...")
 
         LOGGER.info(
             f"User {message.from_user.id} starting broadcast to {total_chats} private chats"
         )
 
-        # Send messages to each private chat
+        # Send messages to each private chat with rate limiting
         success_count = 0
         failed_count = 0
         failed_chats: list[int] = []
@@ -425,6 +437,9 @@ async def broadcast_donate_command(
             try:
                 await bot.send_message(chat_id, DONATION_MESSAGE)
                 success_count += 1
+                # Rate limiting: wait 0.2 seconds between sends to avoid Telegram rate limits
+                if success_count < total_chats:  # Don't wait after the last message
+                    await asyncio.sleep(0.2)
                 # Log progress every 10 chats
                 if success_count % 10 == 0:
                     LOGGER.debug(
@@ -437,6 +452,9 @@ async def broadcast_donate_command(
                 LOGGER.debug(
                     f"Failed to send donation message to chat {chat_id}: {e}"
                 )
+                # Still wait to maintain rate limiting even on failures
+                if (success_count + failed_count) < total_chats:
+                    await asyncio.sleep(0.2)
             except Exception as e:
                 # Other unexpected errors
                 failed_count += 1
@@ -445,6 +463,9 @@ async def broadcast_donate_command(
                     f"Unexpected error sending to chat {chat_id}: {e}",
                     exc_info=True,
                 )
+                # Still wait to maintain rate limiting even on failures
+                if (success_count + failed_count) < total_chats:
+                    await asyncio.sleep(0.2)
 
         # Send summary to admin
         summary = (

@@ -53,6 +53,7 @@ htmlcov/
 logs/
 coverage.xml
 
-# Scripts directory (except warp setup needed for Docker)
+# Scripts directory (except warp setup and docker entrypoint needed for Docker)
 scripts/
 !scripts/warp/
+!scripts/docker/

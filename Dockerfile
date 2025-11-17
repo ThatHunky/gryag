@@ -60,12 +60,11 @@ COPY --from=builder ${VENV_PATH} ${VENV_PATH}
 # Copy application source
 COPY . /app
 
-# Ensure entrypoint is executable (COPY does not preserve mode)
-RUN chmod +x scripts/docker/entrypoint.sh
-
 # Ensure permissions for non-root
 RUN chown -R appuser:app /app
+
 USER appuser
 
 # Entrypoint script (handles migrations + start)
-ENTRYPOINT ["scripts/docker/entrypoint.sh"]
+# Use sh to execute script, which doesn't require execute permissions
+ENTRYPOINT ["sh", "scripts/docker/entrypoint.sh"]

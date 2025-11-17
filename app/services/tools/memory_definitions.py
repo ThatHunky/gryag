@@ -7,9 +7,10 @@ REMEMBER_MEMORY_DEFINITION = {
             "name": "remember_memory",
             "description": (
                 "Store a NEW piece of information about the user. The information should be a simple, self-contained statement. "
-                "Use this IMMEDIATELY when the user asks you to remember something (е.g., 'запам'ятай', 'remember', 'save'). "
-                "Do NOT call recall_memories before this if the user explicitly asks to remember - just store it directly. "
-                "Returns confirmation or an error."
+                "Use this IMMEDIATELY when the user asks you to remember something (e.g., 'запам'ятай', 'remember', 'save'). "
+                "Note: You can see existing memories in your system context, so check there first to avoid duplicates. "
+                "Returns confirmation or an error. "
+                "Note: chat_id is automatically determined from the current chat context."
             ),
             "parameters": {
                 "type": "object",
@@ -35,9 +36,11 @@ RECALL_MEMORIES_DEFINITION = {
         {
             "name": "recall_memories",
             "description": (
-                "Retrieve all stored memories for a user. Use this when you need to CHECK what you already know, "
-                "or when the user asks what you remember about them. "
-                "Do NOT use this before remember_memory - just remember directly. "
+                "Retrieve all stored memories for a user. Note: Memories are automatically loaded into your context "
+                "for the user who sent the message, so you usually don't need to call this. "
+                "Use this when: (1) the user explicitly asks what you remember about them, "
+                "(2) you need to check memories for a different user (not the message sender), "
+                "or (3) you need memory IDs to forget specific memories. "
                 "Returns a list of all known information, each with an ID."
             ),
             "parameters": {
@@ -61,7 +64,9 @@ FORGET_MEMORY_DEFINITION = {
             "name": "forget_memory",
             "description": (
                 "Forget a specific piece of information about the user, identified by its unique ID. "
-                "To get the ID, you must call `recall_memories` first. Returns confirmation or an error."
+                "To get the ID, you can check your system context (memories are automatically loaded) "
+                "or call `recall_memories` if needed. Returns confirmation or an error. "
+                "Note: chat_id is automatically determined from the current chat context."
             ),
             "parameters": {
                 "type": "object",
@@ -88,7 +93,8 @@ FORGET_ALL_MEMORIES_DEFINITION = {
             "name": "forget_all_memories",
             "description": (
                 "Permanently delete ALL stored memories for a user. This is a destructive action. "
-                "Use only when the user explicitly asks to 'forget everything'. Returns a count of forgotten memories."
+                "Use only when the user explicitly asks to 'forget everything'. Returns a count of forgotten memories. "
+                "Note: chat_id is automatically determined from the current chat context."
             ),
             "parameters": {
                 "type": "object",
@@ -112,7 +118,8 @@ SET_PRONOUNS_DEFINITION = {
             "name": "set_pronouns",
             "description": (
                 "Update the user's pronouns. Use when the user explicitly tells you their pronouns "
-                "or asks you to change them. Send an empty string to clear stored pronouns."
+                "or asks you to change them. Send an empty string to clear stored pronouns. "
+                "Note: chat_id is automatically determined from the current chat context."
             ),
             "parameters": {
                 "type": "object",

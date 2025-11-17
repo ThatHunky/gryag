@@ -4,78 +4,120 @@ This document describes the canonical message flow and formatting for conversati
 
 ---
 
-## Actual Gemini API Format
+## Native Gemini Format (Current)
 
-Messages are sent to Gemini using the official Google Generative AI SDK format with **roles** and **parts**:
+**Status**: Active (January 2025)
 
+The bot now uses the native Gemini API format with all metadata moved to structured markdown system instructions. This provides the cleanest, most native format for Gemini while maintaining all necessary context.
+
+### Format Structure
+
+**History**: Clean native format - only `role` and `parts` with text/media, no metadata blocks:
 ```json
 [
   {
     "role": "user",
     "parts": [
-      {"text": "[meta] chat_id=-123456789 thread_id=12 message_id=456 user_id=987654321 name=\"Alice\" username=\"alice_ua\""},
       {"text": "Як справи, гряг?"}
     ]
   },
   {
     "role": "model",
     "parts": [
-      {"text": "[meta] chat_id=-123456789 message_id=457 name=\"gryag\" username=\"gryag_bot\" reply_to_message_id=456"},
       {"text": "Не набридай."}
     ]
   },
   {
     "role": "user",
     "parts": [
-      {"text": "[meta] chat_id=-123456789 message_id=458 user_id=111222333 name=\"Bob\" username=\"bob_kyiv\" reply_to_message_id=457"},
       {"text": "А що тут відбувається?"}
     ]
   }
 ]
 ```
 
----
+**System Instruction**: Comprehensive markdown with all context:
+```markdown
+# Persona
+[Persona content from ukrainian_gryag.txt]
 
-## Pattern Structure
+# Current Time
+The current time is: Monday, January 15, 2025 at 14:30:00
+
+## Current User
+**Name**: Alice
+**User ID**: 987654321
+**Username**: @alice_ua
+
+## Reply Context
+**Replying to**: Bob (ID: 111222333)
+**Original message**: Привіт, як справи?
+
+# Memories about Alice (ID: 987654321)
+- User is from Kyiv
+- Works as a software developer
+- Likes coffee
+
+## User Profile
+[User profile summary]
+
+## Key Facts
+- Location: Kyiv
+- Occupation: Software Developer
+
+## Relevant Past Context
+- [Relevance: 0.82] Previous conversation about...
+- [Relevance: 0.75] Mentioned that...
+
+## Memorable Events
+- **Topic**: First meeting
+- **Summary**: User introduced themselves...
+```
+
+### Key Design Decisions
+
+1. **No Metadata Blocks**: History messages contain only `role` and `parts` (text/media) - no `[meta]` blocks
+2. **System Instruction Contains All Context**: User metadata, reply context, memories, and multi-level context are all in the system instruction as markdown
+3. **Native Media**: Media is sent as native `inline_data`/`file_data` parts in history and current message
+4. **Reply Context**: Included in system instruction, not in message text or history
 
 ### Message Object
-Each message is a dictionary with:
-- **`role`**: Either `"user"` (human or bot addressing gryag) or `"model"` (gryag's responses)
-- **`parts`**: Array of content parts (text, media, function calls/responses)
+Each message in history is a dictionary with:
+- **`role`**: Either `"user"` (human messages) or `"model"` (gryag's responses)
+- **`parts`**: Array of content parts (text, media) - **no metadata blocks**
 
 ### Parts Array
-The `parts` array contains ordered content:
-
-1. **Metadata part** (always first):
-   ```json
-   {"text": "[meta] chat_id=-123 user_id=456 name=\"Alice\" ..."}
-   ```
-   - Compact key=value format (see `format_metadata()` in `context_store.py`)
-   - Contains: `chat_id`, `thread_id`, `message_id`, `user_id`, `name`, `username`
-   - For replies: adds `reply_to_message_id`, `reply_to_user_id`, `reply_to_name`, `reply_excerpt`
-   - For bot messages: `user_id` is `None`, `name` is `"gryag"`
-
-2. **Text content** (if present):
+The `parts` array contains only:
+1. **Text content** (if present):
    ```json
    {"text": "User's actual message text"}
    ```
 
-3. **Media parts** (if present):
+2. **Media parts** (if present):
    ```json
    {"inline_data": {"mime_type": "image/jpeg", "data": "base64..."}}
    ```
    or
    ```json
-   {"file_uri": "https://generativelanguage.googleapis.com/v1beta/files/..."}
+   {"file_data": {"file_uri": "https://generativelanguage.googleapis.com/v1beta/files/..."}}
    ```
 
 ### Role Assignment
-- **`"user"`**: All human messages, including when they address gryag
+- **`"user"`**: All human messages
 - **`"model"`**: All gryag bot responses
 - **`"tool"`**: Function call responses (search, calculator, weather, etc.)
 
-### System Instruction
-The system prompt (persona) is sent separately via the `system_instruction` parameter (if supported by model) or prepended as a `"user"` role message in the conversation.
+### System Instruction Structure
+The system instruction is sent via the `system_instruction` parameter and contains:
+1. **Persona**: Base system prompt from `ukrainian_gryag.txt`
+2. **Current Time**: Timestamp in Kyiv timezone
+3. **Current User**: Name, ID, username of message sender
+4. **Reply Context**: If replying, includes replied-to user and excerpt
+5. **User Memories**: Automatically loaded memories about the current user
+6. **Multi-Level Context**: 
+   - User Profile and Key Facts
+   - Relevant Past Context (hybrid search results)
+   - Memorable Events (episodic memory)
 
 #### System Context Block (optional)
 - Enabled with `ENABLE_SYSTEM_CONTEXT_BLOCK=true`.
@@ -90,16 +132,16 @@ The system prompt (persona) is sent separately via the `system_instruction` para
 ## Code References
 
 ### Message Assembly
-- **`app/services/context_store.py`**: `format_metadata()` - Formats metadata blocks
-- **`app/services/context_store.py`**: `recent()` - Retrieves conversation history in Gemini format
-- **`app/handlers/chat.py`**: Message handling and user parts construction
+- **`app/services/context/multi_level_context.py`**: `format_for_gemini_native()` - Formats context in native Gemini format
+- **`app/handlers/chat.py`**: `_build_native_system_instruction()` - Builds comprehensive system instruction with all context
+- **`app/handlers/chat.py`**: `_build_message_context()` - Main context building logic using native format
 - **`app/services/gemini.py`**: `generate()` - Assembles final payload for Gemini API
 
 ### Context Layers (Multi-Level Context)
 When `ENABLE_MULTI_LEVEL_CONTEXT=true`:
-- **`app/services/context/multi_level_context.py`**: `format_for_gemini()` assembles 5 context layers
-  - **Immediate** (last 5 messages) + **Recent** (last 30 messages) → `history` array
-  - **Relevant** (hybrid search) + **Background** (user profile) + **Episodic** (past episodes) → `system_context` string
+- **`app/services/context/multi_level_context.py`**: `format_for_gemini_native()` assembles 5 context layers
+  - **Immediate** (last 5 messages) + **Recent** (last 30 messages) → `history` array (clean native format, no metadata blocks)
+  - **Relevant** (hybrid search) + **Background** (user profile) + **Episodic** (past episodes) → `system_context` markdown string
 
 ### Media Handling
 - Images, videos, audio sent as `inline_data` (base64) or `file_uri` (uploaded files)
@@ -183,62 +225,19 @@ SELECT role, text, media FROM messages ORDER BY id DESC LIMIT 10;
 
 ---
 
-## Alternative: Compact Plain Text Format (Phase 6)
+## Legacy Formats (Deprecated)
 
-**Status**: Implemented (October 2025), disabled by default
+### Compact Plain Text Format (Deprecated)
 
-An alternative compact format is available that reduces token usage by 70-80%:
+**Status**: Deprecated (January 2025)
 
-```text
-Alice#987654: Як справи, гряг?
-gryag: Не набридай.
-Bob#111222 → Alice#987654: А що тут відбувається?
-[RESPOND]
-```
+The compact format used custom syntax like `Alice#987654: message` but has been replaced by native format for better model understanding.
 
-### Compact Format Features
+### Legacy JSON Format with Metadata Blocks (Deprecated)
 
-- **Username#UserID**: Compact identifier (last 6 digits of Telegram user_id)
-- **Reply chains**: `Bob#111222 → Alice#987654:` shows reply-to relationships
-- **Media**: `[Image]`, `[Video]`, `[Audio]` inline descriptions
-- **Bot messages**: `gryag:` (no user ID needed)
-- **End marker**: `[RESPOND]` indicates where bot should generate response
+**Status**: Deprecated (January 2025)
 
-### Token Savings
-
-Based on integration tests:
-- **JSON format**: ~57 tokens for 3-message conversation
-- **Compact format**: ~15 tokens for same conversation
-- **Savings**: 73.7% token reduction
-- **Tokens per message**: ~6 tokens (vs ~19 in JSON)
-
-### Enabling Compact Format
-
-```bash
-# In .env
-ENABLE_COMPACT_CONVERSATION_FORMAT=true
-COMPACT_FORMAT_MAX_HISTORY=50  # Can be higher due to efficiency
-```
-
-### Code References
-
-- **Formatter**: `app/services/conversation_formatter.py`
-- **Integration**: `app/services/context/multi_level_context.py::format_for_gemini_compact()`
-- **Handler**: `app/handlers/chat.py` (feature flag branching)
-- **Tests**: `tests/integration/test_compact_format.py`
-
-### Trade-offs
-
-**Advantages**:
-- 70-80% token reduction
-- 3-4x more conversation history in same budget
-- Human-readable (easier debugging)
-- Faster processing (no JSON overhead)
-
-**Disadvantages**:
-- Loss of structured metadata (chat_id, message_id, timestamps)
-- Media requires text descriptions (actual media still sent for analysis)
-- Less precise context (no exact timestamps)
+The legacy format included `[meta]` blocks in every message part. This has been replaced by native format with metadata in system instructions.
 
 ### Implementation Plan
 

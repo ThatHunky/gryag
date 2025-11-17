@@ -390,9 +390,11 @@ class Settings(BaseSettings):
     )  # How many top results to fetch and analyze
 
     # Compact Conversation Format (Phase 6 - October 2025)
+    # Default: True (enabled) - provides 70-80% token savings vs JSON format
+    # Set ENABLE_COMPACT_CONVERSATION_FORMAT=false to use legacy JSON format
     enable_compact_conversation_format: bool = Field(
-        False, alias="ENABLE_COMPACT_CONVERSATION_FORMAT"
-    )  # Use plain text format instead of JSON (70-80% token savings)
+        True, alias="ENABLE_COMPACT_CONVERSATION_FORMAT"
+    )  # Use plain text format instead of JSON (70-80% token savings, now default)
     compact_format_max_history: int = Field(
         50, alias="COMPACT_FORMAT_MAX_HISTORY", ge=10, le=100
     )  # More messages due to efficiency

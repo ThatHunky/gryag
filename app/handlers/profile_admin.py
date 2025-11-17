@@ -818,6 +818,10 @@ async def remove_fact_command(
 
     Usage:
         /gryagremovefact 123 - Remove fact with ID 123
+    
+    ⚠️ DEPRECATED: This command is deprecated. Use the `forget_memory` tool instead.
+    The model can now handle memory deletion autonomously via function calling.
+    This command will be removed in a future version.
     """
     # Block banned users silently
     if await _check_banned(message, store, settings):
@@ -829,6 +833,16 @@ async def remove_fact_command(
         if admin_msg:
             await message.reply(admin_msg)
         return
+    
+    # Deprecation warning
+    deprecation_msg = (
+        "⚠️ <b>Ця команда застаріла</b>\n\n"
+        "Команда <code>/gryagremovefact</code> застаріла. "
+        "Використовуй інструмент <code>forget_memory</code> через модель бота. "
+        "Просто попроси бота забути конкретну пам'ять, і він зробить це автоматично.\n\n"
+        "Ця команда буде видалена в майбутній версії."
+    )
+    await message.reply(deprecation_msg, parse_mode="HTML")
 
 
 @router.message(Command(commands=["gryagforget", "forget"]))
@@ -846,6 +860,10 @@ async def forget_user_command(
         /gryagforget (reply) - Forget all facts about replied user
         /gryagforget @username - Forget facts about @username
         /gryagforgetconfirm - Confirm deletion
+    
+    ⚠️ DEPRECATED: This command is deprecated. Use the `forget_all_memories` tool instead.
+    The model can now handle memory deletion autonomously via function calling.
+    This command will be removed in a future version.
     """
     # Block banned users silently
     if await _check_banned(message, store, settings):
@@ -857,6 +875,16 @@ async def forget_user_command(
         if admin_msg:
             await message.reply(admin_msg)
         return
+    
+    # Deprecation warning
+    deprecation_msg = (
+        "⚠️ <b>Ця команда застаріла</b>\n\n"
+        "Команда <code>/gryagforget</code> застаріла. "
+        "Використовуй інструмент <code>forget_all_memories</code> через модель бота. "
+        "Просто попроси бота забути все про користувача, і він зробить це автоматично.\n\n"
+        "Ця команда буде видалена в майбутній версії."
+    )
+    await message.reply(deprecation_msg, parse_mode="HTML")
 
 
 @router.message(Command(commands=["gryagexport", "export"]))

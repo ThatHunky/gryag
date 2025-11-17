@@ -1373,56 +1373,15 @@ class MultiLevelContextManager:
 
     def format_for_gemini(self, context: LayeredContext) -> dict[str, Any]:
         """
-        Format layered context for Gemini API.
-
-        Returns dict with history and system_context.
+        Format layered context for Gemini API using native format.
+        
+        This method now delegates to format_for_gemini_native() to ensure
+        all code paths use the native Gemini format (no [meta] blocks).
+        
+        Returns dict with history (clean native format) and system_context (markdown).
         """
-        # Immediate + Recent become conversation history
-        history = []
-
-        if context.immediate:
-            history.extend(context.immediate.messages)
-
-        if context.recent:
-            history.extend(context.recent.messages)
-
-        # Limit media/images to prevent Gemini API errors
-        # Use configured max (default 28 for Gemma models with 32 limit)
-        max_media = getattr(self.settings, "gemini_max_media_items", 28)
-        history = self._limit_media_in_history(history, max_media)
-
-        # Relevant, Background, Episodes become system context
-        system_parts = []
-
-        if context.background and context.background.profile_summary:
-            system_parts.append(
-                f"User Profile: {self._sanitize_text(context.background.profile_summary)}"
-            )
-
-        if context.relevant and context.relevant.snippets:
-            relevant_texts = []
-            for s in context.relevant.snippets[:5]:
-                txt = s.get("text", "")
-                txt = self._sanitize_text(txt[:200])
-                score = s.get("score", 0.0)
-                relevant_texts.append(f"[Relevance: {score:.2f}] {txt}...")
-            system_parts.append("Relevant Past Context:\n" + "\n".join(relevant_texts))
-
-        if context.episodes and context.episodes.episodes:
-            episode_texts = []
-            for ep in context.episodes.episodes:
-                topic = self._sanitize_text(str(ep.get("topic", "")))
-                summary = self._sanitize_text(ep.get("summary", "")[:150])
-                episode_texts.append(f"[{topic}] {summary}...")
-            system_parts.append("Memorable Events:\n" + "\n".join(episode_texts))
-
-        system_context = "\n\n".join(system_parts) if system_parts else None
-
-        return {
-            "history": history,
-            "system_context": system_context,
-            "token_count": context.total_tokens,
-        }
+        # Use native format (delegates to format_for_gemini_native)
+        return self.format_for_gemini_native(context)
 
     def format_for_gemini_compact(self, context: LayeredContext) -> dict[str, Any]:
         """
@@ -1513,4 +1472,136 @@ class MultiLevelContextManager:
             "system_context": system_context,
             "historical_media": historical_media,
             "token_count": token_count,
+        }
+
+    def _strip_meta_blocks(self, parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """
+        Remove [meta] blocks from message parts, keeping only text and media.
+        
+        Returns clean parts list with [meta] blocks filtered out.
+        """
+        import re
+        
+        cleaned_parts = []
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+                
+            # Keep media parts as-is
+            if "inline_data" in part or "file_data" in part:
+                cleaned_parts.append(part)
+                continue
+            
+            # Process text parts - remove [meta] blocks
+            if "text" in part:
+                text = part.get("text", "")
+                # Remove [meta] blocks (lines starting with [meta] or containing [meta] at start)
+                # Pattern: [meta] followed by any content until end of line or newline
+                text = re.sub(r'\[meta\][^\n]*\n?', '', text, flags=re.IGNORECASE)
+                text = re.sub(r'\[meta\][^\n]*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
+                # Clean up multiple newlines that might result
+                text = re.sub(r'\n\n+', '\n\n', text).strip()
+                
+                # Only add if there's actual content left
+                if text:
+                    cleaned_parts.append({"text": text})
+        
+        return cleaned_parts
+
+    def format_for_gemini_native(self, context: LayeredContext) -> dict[str, Any]:
+        """
+        Format layered context for Gemini API using native format.
+        
+        Returns clean native format:
+        - History: list of messages with only role and parts (text/media, no [meta] blocks)
+        - System context: markdown-formatted context sections
+        - Metadata: extracted metadata for system instruction inclusion
+        
+        This is the native Gemini format - no custom syntax, just role + parts.
+        """
+        # Immediate + Recent become conversation history
+        history = []
+        
+        if context.immediate:
+            history.extend(context.immediate.messages)
+        
+        if context.recent:
+            history.extend(context.recent.messages)
+        
+        # Limit media/images to prevent Gemini API errors
+        max_media = getattr(self.settings, "gemini_max_media_items", 28)
+        history = self._limit_media_in_history(history, max_media)
+        
+        # Extract metadata from history messages for system instruction
+        # and clean history to remove [meta] blocks
+        cleaned_history = []
+        extracted_metadata = []
+        
+        for msg in history:
+            # Create clean message copy
+            clean_msg = {
+                "role": msg.get("role", "user"),
+                "parts": self._strip_meta_blocks(msg.get("parts", []))
+            }
+            
+            # Only add if there are parts left after stripping metadata
+            if clean_msg["parts"]:
+                cleaned_history.append(clean_msg)
+            
+            # Extract metadata from original message for system instruction
+            # (we'll use this later when building system instruction)
+            parts = msg.get("parts", [])
+            for part in parts:
+                if isinstance(part, dict) and "text" in part:
+                    text = part.get("text", "")
+                    if "[meta]" in text.lower():
+                        # Store metadata for system instruction inclusion
+                        extracted_metadata.append({
+                            "message_id": msg.get("message_id"),
+                            "role": msg.get("role"),
+                            "meta_text": text
+                        })
+        
+        # Format system context as markdown sections
+        system_parts = []
+        
+        if context.background and context.background.profile_summary:
+            system_parts.append(
+                f"## User Profile\n\n{self._sanitize_text(context.background.profile_summary)}"
+            )
+        
+        if context.background and context.background.key_facts:
+            facts_text = "\n".join([
+                f"- {f.get('fact_key', '')}: {f.get('fact_value', '')}"
+                for f in context.background.key_facts[:10]
+            ])
+            if facts_text:
+                system_parts.append(f"## Key Facts\n\n{facts_text}")
+        
+        if context.relevant and context.relevant.snippets:
+            relevant_texts = []
+            for s in context.relevant.snippets[:5]:
+                txt = s.get("text", "")
+                txt = self._sanitize_text(txt[:200])
+                score = s.get("score", 0.0)
+                relevant_texts.append(f"- [Relevance: {score:.2f}] {txt}...")
+            if relevant_texts:
+                system_parts.append("## Relevant Past Context\n\n" + "\n".join(relevant_texts))
+        
+        if context.episodes and context.episodes.episodes:
+            episode_texts = []
+            for ep in context.episodes.episodes:
+                topic = self._sanitize_text(str(ep.get("topic", "")))
+                summary = self._sanitize_text(ep.get("summary", "")[:150])
+                episode_texts.append(f"- **{topic}**: {summary}...")
+            if episode_texts:
+                system_parts.append("## Memorable Events\n\n" + "\n".join(episode_texts))
+        
+        system_context = "\n\n".join(system_parts) if system_parts else None
+        
+        return {
+            "history": cleaned_history,
+            "system_context": system_context,
+            "extracted_metadata": extracted_metadata,
+            "token_count": context.total_tokens,
         }

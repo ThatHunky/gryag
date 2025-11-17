@@ -2423,6 +2423,119 @@ def _format_for_telegram(text: str) -> str:
     return text
 
 
+async def _inject_user_memories(
+    system_prompt: str,
+    ctx: MessageHandlerContext,
+) -> str:
+    """
+    Inject user memories into system prompt as a separate instruction block.
+    
+    Returns the system prompt with memories appended if available.
+    """
+    if not ctx.settings.enable_tool_based_memory or not ctx.memory_repo or not ctx.user_id:
+        return system_prompt
+    
+    try:
+        memories = await ctx.memory_repo.get_memories_for_user(
+            user_id=ctx.user_id,
+            chat_id=ctx.chat_id
+        )
+        if memories:
+            user_name = (
+                ctx.message.from_user.full_name
+                if ctx.message.from_user
+                else f"User {ctx.user_id}"
+            )
+            memory_lines = [f"- {m.memory_text}" for m in memories]
+            memory_text = "\n".join(memory_lines)
+            memory_block = (
+                f"\n\n# Memories about {user_name} (ID: {ctx.user_id})\n{memory_text}"
+            )
+            system_prompt += memory_block
+            LOGGER.debug(
+                f"Injected {len(memories)} memories for user {ctx.user_id} into system prompt"
+            )
+    except Exception as e:
+        LOGGER.warning(
+            f"Failed to load memories for user {ctx.user_id}: {e}",
+            exc_info=True,
+        )
+    
+    return system_prompt
+
+
+async def _build_native_system_instruction(
+    base_persona: str,
+    timestamp_context: str,
+    ctx: MessageHandlerContext,
+    formatted_context: dict[str, Any] | None = None,
+    reply_context: dict[str, Any] | None = None,
+) -> str:
+    """
+    Build comprehensive system instruction in native markdown format.
+    
+    Structures all context as markdown sections:
+    - Persona
+    - Current time
+    - Current user context (name, ID, username)
+    - Reply context (if applicable)
+    - User memories
+    - Multi-level context (Relevant, Background, Episodic)
+    
+    Args:
+        base_persona: Base persona/system prompt
+        timestamp_context: Timestamp context string
+        ctx: Message handler context
+        formatted_context: Optional formatted context from multi-level context manager
+        reply_context: Optional reply context with excerpt and user info
+    
+    Returns:
+        Complete system instruction as markdown string
+    """
+    sections = []
+    
+    # Start with persona
+    sections.append(base_persona)
+    
+    # Add timestamp
+    sections.append(timestamp_context)
+    
+    # Add current user context
+    if ctx.message.from_user:
+        user_name = ctx.message.from_user.full_name or "Unknown"
+        user_id = ctx.message.from_user.id
+        username = ctx.message.from_user.username
+        user_section = f"## Current User\n\n"
+        user_section += f"**Name**: {user_name}\n"
+        user_section += f"**User ID**: {user_id}\n"
+        if username:
+            user_section += f"**Username**: @{username}\n"
+        sections.append(user_section)
+    
+    # Add reply context if applicable
+    if reply_context:
+        reply_section = "## Reply Context\n\n"
+        if reply_context.get("reply_to_user_id") and reply_context.get("reply_to_name"):
+            reply_section += f"**Replying to**: {reply_context['reply_to_name']} (ID: {reply_context['reply_to_user_id']})\n"
+        if reply_context.get("excerpt"):
+            excerpt = reply_context["excerpt"]
+            if len(excerpt) > 200:
+                excerpt = excerpt[:197] + "..."
+            reply_section += f"**Original message**: {excerpt}\n"
+        sections.append(reply_section)
+    
+    # Inject user memories
+    system_instruction = "\n\n".join(sections)
+    system_instruction = await _inject_user_memories(system_instruction, ctx)
+    
+    # Add multi-level context from formatted_context if available
+    if formatted_context and formatted_context.get("system_context"):
+        # The system_context is already formatted as markdown sections
+        system_instruction += "\n\n" + formatted_context["system_context"]
+    
+    return system_instruction
+
+
 def _summarize_long_context(
     history: list[dict[str, Any]], max_context: int = 30
 ) -> list[dict[str, Any]]:
@@ -3163,32 +3276,6 @@ async def _build_message_context(
             }
         )
 
-    # Add inline reply excerpt if enabled and available (after metadata)
-    if ctx.settings.include_reply_excerpt and reply_context:
-        reply_text = reply_context.get("text") or reply_context.get("excerpt")
-        if reply_text:
-            # Truncate to configured max
-            max_chars = ctx.settings.reply_excerpt_max_chars
-            excerpt = reply_text[:max_chars]
-            if len(reply_text) > max_chars:
-                excerpt = excerpt + "..."
-
-            # Build inline snippet with username if available
-            reply_username = reply_context.get("name") or reply_context.get("username")
-            if reply_username:
-                inline_reply = f"[↩︎ Відповідь на {reply_username}: {excerpt}]"
-            else:
-                inline_reply = f"[↩︎ Відповідь на: {excerpt}]"
-
-            # Insert after metadata (which is at index 0)
-            user_parts.insert(1, {"text": inline_reply})
-
-            telemetry.increment_counter("context.reply_included_text")
-            LOGGER.debug(
-                "Added inline reply excerpt to user parts (first %d chars)",
-                len(excerpt),
-            )
-
     # Always prepend speaker header and metadata for Gemini context
     speaker_header = format_speaker_header(
         role="user",
@@ -3205,6 +3292,41 @@ async def _build_message_context(
         prefix_parts.append({"text": metadata_block})
     if prefix_parts:
         user_parts[0:0] = prefix_parts
+
+    # Add inline reply excerpt if enabled and available (after metadata)
+    # Insert as first user content text part (after metadata blocks)
+    if ctx.settings.include_reply_excerpt and reply_context:
+        reply_text = reply_context.get("text") or reply_context.get("excerpt")
+        if reply_text:
+            # Truncate to configured max
+            max_chars = ctx.settings.reply_excerpt_max_chars
+            excerpt = reply_text[:max_chars]
+            if len(reply_text) > max_chars:
+                excerpt = excerpt + "..."
+
+            # Build inline snippet with username if available
+            reply_username = reply_context.get("name") or reply_context.get("username")
+            if reply_username:
+                inline_reply = f"[↩︎ Відповідь на {reply_username}: {excerpt}]"
+            else:
+                inline_reply = f"[↩︎ Відповідь на: {excerpt}]"
+
+            # Insert reply excerpt as first user content text part (after metadata blocks)
+            # Find first text part after metadata or insert right after metadata if no text parts
+            insert_idx = len(prefix_parts)  # Start after metadata blocks
+            for i, part in enumerate(user_parts[insert_idx:], start=insert_idx):
+                if isinstance(part, dict) and "text" in part:
+                    # Insert before the first text part to make reply excerpt the first user content
+                    insert_idx = i
+                    break
+            # If no text parts found, insert_idx remains at len(prefix_parts) (right after metadata)
+            user_parts.insert(insert_idx, {"text": inline_reply})
+
+            telemetry.increment_counter("context.reply_included_text")
+            LOGGER.debug(
+                "Added inline reply excerpt to user parts (first %d chars)",
+                len(excerpt),
+            )
 
     text_content = raw_text or media_summary or fallback_text or ""
 
@@ -3346,690 +3468,246 @@ async def _build_message_context(
     # If we have profile context, inject it into the system prompt
     system_prompt_with_profile = base_system_prompt + timestamp_context
 
-    # Format context for Gemini
+    # Inject user memories as system instructions (if tool-based memory is enabled)
+    system_prompt_with_profile = await _inject_user_memories(
+        system_prompt_with_profile, ctx
+    )
+
+    # Format context for Gemini using native format
     if use_multi_level and context_manager and context_assembly:
-        # Check if compact format is enabled
-        if (
-            ctx.settings.enable_compact_conversation_format
-            and not use_system_context_block
-        ):
-            # Phase 2: Filter current message from context before formatting
-            # Filter from immediate and recent messages
-            if context_assembly.immediate:
-                context_assembly.immediate.messages = _filter_current_message_from_history(
-                    context_assembly.immediate.messages, ctx.message.message_id
-                )
-            if context_assembly.recent:
-                context_assembly.recent.messages = _filter_current_message_from_history(
-                    context_assembly.recent.messages, ctx.message.message_id
-                )
-
-            # Use compact plain text format (70-80% token savings)
-            formatted_context = context_manager.format_for_gemini_compact(
-                context_assembly
+        # Always use native format - no custom syntax, just role + parts
+        # Filter current message from context before formatting
+        if context_assembly.immediate:
+            context_assembly.immediate.messages = _filter_current_message_from_history(
+                context_assembly.immediate.messages, ctx.message.message_id
+            )
+        if context_assembly.recent:
+            context_assembly.recent.messages = _filter_current_message_from_history(
+                context_assembly.recent.messages, ctx.message.message_id
             )
 
-            # In compact format, conversation goes in user_parts, not history
-            conversation_text = formatted_context["conversation_text"]
-            history = []  # No separate history, all in current message
+        # Use native format (clean role + parts, no [meta] blocks)
+        formatted_context = context_manager.format_for_gemini_native(
+            context_assembly
+        )
+        history = formatted_context["history"]
 
-            # Append multi-level system context
-            if formatted_context.get("system_context"):
-                system_prompt_with_profile = (
-                    base_system_prompt
-                    + timestamp_context
-                    + "\n\n"
-                    + formatted_context["system_context"]
-                )
-
-            # Replace user_parts with compact conversation text
-            # Add current message to conversation text
-            current_message_line = ""
-            if raw_text or media_summary:
-                from app.services.conversation_formatter import format_message_compact
-
-                current_username = (
-                    ctx.message.from_user.full_name if ctx.message.from_user else "User"
-                )
-                current_user_id = (
-                    ctx.message.from_user.id if ctx.message.from_user else None
-                )
-
-                # Extract reply information for compact format
-                reply_to_user_id = None
-                reply_to_username = None
-                reply_excerpt = None
-
-                if ctx.settings.include_reply_excerpt and ctx.message.reply_to_message:
-                    reply_to_msg = ctx.message.reply_to_message
-                    if reply_to_msg.from_user:
-                        reply_to_user_id = reply_to_msg.from_user.id
-                        reply_to_username = reply_to_msg.from_user.full_name
-
-                    # Get excerpt from reply context or extract directly
-                    if reply_context and reply_context.get("excerpt"):
-                        reply_excerpt = reply_context["excerpt"]
-                    else:
-                        reply_text = _extract_text(reply_to_msg)
-                        if reply_text:
-                            max_chars = min(
-                                ctx.settings.reply_excerpt_max_chars, 160
-                            )  # Compact format uses shorter excerpts
-                            reply_excerpt = reply_text[:max_chars]
-                            if len(reply_text) > max_chars:
-                                reply_excerpt = reply_excerpt + "..."
-
-                current_message_line = format_message_compact(
-                    user_id=current_user_id,
-                    username=current_username,
-                    text=raw_text or media_summary or "",
-                    media_description=(media_summary or "") if media_parts else "",
-                    reply_to_user_id=reply_to_user_id,
-                    reply_to_username=reply_to_username,
-                    reply_excerpt=reply_excerpt,
-                )
-
-            # Combine conversation history with current message
-            if conversation_text and current_message_line:
-                full_conversation = (
-                    f"{conversation_text}\n{current_message_line}\n[RESPOND]"
-                )
-            elif current_message_line:
-                full_conversation = f"{current_message_line}\n[RESPOND]"
-            else:
-                full_conversation = conversation_text or "[RESPOND]"
-            
-            # Add media error messages if any
-            if media_error_messages:
-                error_text = "\n".join(media_error_messages)
-                full_conversation = f"{full_conversation}\n{error_text}"
-
-            user_parts = [{"text": full_conversation}]
-
-            # Add media with priority: current message first, then reply media, then historical
-            max_media_total = (
-                ctx.settings.gemini_max_media_items
-            )  # Default 28 (Gemini API limit)
-            # Strict behavior: do not include historical media in compact mode;
-            # rely on text markers for awareness and only process media for current/replied messages
-            max_historical = 0
-            max_videos = ctx.settings.gemini_max_video_items  # Default 1
-
-            all_media = []
-            video_count = 0
-            video_descriptions = []  # Collect descriptions for videos we skip
-
-            # Priority 1: Current message media (highest priority)
-            if media_parts:
-                for media_item in media_parts:
-                    mime = _extract_mime_from_media_item(media_item)
-                    is_video = mime.startswith("video/")
-
-                    if is_video and video_count >= max_videos:
-                        # Skip this video but try to get description from history
-                        LOGGER.debug(
-                            f"Skipping video (limit {max_videos} reached): {mime}"
-                        )
-                        continue
-
-                    all_media.append(media_item)
-                    if is_video:
-                        video_count += 1
-
-            # Priority 2: Reply message media (if replying to older message not in context)
-            reply_media_parts = []
-            # Check both reply_context_for_history and reply_media_parts_for_block for reply media
-            # This ensures media is included even if reply_context_for_history wasn't set due to include_reply_excerpt=False
-            reply_media_source = None
-            if reply_context_for_history and reply_context_for_history.get("media_parts"):
-                reply_media_source = reply_context_for_history["media_parts"]
-            elif reply_media_parts_for_block:
-                # Fallback: use reply_media_parts_for_block if reply_context_for_history doesn't have media
-                reply_media_source = reply_media_parts_for_block
-                LOGGER.debug(
-                    "Using reply_media_parts_for_block as fallback for compact format (reply_context_for_history has no media)"
-                )
-            
-            if reply_media_source:
-                # Phase 1: Check if reply message is already in historical_media
-                # Get reply_msg_id from reply_context_for_history if available, otherwise from reply_context
-                reply_msg_id = None
-                if reply_context_for_history:
-                    reply_msg_id = reply_context_for_history.get("message_id")
-                elif reply_context:
-                    reply_msg_id = reply_context.get("message_id")
-                historical_media = formatted_context.get("historical_media", [])
-
-                # Check if reply message is in historical context by checking message IDs
-                reply_media_in_history = False
-                if reply_msg_id:
-                    # Check if reply message appears in immediate or recent context
-                    if context_assembly:
-                        for msg in context_assembly.immediate.messages:
-                            msg_id = _extract_message_id_from_history(msg)
-                            if msg_id == reply_msg_id:
-                                reply_media_in_history = True
-                                LOGGER.debug(
-                                    "Reply message %s found in immediate context, skipping reply media",
-                                    reply_msg_id,
-                                )
-                                break
-                        if not reply_media_in_history and context_assembly.recent:
-                            for msg in context_assembly.recent.messages:
-                                msg_id = _extract_message_id_from_history(msg)
-                                if msg_id == reply_msg_id:
-                                    reply_media_in_history = True
-                                    LOGGER.debug(
-                                        "Reply message %s found in recent context, skipping reply media",
-                                        reply_msg_id,
-                                    )
-                                    break
-
-                if not reply_media_in_history:
-                    # Validate media format before processing
-                    valid_reply_media = []
-                    invalid_count = 0
-                    for media_item in reply_media_source:
-                        if not isinstance(media_item, dict):
-                            invalid_count += 1
-                            LOGGER.warning(
-                                "Invalid reply media item in compact format (not a dict): %s", type(media_item)
-                            )
-                            continue
-                        if "inline_data" not in media_item and "file_data" not in media_item:
-                            invalid_count += 1
-                            LOGGER.warning(
-                                "Invalid reply media item in compact format (missing inline_data or file_data): %s",
-                                list(media_item.keys()),
-                            )
-                            continue
-                        valid_reply_media.append(media_item)
-                    
-                    if invalid_count > 0:
-                        telemetry.increment_counter("context.reply_media_invalid", invalid_count)
-                        LOGGER.warning(
-                            "Filtered out %d invalid reply media item(s) in compact format", invalid_count
-                        )
-                    
-                    if not valid_reply_media:
-                        LOGGER.warning(
-                            "No valid reply media items to add in compact format after validation (message_id=%s)",
-                            reply_msg_id,
-                        )
-                    else:
-                        reply_media_parts = valid_reply_media
-                        LOGGER.debug(
-                            "Reply message %s not in historical context, including reply media (%d items, %d valid)",
-                            reply_msg_id,
-                            len(reply_media_source),
-                            len(reply_media_parts),
-                        )
-                        added_count = 0
-                        for media_item in reply_media_parts:
-                            mime = _extract_mime_from_media_item(media_item)
-                            is_video = mime.startswith("video/")
-
-                            if is_video and video_count >= max_videos:
-                                # Skip this video but try to get description
-                                if reply_msg_id:
-                                    description = await _get_video_description_from_history(
-                                        store=ctx.store,
-                                        chat_id=ctx.chat_id,
-                                        thread_id=ctx.thread_id,
-                                        message_id=reply_msg_id,
-                                    )
-                                    if description:
-                                        video_descriptions.append(
-                                            f"[Раніше про відео в повідомленні {reply_msg_id}]: {description[:200]}"
-                                        )
-                                    LOGGER.debug(
-                                        f"Skipping reply video (limit {max_videos} reached), description: {bool(description)}"
-                                    )
-                                continue
-
-                            all_media.append(media_item)
-                            added_count += 1
-                            if is_video:
-                                video_count += 1
-
-                        LOGGER.debug(
-                            "Added %d media items from replied message (message_id=%s), videos: %d",
-                            added_count,
-                            reply_msg_id,
-                            video_count,
-                        )
-                        if added_count == 0:
-                            LOGGER.warning(
-                                "No reply media items were added in compact format (all filtered or skipped)"
-                            )
-
-            # Priority 3: Historical media from context (limited to max_historical)
-            historical_media = formatted_context.get("historical_media", [])
-            if not use_system_context_block and historical_media and max_historical > 0:
-                remaining_slots = min(
-                    max_media_total - len(all_media),  # Don't exceed total limit
-                    max_historical,  # Don't exceed historical limit
-                )
-                if remaining_slots > 0:
-                    # Add historical media up to remaining slots, respecting video limit
-                    historical_kept = 0
-                    for media_item in historical_media[:remaining_slots]:
-                        mime = _extract_mime_from_media_item(media_item)
-                        is_video = mime.startswith("video/")
-
-                        if is_video and video_count >= max_videos:
-                            # Skip this video - no description available for historical media
-                            # (we don't track message_id in historical_media)
-                            LOGGER.debug(
-                                f"Skipping historical video (limit {max_videos} reached)"
-                            )
-                            continue
-
-                        all_media.append(media_item)
-                        historical_kept += 1
-                        if is_video:
-                            video_count += 1
-
-                    # Telemetry: Track historical media usage
-                    if historical_kept > 0:
-                        telemetry.increment_counter(
-                            "context.historical_media_included", historical_kept
-                        )
-
-                    historical_dropped = len(historical_media) - historical_kept
-                    if historical_dropped > 0:
-                        telemetry.increment_counter(
-                            "context.historical_media_dropped", historical_dropped
-                        )
-                        LOGGER.debug(
-                            "Historical media: %d kept, %d dropped (video_limit: %d, historical_limit: %d, total_limit: %d)",
-                            historical_kept,
-                            historical_dropped,
-                            max_videos,
-                            max_historical,
-                            max_media_total,
-                        )
-                else:
-                    # No room for historical media
-                    telemetry.increment_counter(
-                        "context.historical_media_dropped", len(historical_media)
-                    )
-            elif (
-                not use_system_context_block
-                and historical_media
-                and max_historical == 0
-            ):
-                # Historical media disabled via config
-                telemetry.increment_counter(
-                    "context.historical_media_dropped", len(historical_media)
-                )
-                LOGGER.debug(
-                    "Historical media disabled (GEMINI_MAX_MEDIA_ITEMS_HISTORICAL=0), dropped %d items",
-                    len(historical_media),
-                )
-
-            # Add video descriptions to conversation text if we skipped any
-            if video_descriptions:
-                conversation_with_descriptions = (
-                    full_conversation + "\n\n" + "\n".join(video_descriptions)
-                )
-                user_parts[0] = {"text": conversation_with_descriptions}
-                LOGGER.debug(
-                    f"Added {len(video_descriptions)} video descriptions to conversation"
-                )
-
-            # Phase 3: Deduplicate media by content before adding to user_parts
-            if all_media:
-                media_count_before_dedup = len(all_media)
-                all_media = _deduplicate_media_by_content(all_media, logger=LOGGER)
-                media_count_after_dedup = len(all_media)
-                if media_count_before_dedup != media_count_after_dedup:
-                    LOGGER.info(
-                        "Compact format: Deduplicated media before adding to user_parts "
-                        "(before: %d, after: %d, removed: %d)",
-                        media_count_before_dedup,
-                        media_count_after_dedup,
-                        media_count_before_dedup - media_count_after_dedup,
-                    )
-                user_parts.extend(all_media[:max_media_total])
-
-                if len(all_media) > max_media_total:
-                    telemetry.increment_counter("context.media_limit_exceeded")
-                    LOGGER.warning(
-                        "Media limit exceeded: %d items, kept first %d (current: %d, reply: %d, historical: %d, videos: %d)",
-                        len(all_media),
-                        max_media_total,
-                        len(media_parts) if media_parts else 0,
-                        len(reply_media_parts),
-                        len(
-                            [
-                                m
-                                for m in all_media
-                                if _extract_mime_from_media_item(m).startswith("video/")
-                            ]
-                        ),
-                        video_count,
-                    )
-
-            LOGGER.debug(
-                "Using compact conversation format for Gemini",
-                extra={
-                    "conversation_lines": len(full_conversation.split("\n")),
-                    "system_context_length": (
-                        len(formatted_context.get("system_context") or "")
-                    ),
-                    "estimated_tokens": formatted_context.get("token_count", 0),
-                },
-            )
-        else:
-            # Use traditional JSON format
-            formatted_context = context_manager.format_for_gemini(context_assembly)
-            history = formatted_context["history"]
-
-            # Phase 2: Filter current message from history to prevent duplication
-            history = _filter_current_message_from_history(
-                history, ctx.message.message_id
-            )
-
-            # Append multi-level system context
-            if formatted_context.get("system_context"):
-                system_prompt_with_profile = (
-                    base_system_prompt
-                    + timestamp_context
-                    + "\n\n"
-                    + formatted_context["system_context"]
-                )
-
-            LOGGER.debug(
-                "Using multi-level context for Gemini",
-                extra={
-                    "history_length": len(history),
-                    "system_context_length": (
-                        len(formatted_context.get("system_context") or "")
-                    ),
-                    "total_tokens": formatted_context.get("token_count", 0),
-                },
-            )
-    elif profile_context:
-        # Fallback: Simple history + profile context
-        system_prompt_with_profile = (
-            base_system_prompt + timestamp_context + profile_context
+        # Build comprehensive system instruction with all context
+        reply_context_dict = None
+        if reply_context:
+            reply_context_dict = {
+                "reply_to_user_id": reply_context.get("user_id"),
+                "reply_to_name": reply_context.get("name"),
+                "excerpt": reply_context.get("excerpt"),
+            }
+        
+        system_prompt_with_profile = await _build_native_system_instruction(
+            base_persona=base_system_prompt,
+            timestamp_context=timestamp_context,
+            ctx=ctx,
+            formatted_context=formatted_context,
+            reply_context=reply_context_dict,
         )
 
-    # JSON format path: strip media from history and add reply media to user_parts instead
-    if (not ctx.settings.enable_compact_conversation_format) and history:
-        try:
-            new_history: list[dict[str, Any]] = []
-            removed_media_count = 0
-            for msg in history:
-                parts = msg.get("parts", [])
-                new_parts: list[dict[str, Any]] = []
-                for part in parts:
-                    if isinstance(part, dict) and (
-                        ("inline_data" in part) or ("file_data" in part)
-                    ):
-                        # Drop historical media to save tokens; awareness preserved via text content
-                        removed_media_count += 1
-                        continue
-                    new_parts.append(part)
-                if new_parts:
-                    new_history.append({**msg, "parts": new_parts})
-                else:
-                    # Keep a tiny placeholder to avoid empty message
-                    new_history.append({**msg, "parts": [{"text": "[media omitted]"}]})
-
-            if removed_media_count > 0:
-                telemetry.increment_counter(
-                    "context.historical_media_dropped", removed_media_count
-                )
-                LOGGER.debug(
-                    "Stripped %d media item(s) from JSON history to enforce reply-only media",
-                    removed_media_count,
-                )
-            history = new_history
-        except Exception:
-            LOGGER.exception(
-                "Failed to strip media from history; proceeding with original history"
-            )
-
-    # Inject reply context with media into history if needed
-    # This ensures media from replied-to messages is visible even if outside context window
-    if reply_context_for_history:
-        reply_msg_id = reply_context_for_history.get("message_id")
-        # Check if this message is already in history
-        message_in_history = False
-        if reply_msg_id:
-            for hist_msg in history:
-                parts = hist_msg.get("parts", [])
-                for part in parts:
-                    if isinstance(part, dict) and "text" in part:
-                        text = part["text"]
-                        if f"message_id={reply_msg_id}" in text:
-                            message_in_history = True
-                            break
-                if message_in_history:
-                    break
-
-        # If not in history, inject it
-        if not message_in_history:
-            reply_parts: list[dict[str, Any]] = []
-
-            # Add metadata if available
-            reply_meta = {
-                "chat_id": ctx.chat_id,
-                "message_id": reply_msg_id,
+        LOGGER.debug(
+            "Using native format for Gemini",
+            extra={
+                "history_length": len(history),
+                "system_context_length": (
+                    len(formatted_context.get("system_context") or "")
+                ),
+                "total_tokens": formatted_context.get("token_count", 0),
+            },
+        )
+    elif profile_context:
+        # Fallback: Simple history + profile context
+        # Build system instruction using native format builder
+        reply_context_dict = None
+        if reply_context:
+            reply_context_dict = {
+                "reply_to_user_id": reply_context.get("user_id"),
+                "reply_to_name": reply_context.get("name"),
+                "excerpt": reply_context.get("excerpt"),
             }
-            if reply_context_for_history.get("user_id"):
-                reply_meta["user_id"] = reply_context_for_history["user_id"]
-            if reply_context_for_history.get("name"):
-                reply_meta["name"] = reply_context_for_history["name"]
-            if reply_context_for_history.get("username"):
-                reply_meta["username"] = reply_context_for_history["username"]
-            if reply_context_for_history.get("is_bot") is not None:
-                reply_meta["is_bot"] = reply_context_for_history["is_bot"]
+        
+        # Add profile context to formatted_context for system instruction
+        formatted_context_fallback = {
+            "system_context": profile_context
+        }
+        
+        system_prompt_with_profile = await _build_native_system_instruction(
+            base_persona=base_system_prompt,
+            timestamp_context=timestamp_context,
+            ctx=ctx,
+            formatted_context=formatted_context_fallback,
+            reply_context=reply_context_dict,
+        )
 
-            reply_header = format_speaker_header(
-                role=reply_context_for_history.get("role") or "user",
-                sender_id=reply_meta.get("user_id"),
-                name=reply_meta.get("name"),
-                username=reply_meta.get("username"),
-                is_bot=reply_meta.get("is_bot"),
-            )
-            if reply_header:
-                reply_parts.append({"text": reply_header})
-
-            meta_block = format_metadata(reply_meta)
-            if meta_block:
-                reply_parts.append({"text": meta_block})
-
-            # Add text if available
-            if reply_context_for_history.get("text"):
-                reply_parts.append({"text": reply_context_for_history["text"]})
-
-            # Do NOT add media parts to history in JSON mode; reply media will be attached to user_parts below
-
-            # Determine correct role: if replying to a bot message, use "model"/"assistant", otherwise "user"
-            reply_is_bot = reply_context_for_history.get("is_bot")
-            if reply_is_bot:
-                # This is a bot message, use "model" role (Gemini convention)
-                reply_role = "model"
-            else:
-                # This is a user message
-                reply_role = "user"
-
-            # Insert at beginning of history (chronologically first)
-            if reply_parts:
-                history.insert(0, {"role": reply_role, "parts": reply_parts})
-
-                # Track telemetry
-                if reply_context_for_history.get("media_parts"):
-                    telemetry.increment_counter("context.reply_included_media")
-
-                LOGGER.debug(
-                    "Injected reply context text/meta into history for message %s",
-                    reply_msg_id,
-                )
-
-    # In JSON mode, attach reply media directly to user_parts (respecting total media cap)
-    # Check both reply_context_for_history and reply_media_parts_for_block to ensure media is included
-    if not ctx.settings.enable_compact_conversation_format:
+    # Native format: history is already clean (no [meta] blocks), keep media in history
+    # Current message is sent as native user role with parts (no metadata blocks)
+    # Reply context is included in system instruction, not in history
+    
+    # Note: In native format, we keep media in history and don't inject reply context with metadata
+    # Reply context is handled via system instruction (see _build_native_system_instruction)
+    
+    # Native format: attach reply media to user_parts if needed (reply context is in system instruction)
+    # Check both reply_context_for_history and reply_media_parts_for_block for reply media
+    reply_media = []
+    if reply_context_for_history and reply_context_for_history.get("media_parts"):
+        reply_media = reply_context_for_history.get("media_parts")
+    elif reply_media_parts_for_block:
+        reply_media = reply_media_parts_for_block
+        LOGGER.debug(
+            "Using reply_media_parts_for_block (reply_context_for_history has no media)"
+        )
+    
+    if reply_media:
         try:
-            # Get reply media from either source
-            reply_media = []
-            if reply_context_for_history and reply_context_for_history.get("media_parts"):
-                reply_media = reply_context_for_history.get("media_parts")
-            elif reply_media_parts_for_block:
-                reply_media = reply_media_parts_for_block
-                LOGGER.debug(
-                    "Using reply_media_parts_for_block for JSON format (reply_context_for_history has no media)"
+            # Validate media format before processing
+            valid_reply_media = []
+            invalid_count = 0
+            for media_item in reply_media:
+                if not isinstance(media_item, dict):
+                    invalid_count += 1
+                    LOGGER.warning(
+                        "Invalid reply media item (not a dict): %s", type(media_item)
+                    )
+                    continue
+                if "inline_data" not in media_item and "file_data" not in media_item:
+                    invalid_count += 1
+                    LOGGER.warning(
+                        "Invalid reply media item (missing inline_data or file_data): %s",
+                        list(media_item.keys()),
+                    )
+                    continue
+                valid_reply_media.append(media_item)
+            
+            if invalid_count > 0:
+                telemetry.increment_counter("context.reply_media_invalid", invalid_count)
+                LOGGER.warning(
+                    "Filtered out %d invalid reply media item(s)", invalid_count
                 )
             
-            if reply_media:
-                # Validate media format before processing
-                valid_reply_media = []
-                invalid_count = 0
-                for media_item in reply_media:
-                    if not isinstance(media_item, dict):
-                        invalid_count += 1
-                        LOGGER.warning(
-                            "Invalid reply media item (not a dict): %s", type(media_item)
+            if not valid_reply_media:
+                LOGGER.warning(
+                    "No valid reply media items to add after validation"
+                )
+            else:
+                # Count media already in user_parts
+                current_media_count = sum(
+                    1
+                    for p in user_parts
+                    if isinstance(p, dict) and ("inline_data" in p or "file_data" in p)
+                )
+                max_total = ctx.settings.gemini_max_media_items
+                remaining = max(0, max_total - current_media_count)
+                if remaining > 0:
+                    # Phase 4: Deduplicate reply media before adding
+                    reply_media_count_before_dedup = len(valid_reply_media)
+                    valid_reply_media = _deduplicate_media_by_content(valid_reply_media, logger=LOGGER)
+                    reply_media_count_after_dedup = len(valid_reply_media)
+                    if reply_media_count_before_dedup != reply_media_count_after_dedup:
+                        LOGGER.info(
+                            "Native format: Deduplicated reply media (before: %d, after: %d, removed: %d)",
+                            reply_media_count_before_dedup,
+                            reply_media_count_after_dedup,
+                            reply_media_count_before_dedup - reply_media_count_after_dedup,
                         )
-                        continue
-                    if "inline_data" not in media_item and "file_data" not in media_item:
-                        invalid_count += 1
-                        LOGGER.warning(
-                            "Invalid reply media item (missing inline_data or file_data): %s",
-                            list(media_item.keys()),
-                        )
-                        continue
-                    valid_reply_media.append(media_item)
-                
-                if invalid_count > 0:
-                    telemetry.increment_counter("context.reply_media_invalid", invalid_count)
-                    LOGGER.warning(
-                        "Filtered out %d invalid reply media item(s)", invalid_count
-                    )
-                
-                if not valid_reply_media:
-                    LOGGER.warning(
-                        "No valid reply media items to add after validation"
-                    )
-                else:
-                    # Count media already in user_parts
-                    current_media_count = sum(
-                        1
-                        for p in user_parts
-                        if isinstance(p, dict) and ("inline_data" in p or "file_data" in p)
-                    )
-                    max_total = ctx.settings.gemini_max_media_items
-                    remaining = max(0, max_total - current_media_count)
-                    if remaining > 0:
-                        # Phase 4: Deduplicate reply media before adding
-                        reply_media_count_before_dedup = len(valid_reply_media)
-                        valid_reply_media = _deduplicate_media_by_content(valid_reply_media, logger=LOGGER)
-                        reply_media_count_after_dedup = len(valid_reply_media)
-                        if reply_media_count_before_dedup != reply_media_count_after_dedup:
-                            LOGGER.info(
-                                "JSON format: Deduplicated reply media (before: %d, after: %d, removed: %d)",
-                                reply_media_count_before_dedup,
-                                reply_media_count_after_dedup,
-                                reply_media_count_before_dedup - reply_media_count_after_dedup,
-                            )
-                        # Also check against current message media using same key generation as deduplication
-                        current_media_keys = set()
-                        for p in user_parts:
-                            if isinstance(p, dict):
-                                if "inline_data" in p:
-                                    data = p["inline_data"].get("data", "")
-                                    mime_type = p["inline_data"].get("mime_type", "")
-                                    if data:
-                                        try:
-                                            # Use same hash-based key as deduplication function
-                                            data_hash = hashlib.sha256(data.encode("ascii")).hexdigest()[:32]
-                                            current_media_keys.add(f"inline_{mime_type}_{data_hash}")
-                                        except Exception:
-                                            # Fallback to prefix if hash fails
-                                            current_media_keys.add(f"inline_{mime_type}_{data[:200]}")
-                                elif "file_data" in p:
-                                    file_uri = p["file_data"].get("file_uri", "")
-                                    if file_uri:
-                                        current_media_keys.add(f"file_{file_uri}")
-                        # Filter out any reply media that matches current media
-                        filtered_reply_media = []
-                        duplicate_count = 0
-                        for media_item in valid_reply_media:
-                            key: str | None = None
-                            if "inline_data" in media_item:
-                                data = media_item["inline_data"].get("data", "")
-                                mime_type = media_item["inline_data"].get("mime_type", "")
+                    # Also check against current message media using same key generation as deduplication
+                    current_media_keys = set()
+                    for p in user_parts:
+                        if isinstance(p, dict):
+                            if "inline_data" in p:
+                                data = p["inline_data"].get("data", "")
+                                mime_type = p["inline_data"].get("mime_type", "")
                                 if data:
                                     try:
                                         # Use same hash-based key as deduplication function
                                         data_hash = hashlib.sha256(data.encode("ascii")).hexdigest()[:32]
-                                        key = f"inline_{mime_type}_{data_hash}"
+                                        current_media_keys.add(f"inline_{mime_type}_{data_hash}")
                                     except Exception:
                                         # Fallback to prefix if hash fails
-                                        key = f"inline_{mime_type}_{data[:200]}"
-                            elif "file_data" in media_item:
-                                file_uri = media_item["file_data"].get("file_uri", "")
+                                        current_media_keys.add(f"inline_{mime_type}_{data[:200]}")
+                            elif "file_data" in p:
+                                file_uri = p["file_data"].get("file_uri", "")
                                 if file_uri:
-                                    key = f"file_{file_uri}"
-                            if key and key not in current_media_keys:
-                                filtered_reply_media.append(media_item)
-                            elif key:
-                                duplicate_count += 1
-                                LOGGER.debug(
-                                    "Skipped reply media duplicate (already in current message media, key=%s...)",
-                                    key[:80] if len(key) > 80 else key,
-                                )
-                        
-                        if duplicate_count > 0:
-                            LOGGER.info(
-                                "Filtered %d duplicate reply media item(s) that match current message media",
-                                duplicate_count,
-                            )
-                            telemetry.increment_counter("context.reply_media_duplicate_filtered", duplicate_count)
-                        to_add = filtered_reply_media[:remaining]
-                        if to_add:
-                            user_parts.extend(to_add)
-                            # Calculate dropped items: items in filtered_reply_media that weren't added due to limit
-                            dropped = len(filtered_reply_media) - len(to_add)
-                            if dropped > 0:
-                                user_parts.append(
-                                    {
-                                        "text": "[Деякі прикріплення з відповіді опущено для ефективності]",
-                                    }
-                                )
-                            telemetry.increment_counter(
-                                "context.reply_included_media", len(to_add)
-                            )
+                                    current_media_keys.add(f"file_{file_uri}")
+                    # Filter out any reply media that matches current media
+                    filtered_reply_media = []
+                    duplicate_count = 0
+                    for media_item in valid_reply_media:
+                        key: str | None = None
+                        if "inline_data" in media_item:
+                            data = media_item["inline_data"].get("data", "")
+                            mime_type = media_item["inline_data"].get("mime_type", "")
+                            if data:
+                                try:
+                                    # Use same hash-based key as deduplication function
+                                    data_hash = hashlib.sha256(data.encode("ascii")).hexdigest()[:32]
+                                    key = f"inline_{mime_type}_{data_hash}"
+                                except Exception:
+                                    # Fallback to prefix if hash fails
+                                    key = f"inline_{mime_type}_{data[:200]}"
+                        elif "file_data" in media_item:
+                            file_uri = media_item["file_data"].get("file_uri", "")
+                            if file_uri:
+                                key = f"file_{file_uri}"
+                        if key and key not in current_media_keys:
+                            filtered_reply_media.append(media_item)
+                        elif key:
+                            duplicate_count += 1
                             LOGGER.debug(
-                                "Attached %d reply media item(s) to user_parts (dropped: %d)",
-                                len(to_add),
-                                max(dropped, 0),
+                                "Skipped reply media duplicate (already in current message media, key=%s...)",
+                                key[:80] if len(key) > 80 else key,
                             )
-                        else:
-                            LOGGER.warning(
-                                "No reply media items to add after deduplication and filtering"
+                    
+                    if duplicate_count > 0:
+                        LOGGER.info(
+                            "Filtered %d duplicate reply media item(s) that match current message media",
+                            duplicate_count,
+                        )
+                        telemetry.increment_counter("context.reply_media_duplicate_filtered", duplicate_count)
+                    to_add = filtered_reply_media[:remaining]
+                    if to_add:
+                        user_parts.extend(to_add)
+                        # Calculate dropped items: items in filtered_reply_media that weren't added due to limit
+                        dropped = len(filtered_reply_media) - len(to_add)
+                        if dropped > 0:
+                            user_parts.append(
+                                {
+                                    "text": "[Деякі прикріплення з відповіді опущено для ефективності]",
+                                }
                             )
+                        telemetry.increment_counter(
+                            "context.reply_included_media", len(to_add)
+                        )
+                        LOGGER.debug(
+                            "Attached %d reply media item(s) to user_parts (dropped: %d)",
+                            len(to_add),
+                            max(dropped, 0),
+                        )
                     else:
                         LOGGER.warning(
-                            "Cannot add reply media: media limit reached (current: %d, max: %d)",
-                            current_media_count,
-                            max_total,
+                            "No reply media items to add after deduplication and filtering"
                         )
-                        telemetry.increment_counter("context.reply_media_limit_exceeded")
-            elif reply_media_parts_for_block or (reply_context_for_history and reply_context_for_history.get("media_parts")):
-                # Media was expected but not found - log for debugging
-                LOGGER.warning(
-                    "Reply media was expected but not found in valid format (reply_media_parts_for_block: %s, reply_context_for_history.media_parts: %s)",
-                    bool(reply_media_parts_for_block),
-                    bool(reply_context_for_history and reply_context_for_history.get("media_parts")),
-                )
-                telemetry.increment_counter("context.reply_media_expected_but_missing")
+                else:
+                    LOGGER.warning(
+                        "Cannot add reply media: media limit reached (current: %d, max: %d)",
+                        current_media_count,
+                        max_total,
+                    )
+                    telemetry.increment_counter("context.reply_media_limit_exceeded")
         except Exception:
-            LOGGER.exception("Failed to attach reply media to user_parts in JSON mode")
+            LOGGER.exception("Failed to attach reply media to user_parts in native format")
             telemetry.increment_counter("context.reply_media_attachment_failed")
+    elif reply_media_parts_for_block or (reply_context_for_history and reply_context_for_history.get("media_parts")):
+        # Media was expected but not found - log for debugging
+        LOGGER.warning(
+            "Reply media was expected but not found in valid format (reply_media_parts_for_block: %s, reply_context_for_history.media_parts: %s)",
+            bool(reply_media_parts_for_block),
+            bool(reply_context_for_history and reply_context_for_history.get("media_parts")),
+        )
+        telemetry.increment_counter("context.reply_media_expected_but_missing")
 
     system_context_block_text = None
     if use_system_context_block:

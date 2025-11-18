@@ -160,7 +160,7 @@ class FactExtractor:
                     data = json.loads(response_text)
                 except json.JSONDecodeError as e:
                     LOGGER.warning(
-                        f"Failed to parse fact extraction JSON from Gemini",
+                        "Failed to parse fact extraction JSON from Gemini",
                         extra={
                             "user_id": user_id,
                             "error": str(e),
@@ -344,8 +344,8 @@ class UserProfileStore:
             # Create new profile
             await db.execute(
                 """
-                INSERT INTO user_profiles 
-                (user_id, chat_id, display_name, username, pronouns, membership_status, first_seen, last_seen, 
+                INSERT INTO user_profiles
+                (user_id, chat_id, display_name, username, pronouns, membership_status, first_seen, last_seen,
                  interaction_count, message_count, profile_version, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 1, ?, ?)
                 """,
@@ -401,7 +401,7 @@ class UserProfileStore:
                 # Get user's most recent profile as base
                 async with db.execute(
                     """
-                    SELECT * FROM user_profiles 
+                    SELECT * FROM user_profiles
                     WHERE user_id = ?
                     ORDER BY last_seen DESC
                     LIMIT 1
@@ -415,7 +415,7 @@ class UserProfileStore:
 
                 # Get facts across all chats
                 query = """
-                    SELECT * FROM user_facts 
+                    SELECT * FROM user_facts
                     WHERE user_id = ? AND is_active = 1
                     ORDER BY confidence DESC, created_at DESC
                 """
@@ -520,7 +520,7 @@ class UserProfileStore:
                 )
 
             query += """
-                ORDER BY 
+                ORDER BY
                     CASE membership_status
                         WHEN 'member' THEN 0
                         WHEN 'administrator' THEN 0
@@ -563,9 +563,9 @@ class UserProfileStore:
             # Check if similar fact exists (same type and key)
             async with db.execute(
                 """
-                SELECT id, confidence, is_active, fact_value 
-                FROM user_facts 
-                WHERE user_id = ? AND chat_id = ? AND fact_type = ? AND fact_key = ? 
+                SELECT id, confidence, is_active, fact_value
+                FROM user_facts
+                WHERE user_id = ? AND chat_id = ? AND fact_type = ? AND fact_key = ?
                 ORDER BY created_at DESC LIMIT 1
                 """,
                 (user_id, chat_id, fact_type, fact_key),
@@ -606,8 +606,8 @@ class UserProfileStore:
                     # Update fact
                     await db.execute(
                         """
-                        UPDATE user_facts 
-                        SET fact_value = ?, confidence = ?, is_active = 1, 
+                        UPDATE user_facts
+                        SET fact_value = ?, confidence = ?, is_active = 1,
                             updated_at = ?, last_mentioned = ?,
                             evidence_text = COALESCE(?, evidence_text)
                         WHERE id = ?
@@ -618,7 +618,7 @@ class UserProfileStore:
                     # Record version
                     await db.execute(
                         """
-                        INSERT INTO fact_versions 
+                        INSERT INTO fact_versions
                         (fact_id, version_number, change_type, confidence_delta, created_at)
                         VALUES (?, ?, ?, ?, ?)
                         """,
@@ -660,7 +660,7 @@ class UserProfileStore:
                     # Record reinforcement
                     await db.execute(
                         """
-                        INSERT INTO fact_versions 
+                        INSERT INTO fact_versions
                         (fact_id, version_number, change_type, confidence_delta, created_at)
                         VALUES (?, ?, ?, ?, ?)
                         """,
@@ -673,8 +673,8 @@ class UserProfileStore:
             # Insert new fact
             cursor = await db.execute(
                 """
-                INSERT INTO user_facts 
-                (user_id, chat_id, fact_type, fact_key, fact_value, confidence, 
+                INSERT INTO user_facts
+                (user_id, chat_id, fact_type, fact_key, fact_value, confidence,
                  source_message_id, evidence_text, is_active, created_at, updated_at, last_mentioned)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
                 """,
@@ -697,7 +697,7 @@ class UserProfileStore:
             # Record initial version
             await db.execute(
                 """
-                INSERT INTO fact_versions 
+                INSERT INTO fact_versions
                 (fact_id, version_number, change_type, confidence_delta, created_at)
                 VALUES (?, 1, 'creation', ?, ?)
                 """,
@@ -772,10 +772,14 @@ class UserProfileStore:
                     rows = await cursor.fetchall()
                     return [dict(row) for row in rows]
             except aiosqlite.OperationalError as e:
-                LOGGER.warning(f"Error fetching facts from database: {e}", exc_info=True)
+                LOGGER.warning(
+                    f"Error fetching facts from database: {e}", exc_info=True
+                )
                 return []
             except Exception as e:
-                LOGGER.error(f"Unexpected error fetching facts (deprecated): {e}", exc_info=True)
+                LOGGER.error(
+                    f"Unexpected error fetching facts (deprecated): {e}", exc_info=True
+                )
                 return []
 
     async def deactivate_fact(self, fact_id: int) -> None:
@@ -794,7 +798,9 @@ class UserProfileStore:
                     table_exists = await cursor.fetchone()
 
                 if not table_exists:
-                    LOGGER.warning(f"Cannot deactivate fact {fact_id}: user_facts table doesn't exist (deprecated)")
+                    LOGGER.warning(
+                        f"Cannot deactivate fact {fact_id}: user_facts table doesn't exist (deprecated)"
+                    )
                     return
 
                 await db.execute(
@@ -804,9 +810,13 @@ class UserProfileStore:
                 await db.commit()
                 LOGGER.info(f"Deactivated fact {fact_id}")
             except aiosqlite.OperationalError as e:
-                LOGGER.warning(f"Database error deactivating fact {fact_id}: {e}", exc_info=True)
+                LOGGER.warning(
+                    f"Database error deactivating fact {fact_id}: {e}", exc_info=True
+                )
             except Exception as e:
-                LOGGER.error(f"Unexpected error deactivating fact {fact_id}: {e}", exc_info=True)
+                LOGGER.error(
+                    f"Unexpected error deactivating fact {fact_id}: {e}", exc_info=True
+                )
 
     async def delete_fact(self, fact_id: int) -> bool:
         """
@@ -827,10 +837,14 @@ class UserProfileStore:
                     table_exists = await cursor.fetchone()
 
                 if not table_exists:
-                    LOGGER.warning(f"Cannot delete fact {fact_id}: user_facts table doesn't exist (deprecated)")
+                    LOGGER.warning(
+                        f"Cannot delete fact {fact_id}: user_facts table doesn't exist (deprecated)"
+                    )
                     return False
 
-                cursor = await db.execute("DELETE FROM user_facts WHERE id = ?", (fact_id,))
+                cursor = await db.execute(
+                    "DELETE FROM user_facts WHERE id = ?", (fact_id,)
+                )
                 deleted = cursor.rowcount or 0
                 await db.commit()
 
@@ -840,10 +854,14 @@ class UserProfileStore:
 
                 return False
             except aiosqlite.OperationalError as e:
-                LOGGER.warning(f"Database error deleting fact {fact_id}: {e}", exc_info=True)
+                LOGGER.warning(
+                    f"Database error deleting fact {fact_id}: {e}", exc_info=True
+                )
                 return False
             except Exception as e:
-                LOGGER.error(f"Unexpected error deleting fact {fact_id}: {e}", exc_info=True)
+                LOGGER.error(
+                    f"Unexpected error deleting fact {fact_id}: {e}", exc_info=True
+                )
                 return False
 
     async def record_relationship(
@@ -868,7 +886,7 @@ class UserProfileStore:
             # Check if relationship exists
             async with db.execute(
                 """
-                SELECT id, interaction_count FROM user_relationships 
+                SELECT id, interaction_count FROM user_relationships
                 WHERE user_id = ? AND chat_id = ? AND related_user_id = ?
                 """,
                 (user_id, chat_id, related_user_id),
@@ -879,7 +897,7 @@ class UserProfileStore:
                 rel_id, current_count = existing
                 await db.execute(
                     """
-                    UPDATE user_relationships 
+                    UPDATE user_relationships
                     SET relationship_type = ?, relationship_label = COALESCE(?, relationship_label),
                         strength = ?, sentiment = ?, interaction_count = ?,
                         last_interaction = ?, updated_at = ?
@@ -899,7 +917,7 @@ class UserProfileStore:
             else:
                 await db.execute(
                     """
-                    INSERT INTO user_relationships 
+                    INSERT INTO user_relationships
                     (user_id, chat_id, related_user_id, relationship_type, relationship_label,
                      strength, interaction_count, last_interaction, sentiment, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
@@ -930,7 +948,7 @@ class UserProfileStore:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 """
-                SELECT * FROM user_relationships 
+                SELECT * FROM user_relationships
                 WHERE user_id = ? AND chat_id = ? AND strength >= ?
                 ORDER BY strength DESC, interaction_count DESC
                 """,
@@ -1100,7 +1118,7 @@ class UserProfileStore:
         async with get_db_connection(self._db_path) as db:
             cursor = await db.execute(
                 """
-                UPDATE user_facts 
+                UPDATE user_facts
                 SET is_active = 0, updated_at = ?
                 WHERE user_id = ? AND chat_id = ? AND is_active = 1
                 """,
@@ -1139,11 +1157,11 @@ class UserProfileStore:
                 SELECT DISTINCT p.user_id
                 FROM user_profiles p
                 WHERE EXISTS (
-                    SELECT 1 FROM user_facts f 
+                    SELECT 1 FROM user_facts f
                     WHERE f.user_id = p.user_id AND f.is_active = 1
                 )
                 AND (
-                    p.summary IS NULL 
+                    p.summary IS NULL
                     OR p.last_seen > COALESCE(p.summary_updated_at, 0)
                 )
                 ORDER BY p.message_count DESC
@@ -1170,7 +1188,7 @@ class UserProfileStore:
         async with get_db_connection(self._db_path) as db:
             await db.execute(
                 """
-                UPDATE user_profiles 
+                UPDATE user_profiles
                 SET summary = ?, summary_updated_at = ?
                 WHERE user_id = ?
                 """,

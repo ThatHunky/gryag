@@ -20,9 +20,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import asyncpg
-from app.infrastructure.query_converter import convert_query_to_postgres
-
 from app.config import Settings
 from app.infrastructure.db_utils import get_db_connection
 from app.services.redis_types import RedisLike
@@ -152,7 +149,9 @@ class HybridSearchEngine:
 
             # Semantic search
             tasks.append(
-                self._semantic_search(query, chat_id, thread_id, limit * 3, time_range_days)
+                self._semantic_search(
+                    query, chat_id, thread_id, limit * 3, time_range_days
+                )
             )
 
             # Keyword search (if enabled)
@@ -164,10 +163,9 @@ class HybridSearchEngine:
                 )
 
             results_list = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=timeout_seconds
+                asyncio.gather(*tasks, return_exceptions=True), timeout=timeout_seconds
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             LOGGER.warning(
                 f"Hybrid search timeout ({timeout_seconds}s) for chat {chat_id}, using semantic-only fallback",
                 extra={"chat_id": chat_id, "query": query[:100]},
@@ -220,8 +218,12 @@ class HybridSearchEngine:
                 time_range_days=time_range_days,
             )
             try:
-                serialized = json.dumps([r.__dict__ for r in results], ensure_ascii=False)
-                await self.redis.set(cache_key, serialized, ex=self.settings.cache_ttl_seconds)
+                serialized = json.dumps(
+                    [r.__dict__ for r in results], ensure_ascii=False
+                )
+                await self.redis.set(
+                    cache_key, serialized, ex=self.settings.cache_ttl_seconds
+                )
             except Exception:
                 # Ignore cache set failures
                 pass
@@ -259,7 +261,7 @@ class HybridSearchEngine:
                 params.append(cutoff)
 
             query_sql = f"""
-                SELECT m.id, m.chat_id, m.thread_id, m.user_id, m.role, 
+                SELECT m.id, m.chat_id, m.thread_id, m.user_id, m.role,
                        m.text, m.media, m.embedding, m.ts
                 FROM messages m
                 {where_clause}
@@ -277,7 +279,7 @@ class HybridSearchEngine:
                     query_pg += f"${param_count}"
                 else:
                     query_pg += char
-            
+
             async with get_db_connection(self.database_url) as conn:
                 rows = await conn.fetch(query_pg, *params)
 

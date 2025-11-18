@@ -11,14 +11,13 @@ import logging
 from typing import Any
 
 from aiogram import Bot
-from app.services.media import _download, _maybe_downscale_image, DEFAULT_PHOTO_MIME
+
+from app.services.media import DEFAULT_PHOTO_MIME, _download, _maybe_downscale_image
 
 logger = logging.getLogger(__name__)
 
 
-async def get_user_profile_photo(
-    bot: Bot, user_id: int
-) -> dict[str, Any] | None:
+async def get_user_profile_photo(bot: Bot, user_id: int) -> dict[str, Any] | None:
     """
     Fetch a user's profile photo from Telegram.
 

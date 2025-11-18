@@ -5,14 +5,11 @@ Handles data access for user profiles and facts.
 
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 
-from app.core.exceptions import DatabaseError, UserProfileNotFoundError
-from app.repositories.base import Repository
 from app.models.user_profile import UserProfile
-
+from app.repositories.base import Repository
 
 # class UserFact:
 #     """User fact entity.
@@ -75,7 +72,7 @@ class UserProfileRepository(Repository[UserProfile]):
     Provides data access methods for user profiles and facts.
     """
 
-    async def find_by_id(self, id: Any) -> Optional[UserProfile]:
+    async def find_by_id(self, id: Any) -> UserProfile | None:
         """Find user profile by a composite ID (user_id, chat_id).
 
         Args:
@@ -120,7 +117,7 @@ class UserProfileRepository(Repository[UserProfile]):
         Returns:
             Saved profile
         """
-        now = int(datetime.now(timezone.utc).timestamp())
+        now = int(datetime.now(UTC).timestamp())
         query = """
             INSERT INTO user_profiles (
                 user_id, chat_id, first_name, last_name, username,

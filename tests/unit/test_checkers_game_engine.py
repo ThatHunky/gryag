@@ -102,20 +102,19 @@ def test_queen_can_move_multiple_cells_diagonally():
     """Test Ukrainian checkers: queen can slide diagonally across multiple empty cells."""
     board = [[0] * 8 for _ in range(8)]
     board[3][2] = 3  # Black king (queen) at playable square (3+2=5, odd)
-    
+
     game = CheckersGame(board)
     moves = game.get_valid_moves(1)
-    
+
     # Queen should be able to move to multiple positions diagonally
     queen_moves = [move for move in moves if (move.from_row, move.from_col) == (3, 2)]
-    
+
     # Should have moves in all 4 diagonal directions, multiple cells each
     assert len(queen_moves) > 4  # More than just adjacent cells
-    
+
     # Check that queen can move to a distant playable cell (e.g., from (3,2) to (0,5))
     distant_move = next(
-        (m for m in queen_moves if m.to_row == 0 and m.to_col == 5),
-        None
+        (m for m in queen_moves if m.to_row == 0 and m.to_col == 5), None
     )
     assert distant_move is not None
     assert distant_move.jumps == []
@@ -126,17 +125,17 @@ def test_queen_can_jump_over_piece_at_distance():
     board = [[0] * 8 for _ in range(8)]
     board[0][1] = 3  # Black king (queen) at playable square (0+1=1, odd)
     board[3][4] = 2  # White piece 3 cells away diagonally (3+4=7, odd)
-    
+
     game = CheckersGame(board)
     moves = game.get_valid_moves(1)
-    
+
     # Queen should be able to jump over the white piece
     jump_moves = [
-        move for move in moves
-        if (move.from_row, move.from_col) == (0, 1)
-        and move.jumps == [(3, 4)]
+        move
+        for move in moves
+        if (move.from_row, move.from_col) == (0, 1) and move.jumps == [(3, 4)]
     ]
-    
+
     assert len(jump_moves) > 0
     # Landing should be one cell beyond the jumped piece
     jump_move = jump_moves[0]
@@ -150,17 +149,17 @@ def test_queen_multi_jump_across_distances():
     board[0][1] = 3  # Black king (queen) at playable square
     board[2][3] = 2  # First white piece (2+3=5, odd)
     board[5][6] = 2  # Second white piece (5+6=11, odd)
-    
+
     game = CheckersGame(board)
     moves = game.get_valid_moves(1)
-    
+
     # Should find multi-jump moves
     multi_jump_moves = [
-        move for move in moves
-        if (move.from_row, move.from_col) == (0, 1)
-        and len(move.jumps) == 2
+        move
+        for move in moves
+        if (move.from_row, move.from_col) == (0, 1) and len(move.jumps) == 2
     ]
-    
+
     assert len(multi_jump_moves) > 0
     multi_move = multi_jump_moves[0]
     assert (2, 3) in multi_move.jumps
@@ -171,15 +170,15 @@ def test_regular_piece_still_moves_one_cell():
     """Test that regular pieces (non-queens) still move only one cell."""
     board = [[0] * 8 for _ in range(8)]
     board[3][2] = 1  # Black regular piece (not a king) at playable square (3+2=5, odd)
-    
+
     game = CheckersGame(board)
     moves = game.get_valid_moves(1)
-    
+
     regular_moves = [move for move in moves if (move.from_row, move.from_col) == (3, 2)]
-    
+
     # Regular piece should only have 2 moves (forward diagonally)
     assert len(regular_moves) == 2
-    
+
     # All moves should be exactly 1 cell away
     for move in regular_moves:
         dr = abs(move.to_row - move.from_row)
@@ -194,23 +193,18 @@ def test_queen_cannot_move_through_pieces():
     board[0][1] = 3  # Black king (queen) at playable square
     board[2][3] = 1  # Own piece blocking the path (2+3=5, odd)
     board[4][5] = 0  # Empty playable cell beyond (4+5=9, odd)
-    
+
     game = CheckersGame(board)
     moves = game.get_valid_moves(1)
-    
+
     queen_moves = [move for move in moves if (move.from_row, move.from_col) == (0, 1)]
-    
+
     # Should not be able to move to (4,5) because path is blocked
     blocked_move = next(
-        (m for m in queen_moves if m.to_row == 4 and m.to_col == 5),
-        None
+        (m for m in queen_moves if m.to_row == 4 and m.to_col == 5), None
     )
     assert blocked_move is None
-    
-    # Should be able to move to (1,2) before the blocking piece (1+2=3, odd)
-    valid_move = next(
-        (m for m in queen_moves if m.to_row == 1 and m.to_col == 2),
-        None
-    )
-    assert valid_move is not None
 
+    # Should be able to move to (1,2) before the blocking piece (1+2=3, odd)
+    valid_move = next((m for m in queen_moves if m.to_row == 1 and m.to_col == 2), None)
+    assert valid_move is not None

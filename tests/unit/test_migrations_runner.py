@@ -1,7 +1,6 @@
-import asyncio
-import os
-from pathlib import Path
 import types
+from pathlib import Path
+
 import pytest
 
 from app.infrastructure import db_utils
@@ -57,12 +56,13 @@ async def test_apply_migrations_with_custom_dir(monkeypatch, tmp_path: Path):
         return [mig_dir]
 
     # Wrap original function to override directory search
-    original_apply = db_utils.apply_migrations
 
     async def _apply_with_tmp_dir(url: str):
         # Inline copy of apply_migrations directory selection
         migrations_dir = mig_dir
-        migration_files = sorted([f for f in migrations_dir.iterdir() if f.suffix.lower() == ".sql"])
+        migration_files = sorted(
+            [f for f in migrations_dir.iterdir() if f.suffix.lower() == ".sql"]
+        )
         async with db_utils.get_db_connection(url) as conn:
             await conn.execute(
                 """
@@ -87,5 +87,3 @@ async def test_apply_migrations_with_custom_dir(monkeypatch, tmp_path: Path):
 
     # Run the wrapped function - should complete without exceptions
     await _apply_with_tmp_dir("postgresql://test")
-
-

@@ -15,9 +15,9 @@ import logging
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 from app.services.monitoring.conversation_analyzer import ConversationWindow
 
@@ -51,7 +51,7 @@ class ConversationIntent:
     confidence: float  # 0.0-1.0
     trigger_message: str  # The message that triggered detection
     context_summary: str  # What the conversation is about
-    suggested_response: Optional[str] = None  # Optional AI suggestion
+    suggested_response: str | None = None  # Optional AI suggestion
 
 
 @dataclass
@@ -60,11 +60,11 @@ class UserPreference:
 
     user_id: int
     proactivity_multiplier: float  # 0.0-2.0, default 1.0
-    last_proactive_response: Optional[datetime]
+    last_proactive_response: datetime | None
     total_proactive_sent: int
     reaction_counts: dict[UserReaction, int]
     consecutive_ignores: int
-    last_negative_feedback: Optional[datetime]
+    last_negative_feedback: datetime | None
 
 
 @dataclass
@@ -73,9 +73,9 @@ class ProactiveDecision:
 
     should_respond: bool
     confidence: float
-    intent: Optional[ConversationIntent]
+    intent: ConversationIntent | None
     reason: str  # Why we should/shouldn't respond
-    suggested_response: Optional[str] = None
+    suggested_response: str | None = None
 
 
 class IntentClassifier:
@@ -90,7 +90,7 @@ class IntentClassifier:
 
     async def classify_window(
         self, window: ConversationWindow, bot_capabilities: list[str]
-    ) -> Optional[ConversationIntent]:
+    ) -> ConversationIntent | None:
         """
         Analyze window to detect if proactive response would be helpful.
 
@@ -184,7 +184,7 @@ Rules:
 
     def _parse_intent_response(
         self, response: str, window: ConversationWindow
-    ) -> Optional[ConversationIntent]:
+    ) -> ConversationIntent | None:
         """Parse Gemini's intent classification response."""
         try:
             data = json.loads(response)
@@ -227,7 +227,7 @@ class UserPreferenceManager:
         conn = await self.store._get_connection()
         cursor = await conn.execute(
             """
-            SELECT 
+            SELECT
                 COUNT(*) as total,
                 MAX(created_at) as last_sent,
                 SUM(CASE WHEN user_reaction = 'positive' THEN 1 ELSE 0 END) as positive,
@@ -336,7 +336,7 @@ class UserPreferenceManager:
         return max(0.0, min(2.0, multiplier))
 
     async def record_reaction(
-        self, event_id: int, reaction: UserReaction, reaction_time: Optional[int] = None
+        self, event_id: int, reaction: UserReaction, reaction_time: int | None = None
     ):
         """Record user's reaction to proactive response."""
         conn = await self.store._get_connection()
@@ -366,9 +366,9 @@ class UserPreferenceManager:
     async def check_cooldown(
         self,
         chat_id: int,
-        user_id: Optional[int] = None,
-        intent_type: Optional[IntentType] = None,
-    ) -> tuple[bool, Optional[str]]:
+        user_id: int | None = None,
+        intent_type: IntentType | None = None,
+    ) -> tuple[bool, str | None]:
         """
         Check if cooldown period has passed.
 
@@ -427,7 +427,7 @@ class UserPreferenceManager:
             cursor = await conn.execute(
                 """
                 SELECT created_at FROM proactive_events
-                WHERE chat_id = ? 
+                WHERE chat_id = ?
                 AND json_extract(intent_classification, '$.intent_type') = ?
                 AND response_sent = 1
                 ORDER BY created_at DESC
@@ -624,7 +624,7 @@ class ProactiveTrigger:
 
     def _get_primary_participant(
         self, window: ConversationWindow, bot_user_id: int
-    ) -> Optional[int]:
+    ) -> int | None:
         """Get most active participant in window (for preference lookup)."""
         if not window.messages:
             return None
@@ -647,7 +647,7 @@ class ProactiveTrigger:
         window_id: int,
         intent: ConversationIntent,
         response_text: str,
-        response_message_id: Optional[int] = None,
+        response_message_id: int | None = None,
     ) -> int:
         """
         Record that proactive response was sent.

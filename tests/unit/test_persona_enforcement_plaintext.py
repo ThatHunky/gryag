@@ -18,5 +18,3 @@ def test_enforce_plaintext_strips_html():
     cleaned = _enforce_plaintext_ukrainian(text)
     assert "<b>" not in cleaned and "<i>" not in cleaned
     assert "Привіт, світ!" in cleaned
-
-

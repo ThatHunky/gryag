@@ -6,7 +6,7 @@ and debugging throughout the application.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 
 class GryagException(Exception):
@@ -35,7 +35,7 @@ class GryagException(Exception):
         self,
         message: str,
         *,
-        context: Dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
         cause: Exception | None = None,
     ):
         super().__init__(message)
@@ -43,7 +43,7 @@ class GryagException(Exception):
         self.context = context or {}
         self.cause = cause
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert exception to dictionary for logging/serialization.
 
         Returns:

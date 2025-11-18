@@ -1,10 +1,9 @@
 """Unit tests for custom exception hierarchy."""
 
-import pytest
 from app.core.exceptions import (
-    GryagException,
     DatabaseError,
     GeminiError,
+    GryagException,
     UserProfileNotFoundError,
     ValidationError,
 )
@@ -96,7 +95,9 @@ def test_exception_chaining():
         try:
             raise ValueError("Inner error")
         except ValueError as e:
-            raise DatabaseError("Outer error", context={"operation": "save"}, cause=e)
+            raise DatabaseError(
+                "Outer error", context={"operation": "save"}, cause=e
+            ) from None
     except DatabaseError as exc:
         assert exc.message == "Outer error"
         assert exc.context["operation"] == "save"

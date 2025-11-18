@@ -1,9 +1,10 @@
 """Unit tests for external ID storage (Phase A implementation)."""
 
-import pytest
 import json
 import time
+
 import aiosqlite
+import pytest
 
 from app.services.context_store import ContextStore
 
@@ -42,10 +43,10 @@ async def test_add_turn_stores_external_ids(test_db):
     # Verify external IDs are stored in dedicated columns
     async with aiosqlite.connect(test_db) as db:
         cursor = await db.execute(
-            """SELECT external_message_id, external_user_id, 
+            """SELECT external_message_id, external_user_id,
                       reply_to_external_message_id, reply_to_external_user_id,
                       media
-               FROM messages 
+               FROM messages
                WHERE chat_id = ?""",
             (chat_id,),
         )
@@ -168,8 +169,8 @@ async def test_backward_compatibility_json_fallback(test_db):
     # Simulate legacy data: insert directly without populating external_* columns
     async with aiosqlite.connect(test_db) as db:
         await db.execute(
-            """INSERT INTO messages 
-               (chat_id, thread_id, user_id, role, text, media, ts) 
+            """INSERT INTO messages
+               (chat_id, thread_id, user_id, role, text, media, ts)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
                 chat_id,

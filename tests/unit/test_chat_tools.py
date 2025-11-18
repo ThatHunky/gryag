@@ -6,13 +6,13 @@ Covers:
 - search_messages tool callback formatting and behavior
 """
 
-import asyncio
 import json
+
 import pytest
 
 from app.handlers.chat_tools import (
-    build_tool_definitions,
     build_tool_callbacks,
+    build_tool_definitions,
 )
 
 

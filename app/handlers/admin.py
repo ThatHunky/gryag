@@ -14,8 +14,8 @@ from app.infrastructure.db_utils import get_db_connection
 from app.infrastructure.query_converter import convert_query_to_postgres
 from app.services.context_store import ContextStore
 from app.services.donation_scheduler import DONATION_MESSAGE
-from app.services.redis_types import RedisLike
 from app.services.rate_limiter import RateLimiter
+from app.services.redis_types import RedisLike
 from app.utils.persona_helpers import get_response
 
 router = Router()
@@ -197,7 +197,9 @@ async def reset_quotas_command(
             deleted = await rate_limiter.reset_chat(chat_id)
             LOGGER.info(f"Reset {deleted} rate limit record(s) for chat {chat_id}")
             if deleted > 0:
-                rate_limit_reset_msg = f"✓ Скинув ліміти повідомлень для чату ({deleted} записів)\n"
+                rate_limit_reset_msg = (
+                    f"✓ Скинув ліміти повідомлень для чату ({deleted} записів)\n"
+                )
 
     # Reset image generation quotas (if service available)
     image_quota_reset_msg = ""
@@ -295,7 +297,7 @@ async def chatinfo_command(
     chat_id = chat.id
 
     # Build response with chat information
-    response = f"📊 <b>Інформація про чат</b>\n\n"
+    response = "📊 <b>Інформація про чат</b>\n\n"
     response += f"🆔 Chat ID: <code>{chat_id}</code>\n"
     response += f"📱 Тип: {chat_type}\n"
 
@@ -306,21 +308,21 @@ async def chatinfo_command(
         response += f"🔗 Username: @{chat.username}\n"
 
     # Add configuration hints
-    response += f"\n💡 <b>Використання:</b>\n"
+    response += "\n💡 <b>Використання:</b>\n"
 
     if chat_id < 0:  # Group/supergroup
-        response += f"Для whitelist режиму:\n"
+        response += "Для whitelist режиму:\n"
         response += f"<code>ALLOWED_CHAT_IDS={chat_id}</code>\n\n"
-        response += f"Для blacklist режиму:\n"
+        response += "Для blacklist режиму:\n"
         response += f"<code>BLOCKED_CHAT_IDS={chat_id}</code>\n\n"
-        response += f"Кілька чатів через кому:\n"
+        response += "Кілька чатів через кому:\n"
         response += f"<code>ALLOWED_CHAT_IDS={chat_id},-100456,...</code>"
     else:  # Private chat
-        response += f"Це приватний чат (ID > 0).\n"
-        response += f"Приватні чати з адмінами завжди дозволені."
+        response += "Це приватний чат (ID > 0).\n"
+        response += "Приватні чати з адмінами завжди дозволені."
 
     # Show current configuration
-    response += f"\n\n⚙️ <b>Поточна конфігурація:</b>\n"
+    response += "\n\n⚙️ <b>Поточна конфігурація:</b>\n"
     response += f"Режим: <code>{settings.bot_behavior_mode}</code>\n"
 
     if settings.allowed_chat_ids_list:
@@ -332,16 +334,16 @@ async def chatinfo_command(
     # Check if current chat is allowed
     if settings.bot_behavior_mode == "whitelist":
         if chat_id in settings.allowed_chat_ids_list or chat_id > 0:
-            response += f"\n✅ Цей чат <b>дозволений</b>"
+            response += "\n✅ Цей чат <b>дозволений</b>"
         else:
-            response += f"\n❌ Цей чат <b>НЕ в whitelist</b>"
+            response += "\n❌ Цей чат <b>НЕ в whitelist</b>"
     elif settings.bot_behavior_mode == "blacklist":
         if chat_id in settings.blocked_chat_ids_list:
-            response += f"\n❌ Цей чат <b>заблокований</b>"
+            response += "\n❌ Цей чат <b>заблокований</b>"
         else:
-            response += f"\n✅ Цей чат <b>дозволений</b>"
+            response += "\n✅ Цей чат <b>дозволений</b>"
     else:  # global
-        response += f"\n✅ Всі чати дозволені (global режим)"
+        response += "\n✅ Всі чати дозволені (global режим)"
 
     await message.reply(response)
 
@@ -370,14 +372,14 @@ async def broadcast_donate_command(
     # Check if this is a confirmation
     command_text = (message.text or "").strip().lower()
     is_confirmation = False
-    
+
     # Improved confirmation text matching: check for exact patterns
     # Matches: "/broadcastdonate confirm", "/broadcastdonate yes", "/broadcastdonate confirm something"
     if command_text.startswith("/broadcastdonate"):
         parts = command_text.split()
         if len(parts) >= 2 and parts[1] in ["confirm", "yes"]:
             is_confirmation = True
-    
+
     # Check if message is a reply to a confirmation message from the bot
     if message.reply_to_message and message.reply_to_message.from_user:
         # Verify it's a reply to THIS bot's message (not just any bot)
@@ -385,7 +387,10 @@ async def broadcast_donate_command(
         if reply_user.is_bot and bot_id is not None and reply_user.id == bot_id:
             # Also verify the reply is to a confirmation message by checking text content
             reply_to_text = (message.reply_to_message.text or "").lower()
-            if "підтвердження трансляції" in reply_to_text or "подтверждение трансляции" in reply_to_text:
+            if (
+                "підтвердження трансляції" in reply_to_text
+                or "подтверждение трансляции" in reply_to_text
+            ):
                 reply_text = (message.text or "").strip().lower()
                 if reply_text in ["yes", "так", "y", "т"]:
                     is_confirmation = True
@@ -422,7 +427,9 @@ async def broadcast_donate_command(
             await message.reply("❌ Не знайдено жодного приватного чату в базі даних.")
             return
 
-        await message.reply("🔄 Починаю трансляцію повідомлення про донат до всіх приватних чатів...")
+        await message.reply(
+            "🔄 Починаю трансляцію повідомлення про донат до всіх приватних чатів..."
+        )
 
         LOGGER.info(
             f"User {message.from_user.id} starting broadcast to {total_chats} private chats"
@@ -449,9 +456,7 @@ async def broadcast_donate_command(
                 # Common reasons: bot blocked, chat not found, etc.
                 failed_count += 1
                 failed_chats.append(chat_id)
-                LOGGER.debug(
-                    f"Failed to send donation message to chat {chat_id}: {e}"
-                )
+                LOGGER.debug(f"Failed to send donation message to chat {chat_id}: {e}")
                 # Still wait to maintain rate limiting even on failures
                 if (success_count + failed_count) < total_chats:
                     await asyncio.sleep(0.2)
@@ -478,7 +483,7 @@ async def broadcast_donate_command(
 
         if failed_count > 0 and failed_count <= 10:
             # Show failed chat IDs if there are few failures
-            summary += f"\n\n❌ Не вдалося відправити до чатів:\n"
+            summary += "\n\n❌ Не вдалося відправити до чатів:\n"
             summary += ", ".join(str(cid) for cid in failed_chats[:10])
         elif failed_count > 10:
             summary += f"\n\n❌ Не вдалося відправити до {failed_count} чатів (список занадто великий)"

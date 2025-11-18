@@ -14,13 +14,10 @@ from __future__ import annotations
 import json
 import logging
 import time
-from pathlib import Path
 from typing import Any, Literal
 
-import asyncpg
-from app.infrastructure.query_converter import convert_query_to_postgres
-
 from app.infrastructure.db_utils import get_db_connection
+from app.infrastructure.query_converter import convert_query_to_postgres
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +122,7 @@ class UnifiedFactRepository:
                 ),
             )
             row = await conn.fetchrow(query, *params)
-            fact_id = row['id'] if row else 0
+            fact_id = row["id"] if row else 0
 
             logger.info(
                 f"Stored {entity_type} fact: {fact_category}.{fact_key} = {fact_value[:50]}... "
@@ -160,7 +157,7 @@ class UnifiedFactRepository:
         entity_type: Literal["user", "chat"] = "chat" if entity_id < 0 else "user"
 
         query = """
-            SELECT 
+            SELECT
                 id, entity_type, entity_id, chat_context,
                 fact_category, fact_key, fact_value, fact_description,
                 confidence, evidence_count, evidence_text, source_message_id,
@@ -200,7 +197,7 @@ class UnifiedFactRepository:
                 query_pg_final += f"${param_count}"
             else:
                 query_pg_final += char
-        
+
         async with get_db_connection(self.database_url) as conn:
             rows = await conn.fetch(query_pg_final, *params)
 
@@ -226,8 +223,7 @@ class UnifiedFactRepository:
         """Get a single fact by ID."""
         async with get_db_connection(self.database_url) as conn:
             query, params = convert_query_to_postgres(
-                "SELECT * FROM facts WHERE id = $1",
-                (fact_id,)
+                "SELECT * FROM facts WHERE id = $1", (fact_id,)
             )
             row = await conn.fetchrow(query, *params)
 
@@ -299,12 +295,14 @@ class UnifiedFactRepository:
         param_index += 1
 
         params.append(fact_id)
-        
+
         query = f"UPDATE facts SET {', '.join(updates)} WHERE id = ${param_index}"
-        
+
         async with get_db_connection(self.database_url) as conn:
             result = await conn.execute(query, *params)
-            updated = result.split()[-1] != "0" if result.split()[-1].isdigit() else False
+            updated = (
+                result.split()[-1] != "0" if result.split()[-1].isdigit() else False
+            )
 
         if updated:
             logger.info(f"Updated fact {fact_id}")
@@ -337,7 +335,9 @@ class UnifiedFactRepository:
                     (fact_id,),
                 )
                 result = await conn.execute(query, *params)
-                deleted = result.split()[-1] != "0" if result.split()[-1].isdigit() else False
+                deleted = (
+                    result.split()[-1] != "0" if result.split()[-1].isdigit() else False
+                )
 
         if deleted:
             logger.info(f"{'Soft-' if soft else ''}deleted fact {fact_id}")
@@ -367,7 +367,10 @@ class UnifiedFactRepository:
 
         base_params: list[Any] = [entity_type, entity_id]
         param_index = 1
-        where_parts = [f"entity_type = ${param_index}", f"entity_id = ${param_index + 1}"]
+        where_parts = [
+            f"entity_type = ${param_index}",
+            f"entity_id = ${param_index + 1}",
+        ]
         param_index += 2
 
         if chat_context is not None:
@@ -381,7 +384,9 @@ class UnifiedFactRepository:
             if soft:
                 # Update: need to shift all param numbers by 1
                 updated_at_ts = int(time.time())
-                where_clause_adjusted = where_clause.replace("$1", "$2").replace("$2", "$3")
+                where_clause_adjusted = where_clause.replace("$1", "$2").replace(
+                    "$2", "$3"
+                )
                 if "$3" in where_clause:
                     where_clause_adjusted = where_clause_adjusted.replace("$3", "$4")
                 query = f"UPDATE facts SET is_active = 0, updated_at = $1 WHERE {where_clause_adjusted}"
@@ -456,7 +461,7 @@ class UnifiedFactRepository:
                 sql_pg += f"${param_count}"
             else:
                 sql_pg += char
-        
+
         async with get_db_connection(self.database_url) as conn:
             rows = await conn.fetch(sql_pg, *params)
 
@@ -479,19 +484,19 @@ class UnifiedFactRepository:
             rows = await conn.fetch(
                 "SELECT entity_type, COUNT(*) as count FROM facts WHERE is_active = 1 GROUP BY entity_type"
             )
-            entity_counts = {row['entity_type']: row['count'] for row in rows}
+            entity_counts = {row["entity_type"]: row["count"] for row in rows}
 
             # Category counts
             rows = await conn.fetch(
                 "SELECT fact_category, COUNT(*) as count FROM facts WHERE is_active = 1 GROUP BY fact_category"
             )
-            category_counts = {row['fact_category']: row['count'] for row in rows}
+            category_counts = {row["fact_category"]: row["count"] for row in rows}
 
             # Average confidence
             row = await conn.fetchrow(
                 "SELECT AVG(confidence) as avg_conf FROM facts WHERE is_active = 1"
             )
-            avg_confidence = float(row['avg_conf']) if row and row['avg_conf'] else 0.0
+            avg_confidence = float(row["avg_conf"]) if row and row["avg_conf"] else 0.0
 
         return {
             "total_facts": sum(entity_counts.values()),

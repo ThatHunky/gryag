@@ -11,17 +11,16 @@ Tests the complete flow:
 import asyncio
 import logging
 import time
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
 
 from app.config import get_settings
-from app.services.gemini import GeminiClient
 from app.services.context.episode_boundary_detector import EpisodeBoundaryDetector
 from app.services.context.episode_monitor import EpisodeMonitor
 from app.services.context.episodic_memory import EpisodicMemoryStore
+from app.services.gemini import GeminiClient
 
 LOGGER = logging.getLogger(__name__)
 

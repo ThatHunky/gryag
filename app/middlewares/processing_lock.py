@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from aiogram import BaseMiddleware
 from aiogram.types import Message
 
 from app.config import Settings
 from app.services.redis_types import RedisLike
-from app.services import telemetry
 
 LOGGER = logging.getLogger(__name__)
 

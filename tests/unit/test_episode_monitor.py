@@ -6,8 +6,7 @@ Phase 4.2: Tests for automatic episode creation and monitoring.
 
 import asyncio
 import time
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio

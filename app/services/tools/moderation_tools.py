@@ -4,6 +4,7 @@ This module defines tools for moderation, such as kicking or muting users in a c
 
 import json
 import logging
+
 from app.services.telegram_service import TelegramService
 
 logger = logging.getLogger(__name__)
@@ -103,7 +104,9 @@ def build_tool_callbacks(telegram_service: TelegramService) -> dict:
         chat_id = params.get("chat_id")
 
         if query is None or chat_id is None:
-            logger.warning(f"Missing required parameters: query={query}, chat_id={chat_id}")
+            logger.warning(
+                f"Missing required parameters: query={query}, chat_id={chat_id}"
+            )
             return json.dumps({"error": "Missing query or chat_id"})
 
         try:
@@ -111,16 +114,17 @@ def build_tool_callbacks(telegram_service: TelegramService) -> dict:
             query_str = str(query) if query is not None else ""
             if not query_str.strip():
                 return json.dumps({"error": "Query cannot be empty"})
-            
+
             try:
                 chat_id_int = int(chat_id)
             except (ValueError, TypeError):
                 return json.dumps({"error": f"Invalid chat_id: {chat_id}"})
 
-            logger.info(f"Calling find_user with query='{query_str}', chat_id={chat_id_int}")
+            logger.info(
+                f"Calling find_user with query='{query_str}', chat_id={chat_id_int}"
+            )
             result = await telegram_service.find_user(
-                query=query_str,
-                chat_id=chat_id_int
+                query=query_str, chat_id=chat_id_int
             )
             logger.info(f"find_user returned: {result}")
             return json.dumps(result)
@@ -135,7 +139,9 @@ def build_tool_callbacks(telegram_service: TelegramService) -> dict:
         chat_id = params.get("chat_id")
 
         if user_id is None or chat_id is None:
-            logger.warning(f"Missing required parameters: user_id={user_id}, chat_id={chat_id}")
+            logger.warning(
+                f"Missing required parameters: user_id={user_id}, chat_id={chat_id}"
+            )
             return json.dumps({"success": False, "error": "Missing user_id or chat_id"})
 
         try:
@@ -144,18 +150,23 @@ def build_tool_callbacks(telegram_service: TelegramService) -> dict:
                 user_id_int = int(user_id)
                 chat_id_int = int(chat_id)
             except (ValueError, TypeError) as e:
-                return json.dumps({"success": False, "error": f"Invalid user_id or chat_id: {str(e)}"})
+                return json.dumps(
+                    {"success": False, "error": f"Invalid user_id or chat_id: {str(e)}"}
+                )
 
-            logger.info(f"Calling kick_user with user_id={user_id_int}, chat_id={chat_id_int}")
+            logger.info(
+                f"Calling kick_user with user_id={user_id_int}, chat_id={chat_id_int}"
+            )
             result = await telegram_service.kick_user(
-                user_id=user_id_int,
-                chat_id=chat_id_int
+                user_id=user_id_int, chat_id=chat_id_int
             )
             logger.info(f"kick_user returned: {result}")
             return json.dumps({"success": True, "message": result})
         except Exception as e:
             logger.error(f"Failed to kick user: {e}", exc_info=True)
-            return json.dumps({"success": False, "error": f"Failed to kick user: {str(e)}"})
+            return json.dumps(
+                {"success": False, "error": f"Failed to kick user: {str(e)}"}
+            )
 
     async def mute_user_callback(params: dict) -> str:
         """Wrapper for mute_user that unpacks parameters from dict."""
@@ -165,7 +176,9 @@ def build_tool_callbacks(telegram_service: TelegramService) -> dict:
         duration_minutes = params.get("duration_minutes")
 
         if user_id is None or chat_id is None:
-            logger.warning(f"Missing required parameters: user_id={user_id}, chat_id={chat_id}")
+            logger.warning(
+                f"Missing required parameters: user_id={user_id}, chat_id={chat_id}"
+            )
             return json.dumps({"success": False, "error": "Missing user_id or chat_id"})
 
         try:
@@ -173,23 +186,34 @@ def build_tool_callbacks(telegram_service: TelegramService) -> dict:
             try:
                 user_id_int = int(user_id)
                 chat_id_int = int(chat_id)
-                duration_int = int(duration_minutes) if duration_minutes is not None else None
+                duration_int = (
+                    int(duration_minutes) if duration_minutes is not None else None
+                )
                 if duration_int is not None and duration_int < 0:
-                    return json.dumps({"success": False, "error": "duration_minutes must be non-negative"})
+                    return json.dumps(
+                        {
+                            "success": False,
+                            "error": "duration_minutes must be non-negative",
+                        }
+                    )
             except (ValueError, TypeError) as e:
-                return json.dumps({"success": False, "error": f"Invalid parameter type: {str(e)}"})
+                return json.dumps(
+                    {"success": False, "error": f"Invalid parameter type: {str(e)}"}
+                )
 
-            logger.info(f"Calling mute_user with user_id={user_id_int}, chat_id={chat_id_int}, duration={duration_int}")
+            logger.info(
+                f"Calling mute_user with user_id={user_id_int}, chat_id={chat_id_int}, duration={duration_int}"
+            )
             result = await telegram_service.mute_user(
-                user_id=user_id_int,
-                chat_id=chat_id_int,
-                duration_minutes=duration_int
+                user_id=user_id_int, chat_id=chat_id_int, duration_minutes=duration_int
             )
             logger.info(f"mute_user returned: {result}")
             return json.dumps({"success": True, "message": result})
         except Exception as e:
             logger.error(f"Failed to mute user: {e}", exc_info=True)
-            return json.dumps({"success": False, "error": f"Failed to mute user: {str(e)}"})
+            return json.dumps(
+                {"success": False, "error": f"Failed to mute user: {str(e)}"}
+            )
 
     async def unmute_user_callback(params: dict) -> str:
         """Wrapper for unmute_user that unpacks parameters from dict."""
@@ -198,7 +222,9 @@ def build_tool_callbacks(telegram_service: TelegramService) -> dict:
         chat_id = params.get("chat_id")
 
         if user_id is None or chat_id is None:
-            logger.warning(f"Missing required parameters: user_id={user_id}, chat_id={chat_id}")
+            logger.warning(
+                f"Missing required parameters: user_id={user_id}, chat_id={chat_id}"
+            )
             return json.dumps({"success": False, "error": "Missing user_id or chat_id"})
 
         try:
@@ -207,18 +233,23 @@ def build_tool_callbacks(telegram_service: TelegramService) -> dict:
                 user_id_int = int(user_id)
                 chat_id_int = int(chat_id)
             except (ValueError, TypeError) as e:
-                return json.dumps({"success": False, "error": f"Invalid user_id or chat_id: {str(e)}"})
+                return json.dumps(
+                    {"success": False, "error": f"Invalid user_id or chat_id: {str(e)}"}
+                )
 
-            logger.info(f"Calling unmute_user with user_id={user_id_int}, chat_id={chat_id_int}")
+            logger.info(
+                f"Calling unmute_user with user_id={user_id_int}, chat_id={chat_id_int}"
+            )
             result = await telegram_service.unmute_user(
-                user_id=user_id_int,
-                chat_id=chat_id_int
+                user_id=user_id_int, chat_id=chat_id_int
             )
             logger.info(f"unmute_user returned: {result}")
             return json.dumps({"success": True, "message": result})
         except Exception as e:
             logger.error(f"Failed to unmute user: {e}", exc_info=True)
-            return json.dumps({"success": False, "error": f"Failed to unmute user: {str(e)}"})
+            return json.dumps(
+                {"success": False, "error": f"Failed to unmute user: {str(e)}"}
+            )
 
     return {
         "find_user": find_user_callback,

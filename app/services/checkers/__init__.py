@@ -1,2 +1,1 @@
 """Checkers game service package."""
-

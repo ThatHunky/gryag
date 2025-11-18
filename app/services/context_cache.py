@@ -38,10 +38,12 @@ class ContextCache:
         self._redis = redis_client
         self._base_ttl = ttl_seconds
         self._max_in_memory_size = max_in_memory_size
-        
+
         # In-memory LRU cache for frequently accessed entries (acts as L1 cache)
-        self._lru_cache: OrderedDict[tuple[int, int | None], tuple[list[dict[str, Any]], float]] = OrderedDict()
-        
+        self._lru_cache: OrderedDict[
+            tuple[int, int | None], tuple[list[dict[str, Any]], float]
+        ] = OrderedDict()
+
         # Cache metrics
         self._hit_count = 0
         self._miss_count = 0
@@ -72,7 +74,7 @@ class ContextCache:
         """
         cache_key = (chat_id, thread_id)
         now = time.time()
-        
+
         # Check in-memory LRU cache first (L1)
         if cache_key in self._lru_cache:
             data, cache_time = self._lru_cache[cache_key]
@@ -82,7 +84,7 @@ class ContextCache:
                 self._hit_count += 1
                 self._last_access_times[cache_key] = now
                 return data
-        
+
         # Check Redis cache (L2)
         if self._redis is None:
             self._miss_count += 1
@@ -134,14 +136,14 @@ class ContextCache:
         """
         cache_key = (chat_id, thread_id)
         now = time.time()
-        
+
         # Calculate adaptive TTL based on access frequency
         ttl = self._calculate_adaptive_ttl(cache_key)
-        
+
         # Store in LRU cache
         self._update_lru_cache(cache_key, context, now)
         self._last_access_times[cache_key] = now
-        
+
         # Store in Redis
         if self._redis is None:
             return
@@ -153,7 +155,7 @@ class ContextCache:
 
         except Exception as exc:
             logger.warning(f"Redis context cache set failed: {exc}")
-    
+
     def _update_lru_cache(
         self,
         cache_key: tuple[int, int | None],
@@ -168,35 +170,35 @@ class ContextCache:
             # Evict oldest if at capacity
             if len(self._lru_cache) >= self._max_in_memory_size:
                 self._lru_cache.popitem(last=False)  # Remove oldest
-        
+
         # Add/update entry
         self._lru_cache[cache_key] = (data, now)
-    
+
     def _calculate_adaptive_ttl(self, cache_key: tuple[int, int | None]) -> int:
         """
         Calculate adaptive TTL based on access frequency.
-        
+
         Frequently accessed chats get longer TTL.
         """
         base_ttl = self._base_ttl
-        
+
         # Check access frequency
         if cache_key in self._last_access_times:
             # Recently accessed - extend TTL
             return int(base_ttl * 1.5)  # 50% longer for active chats
-        
+
         return base_ttl
-    
+
     def get_cache_stats(self) -> dict[str, Any]:
         """
         Get cache performance statistics.
-        
+
         Returns:
             Dictionary with hit/miss counts and hit rate
         """
         total = self._hit_count + self._miss_count
         hit_rate = (self._hit_count / total * 100) if total > 0 else 0.0
-        
+
         return {
             "hits": self._hit_count,
             "misses": self._miss_count,
@@ -228,7 +230,9 @@ class ContextCache:
                 cursor = 0
 
                 while True:
-                    cursor, keys = await self._redis.scan(cursor, match=pattern, count=100)
+                    cursor, keys = await self._redis.scan(
+                        cursor, match=pattern, count=100
+                    )
                     if keys:
                         await self._redis.delete(*keys)
                     if cursor == 0:
@@ -240,4 +244,3 @@ class ContextCache:
 
         except Exception as exc:
             logger.warning(f"Redis context cache invalidate failed: {exc}")
-

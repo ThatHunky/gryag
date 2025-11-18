@@ -37,4 +37,3 @@ def test_destination_highlight_keeps_blank_base():
     destination_button = markup.inline_keyboard[3][0]
     assert destination_button.text == "🟢 "
     assert destination_button.callback_data == "checkers:move:test-game:3:0"
-

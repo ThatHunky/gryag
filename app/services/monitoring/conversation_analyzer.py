@@ -23,8 +23,8 @@ from typing import Any
 from aiogram.types import Message
 
 from app.services.monitoring.message_classifier import (
-    MessageValue,
     ClassificationResult,
+    MessageValue,
 )
 
 LOGGER = logging.getLogger(__name__)

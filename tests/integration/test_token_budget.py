@@ -5,10 +5,7 @@ Tests to ensure context layers respect token budgets and
 that token optimization features work correctly.
 """
 
-import asyncio
-import sqlite3
 from pathlib import Path
-from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -222,7 +219,7 @@ async def test_token_estimation_accuracy(test_db: Path, test_settings: Settings)
         (" ".join(["word"] * 100), 130),  # ~130 tokens for 100 words
     ]
 
-    for text, expected_min_tokens in test_cases:
+    for text, _expected_min_tokens in test_cases:
         message = {"role": "user", "parts": [{"text": text}]}
         estimated = manager._estimate_tokens([message])
 

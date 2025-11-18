@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Literal
 import uuid
+from typing import Literal
 
 from app.infrastructure.db_utils import get_db_connection
 
@@ -16,11 +16,11 @@ GameStatus = Literal["pending", "active", "finished", "cancelled"]
 
 class CheckersGameStore:
     """Database operations for checkers games."""
-    
+
     def __init__(self, database_url: str):
         """Initialize game store with database URL."""
         self.database_url = database_url
-    
+
     async def create_challenge(
         self,
         chat_id: int,
@@ -34,7 +34,7 @@ class CheckersGameStore:
         async with get_db_connection(self.database_url) as conn:
             await conn.execute(
                 """
-                INSERT INTO checkers_games 
+                INSERT INTO checkers_games
                 (id, chat_id, thread_id, challenger_id, opponent_id, current_player,
                  game_state, game_status, winner_id, challenge_message_id, board_message_id,
                  created_at, updated_at)
@@ -50,7 +50,7 @@ class CheckersGameStore:
 
         logger.info(f"Created pending checkers challenge {game_id} in chat {chat_id}")
         return game_id
-    
+
     async def set_challenge_message(self, game_id: str, message_id: int) -> None:
         """Store Telegram message ID for a challenge announcement."""
         current_time = int(time.time())
@@ -147,7 +147,7 @@ class CheckersGameStore:
 
         logger.info(f"Challenge {game_id} accepted by user {opponent_id}")
         return True
-    
+
     async def get_game(self, game_id: str) -> dict | None:
         """Get game by ID. Returns None if not found."""
         async with get_db_connection(self.database_url) as conn:
@@ -161,10 +161,10 @@ class CheckersGameStore:
                 """,
                 game_id,
             )
-            
+
             if not row:
                 return None
-            
+
             return {
                 "id": row["id"],
                 "chat_id": row["chat_id"],
@@ -180,7 +180,7 @@ class CheckersGameStore:
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
             }
-    
+
     async def get_open_game(
         self, chat_id: int, thread_id: int | None, user_id: int
     ) -> dict | None:
@@ -192,7 +192,7 @@ class CheckersGameStore:
                        game_state, game_status, winner_id, challenge_message_id,
                        board_message_id, created_at, updated_at
                 FROM checkers_games
-                WHERE chat_id = $1 
+                WHERE chat_id = $1
                   AND (thread_id = $2 OR (thread_id IS NULL AND $2 IS NULL))
                   AND game_status IN ('pending', 'active')
                   AND (challenger_id = $3 OR opponent_id = $3)
@@ -203,10 +203,10 @@ class CheckersGameStore:
                 thread_id,
                 user_id,
             )
-            
+
             if not row:
                 return None
-            
+
             return {
                 "id": row["id"],
                 "chat_id": row["chat_id"],
@@ -222,7 +222,7 @@ class CheckersGameStore:
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
             }
-    
+
     async def update_game(
         self,
         game_id: str,
@@ -234,26 +234,26 @@ class CheckersGameStore:
     ) -> None:
         """Update game state."""
         current_time = int(time.time())
-        
+
         updates = ["updated_at = $2", "game_state = $3", "current_player = $4"]
         params = [game_id, current_time, game_state_json, current_player]
         param_index = 5
-        
+
         if game_status:
             updates.append(f"game_status = ${param_index}")
             params.append(game_status)
             param_index += 1
-        
+
         if winner_id is not None:
             updates.append(f"winner_id = ${param_index}")
             params.append(winner_id)
             param_index += 1
-        
+
         if board_message_id is not None:
             updates.append(f"board_message_id = ${param_index}")
             params.append(board_message_id)
             param_index += 1
-        
+
         async with get_db_connection(self.database_url) as conn:
             await conn.execute(
                 f"""
@@ -263,9 +263,9 @@ class CheckersGameStore:
                 """,
                 *params,
             )
-        
+
         logger.debug(f"Updated checkers game {game_id}")
-    
+
     async def get_user_games(
         self, user_id: int, status: GameStatus | None = None, limit: int = 10
     ) -> list[dict]:
@@ -301,7 +301,7 @@ class CheckersGameStore:
                     user_id,
                     limit,
                 )
-            
+
             return [
                 {
                     "id": row["id"],
@@ -320,4 +320,3 @@ class CheckersGameStore:
                 }
                 for row in rows
             ]
-

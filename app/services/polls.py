@@ -11,16 +11,16 @@ import json
 import logging
 import time
 from datetime import datetime, timedelta
-from typing import Any, Optional
-from dataclasses import dataclass
-from enum import Enum
+from typing import Any
 
 # Import logging framework
 try:
-    from app.services.tool_logging import log_tool_execution, ToolLogger
+    from app.services.tool_logging import ToolLogger, log_tool_execution
 except ImportError:
     # Fallback if logging framework not available
-    log_tool_execution = lambda name: lambda f: f  # No-op decorator
+    def log_tool_execution(name):
+        return lambda f: f  # No-op decorator
+
     ToolLogger = None
 
 # Setup tool logger
@@ -33,14 +33,14 @@ _active_polls = {}
 _poll_votes = {}
 
 
-def _generate_poll_id(chat_id: int, thread_id: Optional[int]) -> str:
+def _generate_poll_id(chat_id: int, thread_id: int | None) -> str:
     """Generate a unique poll ID."""
     return f"poll_{chat_id}_{thread_id or 0}_{int(time.time())}"
 
 
 def _format_poll_display(poll_data: dict[str, Any]) -> str:
     """Format poll for display."""
-    poll_text = f"📋 Опитування\n\n"
+    poll_text = "📋 Опитування\n\n"
     poll_text += f"❓ {poll_data['question']}\n\n"
 
     total_votes = sum(opt["votes"] for opt in poll_data["options"])
@@ -71,19 +71,19 @@ def _format_poll_display(poll_data: dict[str, Any]) -> str:
             minutes = int((remaining.total_seconds() % 3600) // 60)
             poll_text += f"⏰ Залишилось: {hours}г {minutes}хв\n"
 
-    poll_text += f"\n💬 Для голосування напишіть номер варіанту"
+    poll_text += "\n💬 Для голосування напишіть номер варіанту"
 
     return poll_text
 
 
 def _create_poll_data(
     chat_id: int,
-    thread_id: Optional[int],
+    thread_id: int | None,
     creator_id: int,
     question: str,
     options: list[str],
     poll_type: str = "regular",
-    duration_hours: Optional[int] = None,
+    duration_hours: int | None = None,
 ) -> dict[str, Any]:
     """Create poll data structure."""
     poll_id = _generate_poll_id(chat_id, thread_id)
@@ -180,7 +180,10 @@ async def _handle_create_poll(params: dict[str, Any]) -> str:
         thread_id_int = int(thread_id) if thread_id is not None else None
     except (ValueError, TypeError):
         return json.dumps(
-            {"success": False, "error": "Невірний тип параметрів (chat_id, creator_id, thread_id мають бути числами)"},
+            {
+                "success": False,
+                "error": "Невірний тип параметрів (chat_id, creator_id, thread_id мають бути числами)",
+            },
             ensure_ascii=False,
         )
 
@@ -421,7 +424,7 @@ async def _handle_get_results(params: dict[str, Any]) -> str:
     # Generate detailed results
     total_votes = sum(opt["votes"] for opt in poll_data["options"])
 
-    results_text = f"📊 Результати опитування:\n\n"
+    results_text = "📊 Результати опитування:\n\n"
     results_text += f"❓ {poll_data['question']}\n\n"
 
     for i, option in enumerate(poll_data["options"]):

@@ -4,10 +4,8 @@ Tests for Episode Boundary Detector.
 Phase 4.1: Tests for automatic episode boundary detection.
 """
 
-import asyncio
 import json
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio

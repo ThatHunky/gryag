@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 import asyncpg
 
-from app.infrastructure.postgres import get_db_connection as get_pg_connection, close_pool
+from app.infrastructure.postgres import get_db_connection as get_pg_connection
 
 logger = logging.getLogger(__name__)
 
@@ -32,26 +32,26 @@ async def execute_with_retry(
         operation_name: Name of operation for logging (helps identify bottlenecks)
     """
     import time as time_module
-    
+
     last_error = None
     operation_start = time_module.time()
-    
+
     for attempt in range(max_retries):
         try:
             result = await coro_func()
             operation_time = int((time_module.time() - operation_start) * 1000)
-            
+
             # Log slow operations (>500ms) to identify bottlenecks
             if operation_time > 500:
                 logger.info(
                     f"Slow {operation_name}: {operation_time}ms (attempt {attempt + 1})"
                 )
-            
+
             return result
         except (asyncpg.PostgresConnectionError, asyncpg.InterfaceError) as e:
             last_error = e
             if attempt < max_retries - 1:
-                delay = min(initial_delay * (2 ** attempt), max_delay)
+                delay = min(initial_delay * (2**attempt), max_delay)
                 logger.warning(
                     f"Database connection error in {operation_name}, retrying in {delay:.2f}s "
                     f"(attempt {attempt + 1}/{max_retries}): {e}"
@@ -92,27 +92,31 @@ async def get_db_connection(
     """
     async with get_pg_connection(database_url) as conn:
         yield conn
-    
+
 
 async def init_database(database_url: str) -> None:
     """
     Initialize PostgreSQL database by running schema migrations.
-    
+
     Args:
         database_url: PostgreSQL connection string
     """
     from pathlib import Path
-    
+
     # Read PostgreSQL schema
     schema_path = Path(__file__).resolve().parents[2] / "db" / "schema_postgresql.sql"
     if not schema_path.exists():
         # Fallback to legacy location
-        schema_path = Path(__file__).resolve().parent.parent / "db" / "schema_postgresql.sql"
-    
+        schema_path = (
+            Path(__file__).resolve().parent.parent / "db" / "schema_postgresql.sql"
+        )
+
     if not schema_path.exists():
-        logger.warning(f"PostgreSQL schema not found at {schema_path}, skipping initialization")
+        logger.warning(
+            f"PostgreSQL schema not found at {schema_path}, skipping initialization"
+        )
         return
-    
+
     async with get_db_connection(database_url) as conn:
         schema_sql = schema_path.read_text(encoding="utf-8")
         # Execute schema in a transaction
@@ -125,7 +129,9 @@ async def init_database(database_url: str) -> None:
             # If schema already exists, that's okay - just log it
             error_msg = str(e).lower()
             if "already exists" in error_msg or "duplicate" in error_msg:
-                logger.info(f"PostgreSQL schema already initialized (some objects already exist): {e}")
+                logger.info(
+                    f"PostgreSQL schema already initialized (some objects already exist): {e}"
+                )
             else:
                 logger.error(f"Failed to initialize PostgreSQL database: {e}")
                 raise
@@ -134,14 +140,14 @@ async def init_database(database_url: str) -> None:
 async def apply_migrations(database_url: str) -> None:
     """
     Apply versioned SQL migrations from db/migrations/ directory.
-    
+
     - Creates a tracking table migrations_applied(filename TEXT PRIMARY KEY, applied_at BIGINT)
     - Applies any .sql files not yet recorded, in lexical order
     - Runs each migration in its own transaction
     """
     import time
     from pathlib import Path
-    
+
     migrations_dir_candidates = [
         Path(__file__).resolve().parents[2] / "db" / "migrations",
         Path(__file__).resolve().parent.parent / "db" / "migrations",
@@ -154,12 +160,14 @@ async def apply_migrations(database_url: str) -> None:
     if migrations_dir is None:
         logger.info("No migrations directory found; skipping migrations")
         return
-    
-    migration_files = sorted([f for f in migrations_dir.iterdir() if f.suffix.lower() == ".sql"])
+
+    migration_files = sorted(
+        [f for f in migrations_dir.iterdir() if f.suffix.lower() == ".sql"]
+    )
     if not migration_files:
         logger.info("No migration files found; nothing to apply")
         return
-    
+
     async with get_db_connection(database_url) as conn:
         # Ensure tracking table exists
         await conn.execute(
@@ -172,17 +180,17 @@ async def apply_migrations(database_url: str) -> None:
         )
         rows = await conn.fetch("SELECT filename FROM migrations_applied")
         already_applied = {r["filename"] for r in rows}
-        
+
         to_apply = [mf for mf in migration_files if mf.name not in already_applied]
         if not to_apply:
             logger.info("All migrations already applied")
             return
-        
+
         logger.info(
             "Applying migrations",
             extra={"count": len(to_apply), "files": [f.name for f in to_apply]},
         )
-        
+
         for mf in to_apply:
             sql = mf.read_text(encoding="utf-8")
             try:

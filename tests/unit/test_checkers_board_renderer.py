@@ -24,4 +24,3 @@ def test_render_board_with_forced_capture_shows_hint():
     output = render_board(game, current_player=1)
 
     assert "⚠️ Є обов'язковий удар. Обери фігуру, що може бити суперника." in output
-

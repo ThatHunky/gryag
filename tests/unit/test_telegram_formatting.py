@@ -1,7 +1,5 @@
 """Tests for Telegram HTML formatting utilities."""
 
-import pytest
-
 
 def test_format_for_telegram_basic_text():
     """Test basic text without special characters."""

@@ -11,10 +11,14 @@ async def test_list_chat_users_prioritizes_active_members(test_db):
 
     chat_id = -123
 
-    await store.get_or_create_profile(1, chat_id, display_name="Active", username="active")
+    await store.get_or_create_profile(
+        1, chat_id, display_name="Active", username="active"
+    )
     await store.update_profile(1, chat_id, membership_status="member", last_seen=200)
 
-    await store.get_or_create_profile(2, chat_id, display_name="Lefty", username="lefty")
+    await store.get_or_create_profile(
+        2, chat_id, display_name="Lefty", username="lefty"
+    )
     await store.update_profile(2, chat_id, membership_status="left", last_seen=300)
 
     all_users = await store.list_chat_users(chat_id, include_inactive=True)
@@ -34,7 +38,9 @@ async def test_adapter_list_chat_users_matches_store(test_db):
 
     chat_id = -456
 
-    await adapter.get_or_create_profile(10, chat_id, display_name="AdapterUser", username="adapter")
+    await adapter.get_or_create_profile(
+        10, chat_id, display_name="AdapterUser", username="adapter"
+    )
     await adapter.update_profile(10, chat_id, membership_status="member", last_seen=500)
 
     users = await adapter.list_chat_users(chat_id)

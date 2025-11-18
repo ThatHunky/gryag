@@ -16,57 +16,59 @@ Tools include:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-from typing import Any, Awaitable, Callable
-from io import BytesIO
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import aiohttp
-from app.services.calculator import calculator_tool, CALCULATOR_TOOL_DEFINITION
-from app.services.weather import weather_tool, WEATHER_TOOL_DEFINITION
-from app.services.currency import currency_tool, CURRENCY_TOOL_DEFINITION
-from app.services.polls import polls_tool, POLLS_TOOL_DEFINITION
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import BufferedInputFile
+
+from app.config import Settings
+from app.repositories.memory_repository import MemoryRepository
+from app.services.calculator import CALCULATOR_TOOL_DEFINITION, calculator_tool
+from app.services.context_store import ContextStore, format_metadata
+from app.services.currency import CURRENCY_TOOL_DEFINITION, currency_tool
+from app.services.gemini import GeminiClient
+from app.services.image_generation import (
+    EDIT_IMAGE_TOOL_DEFINITION,
+    GENERATE_IMAGE_TOOL_DEFINITION,
+    ImageGenerationError,
+    QuotaExceededError,
+)
+from app.services.media import collect_media_parts
+from app.services.polls import POLLS_TOOL_DEFINITION, polls_tool
+from app.services.profile_photo_tool import get_user_profile_photo
 from app.services.search_tool import (
+    FETCH_WEB_CONTENT_TOOL_DEFINITION,
+    SEARCH_WEB_TOOL_DEFINITION,
     analyze_image_results,
     analyze_text_results,
     analyze_video_results,
     fetch_web_content_tool,
-    FETCH_WEB_CONTENT_TOOL_DEFINITION,
     search_web_tool,
-    SEARCH_WEB_TOOL_DEFINITION,
-)
-from app.services.image_generation import (
-    GENERATE_IMAGE_TOOL_DEFINITION,
-    EDIT_IMAGE_TOOL_DEFINITION,
-    QuotaExceededError,
-    ImageGenerationError,
 )
 from app.services.tools import (
-    REMEMBER_MEMORY_DEFINITION,
-    RECALL_MEMORIES_DEFINITION,
-    FORGET_MEMORY_DEFINITION,
     FORGET_ALL_MEMORIES_DEFINITION,
+    FORGET_MEMORY_DEFINITION,
+    RECALL_MEMORIES_DEFINITION,
+    REMEMBER_MEMORY_DEFINITION,
     SET_PRONOUNS_DEFINITION,
-    remember_memory_tool,
-    recall_memories_tool,
-    forget_memory_tool,
     forget_all_memories_tool,
+    forget_memory_tool,
+    recall_memories_tool,
+    remember_memory_tool,
     set_pronouns_tool,
 )
-from app.services.context_store import ContextStore, format_metadata
-from app.services.gemini import GeminiClient
-from app.services.user_profile import UserProfileStore
-from app.repositories.memory_repository import MemoryRepository
-from app.config import Settings
-from app.services.media import collect_media_parts
-from app.services.profile_photo_tool import get_user_profile_photo
 from app.services.tools.moderation_tools import (
-    build_tool_definitions as build_moderation_tool_definitions,
     build_tool_callbacks as build_moderation_tool_callbacks,
 )
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import BufferedInputFile
+from app.services.tools.moderation_tools import (
+    build_tool_definitions as build_moderation_tool_definitions,
+)
+from app.services.user_profile import UserProfileStore
+from app.services.weather import WEATHER_TOOL_DEFINITION, weather_tool
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +166,9 @@ def get_search_messages_definition() -> dict[str, Any]:
     }
 
 
-def build_tool_definitions(settings: Settings, is_admin: bool = False) -> list[dict[str, Any]]:
+def build_tool_definitions(
+    settings: Settings, is_admin: bool = False
+) -> list[dict[str, Any]]:
     """
     Build the complete list of tool definitions based on settings.
 
@@ -302,12 +306,35 @@ def _is_nsfw_query(query: str) -> bool:
 
     # Strong NSFW indicators (always mark as NSFW)
     strong_nsfw = {
-        "nude", "naked", "porn", "sex", "xxx", "porno",
-        "boob", "breast", "ass ", "dick", "cock", "pussy", "vagina", "penis",
-        "horny", "masturbate", "orgasm", "stripper",
-        "prostitute", "escort", "nsfw", "18+",
-        "explicit", "uncensored", "fetish", "bdsm",
-        "bondage", "undress", "topless",
+        "nude",
+        "naked",
+        "porn",
+        "sex",
+        "xxx",
+        "porno",
+        "boob",
+        "breast",
+        "ass ",
+        "dick",
+        "cock",
+        "pussy",
+        "vagina",
+        "penis",
+        "horny",
+        "masturbate",
+        "orgasm",
+        "stripper",
+        "prostitute",
+        "escort",
+        "nsfw",
+        "18+",
+        "explicit",
+        "uncensored",
+        "fetish",
+        "bdsm",
+        "bondage",
+        "undress",
+        "topless",
     }
 
     for keyword in strong_nsfw:
@@ -439,9 +466,9 @@ def build_tool_callbacks(
                     "chat_id": chat_id,
                     "search_type": search_type,
                     "query_length": len(query),
-                }
+                },
             )
-            
+
             # Call the original search_web_tool
             result_json = await search_web_tool(params, gemini_client, api_key=None)
 
@@ -453,15 +480,14 @@ def build_tool_callbacks(
             # Check if this was an image search and we have bot/chat_id
             search_type = params.get("search_type", "text")
             results = result.get("results", [])
-            
+
             # Smart search analysis (if enabled)
             analysis_result = None
             if settings.enable_smart_search_analysis and gemini_client and results:
                 max_to_analyze = min(
-                    settings.smart_search_max_results_to_analyze,
-                    len(results)
+                    settings.smart_search_max_results_to_analyze, len(results)
                 )
-                
+
                 try:
                     if search_type in ("text", "news"):
                         # Fetch content from top results
@@ -471,7 +497,7 @@ def build_tool_callbacks(
                             url = result_item.get("url", "")
                             if not url:
                                 continue
-                            
+
                             try:
                                 # Fetch content using fetch_web_content_tool
                                 content_params = {
@@ -479,24 +505,34 @@ def build_tool_callbacks(
                                     "result_index": idx,
                                     "search_query": query,
                                 }
-                                content_json = await fetch_web_content_tool(content_params)
+                                content_json = await fetch_web_content_tool(
+                                    content_params
+                                )
                                 content_data = json.loads(content_json)
-                                
+
                                 if "error" not in content_data:
-                                    fetched_content.append({
-                                        "url": url,
-                                        "title": content_data.get("title", result_item.get("title", "")),
-                                        "content": content_data.get("content", ""),
-                                    })
+                                    fetched_content.append(
+                                        {
+                                            "url": url,
+                                            "title": content_data.get(
+                                                "title", result_item.get("title", "")
+                                            ),
+                                            "content": content_data.get("content", ""),
+                                        }
+                                    )
                             except Exception as e:
-                                logger.warning(f"Failed to fetch content from {url}: {e}")
+                                logger.warning(
+                                    f"Failed to fetch content from {url}: {e}"
+                                )
                                 # Fallback to using description from search result
-                                fetched_content.append({
-                                    "url": url,
-                                    "title": result_item.get("title", ""),
-                                    "content": result_item.get("description", ""),
-                                })
-                        
+                                fetched_content.append(
+                                    {
+                                        "url": url,
+                                        "title": result_item.get("title", ""),
+                                        "content": result_item.get("description", ""),
+                                    }
+                                )
+
                         if fetched_content:
                             analysis_result = await analyze_text_results(
                                 query=query,
@@ -504,7 +540,7 @@ def build_tool_callbacks(
                                 fetched_content=fetched_content,
                                 gemini_client=gemini_client,
                             )
-                    
+
                     elif search_type == "videos":
                         # Analyze video metadata
                         videos_to_analyze = results[:max_to_analyze]
@@ -514,9 +550,9 @@ def build_tool_callbacks(
                                 results=videos_to_analyze,
                                 gemini_client=gemini_client,
                             )
-                    
+
                     # Note: Image analysis happens after downloading (see below)
-                    
+
                 except Exception as e:
                     logger.warning(f"Smart search analysis failed: {e}", exc_info=True)
                     # Continue without analysis - return original results
@@ -574,13 +610,11 @@ def build_tool_callbacks(
                                         logger.debug(
                                             f"Downloaded image {len(downloaded_images)}: {image_url[:50]}"
                                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         logger.warning(f"Timeout downloading image: {image_url[:50]}")
                         failed_urls.append(image_url)
                     except Exception as e:
-                        logger.warning(
-                            f"Error downloading image from search: {e}"
-                        )
+                        logger.warning(f"Error downloading image from search: {e}")
                         failed_urls.append(image_url)
 
                 # Send downloaded images as media group if multiple, or single photo if one
@@ -606,7 +640,9 @@ def build_tool_callbacks(
 
                             media_group = [
                                 InputMediaPhoto(
-                                    media=BufferedInputFile(img_data, filename=filename),
+                                    media=BufferedInputFile(
+                                        img_data, filename=filename
+                                    ),
                                     caption=None,
                                     has_spoiler=is_nsfw,
                                 )
@@ -665,18 +701,24 @@ def build_tool_callbacks(
                 # Return updated result with send status
                 result["_images_sent"] = sent_count
                 if failed_urls:
-                    result["_failed_urls"] = failed_urls[:3]  # Keep first 3 for debugging
-                
+                    result["_failed_urls"] = failed_urls[
+                        :3
+                    ]  # Keep first 3 for debugging
+
                 # Analyze images if smart search is enabled
-                if settings.enable_smart_search_analysis and gemini_client and downloaded_images:
+                if (
+                    settings.enable_smart_search_analysis
+                    and gemini_client
+                    and downloaded_images
+                ):
                     try:
                         max_to_analyze = min(
                             settings.smart_search_max_results_to_analyze,
-                            len(downloaded_images)
+                            len(downloaded_images),
                         )
                         images_to_analyze = downloaded_images[:max_to_analyze]
                         results_to_analyze = results[:max_to_analyze]
-                        
+
                         analysis_result = await analyze_image_results(
                             query=query,
                             results=results_to_analyze,
@@ -686,17 +728,19 @@ def build_tool_callbacks(
                     except Exception as e:
                         logger.warning(f"Image analysis failed: {e}", exc_info=True)
                         analysis_result = None
-            
+
             # Add analysis results to response if available
             if analysis_result:
                 result["analysis"] = analysis_result
                 # Preserve original results
                 result["original_results"] = results.copy()
-            
+
             return json.dumps(result)
 
-        callbacks["search_web"] = make_tracked_callback("search_web", search_web_callback)
-        
+        callbacks["search_web"] = make_tracked_callback(
+            "search_web", search_web_callback
+        )
+
         # Fetch web content tool
         callbacks["fetch_web_content"] = make_tracked_callback(
             "fetch_web_content", fetch_web_content_tool
@@ -889,8 +933,9 @@ def build_tool_callbacks(
             # Detect aspect ratio from original image
             detected_aspect_ratio = "1:1"  # Default fallback
             try:
-                from PIL import Image
                 from io import BytesIO
+
+                from PIL import Image
 
                 img = Image.open(BytesIO(image_bytes))
                 width, height = img.size
@@ -1187,12 +1232,12 @@ def build_tool_callbacks(
     # Moderation tools - always include if telegram_service available
     # Bot can use autonomously; Telegram API enforces actual permissions
     if telegram_service is not None:
-        logger.debug(f"Building moderation tool callbacks (bot can use autonomously)")
+        logger.debug("Building moderation tool callbacks (bot can use autonomously)")
         moderation_callbacks = build_moderation_tool_callbacks(telegram_service)
         callbacks.update(moderation_callbacks)
         logger.debug(f"Added {len(moderation_callbacks)} moderation callbacks")
     else:
-        logger.warning(f"telegram_service is None - moderation tools not available")
+        logger.warning("telegram_service is None - moderation tools not available")
 
     logger.info(f"Built {len(callbacks)} tool callbacks: {', '.join(callbacks.keys())}")
     return callbacks

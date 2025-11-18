@@ -5,14 +5,15 @@ Tests that replied-to messages are always included in Gemini context,
 both in JSON and compact conversation formats.
 """
 
-import pytest
-from unittest.mock import Mock, AsyncMock, MagicMock
-from aiogram.types import Message, User, Chat
 from datetime import datetime
+from unittest.mock import Mock
+
+import pytest
+from aiogram.types import Message, User
 
 from app.services.conversation_formatter import (
-    format_message_compact,
     format_history_compact,
+    format_message_compact,
 )
 
 
@@ -135,12 +136,6 @@ class TestReplyContextInclusion:
         # This tests the logic in chat.py where we insert the inline reply
 
         # Mock a reply_context
-        reply_context = {
-            "text": "What is the capital of Ukraine?",
-            "name": "Alice",
-            "username": "alice",
-            "message_id": 100,
-        }
 
         # In the actual code, we'd build user_parts and insert the inline reply
         # This is tested via integration tests
@@ -242,12 +237,6 @@ class TestHistoryInjection:
         ]
 
         # Mock reply_context_for_history
-        reply_context = {
-            "message_id": 1,
-            "user_id": 123,
-            "name": "Alice",
-            "text": "What is ROE?",
-        }
 
         # In actual code, this would inject reply_context into history
         # Check that message_id=1 is not in history

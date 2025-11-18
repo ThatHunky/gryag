@@ -1,11 +1,10 @@
 """Unit tests for retention and pruning logic."""
 
-import pytest
-import pytest_asyncio
-import time
 import json
-from pathlib import Path
+import time
+
 import aiosqlite
+import pytest
 
 from app.services.context_store import ContextStore
 

@@ -5,12 +5,10 @@ Handles data access for chat profiles and chat-level facts.
 
 from __future__ import annotations
 
-import json
 import math
 import time
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from app.repositories.base import Repository
 
@@ -21,16 +19,16 @@ class ChatProfile:
 
     chat_id: int
     chat_type: str
-    chat_title: Optional[str] = None
+    chat_title: str | None = None
     participant_count: int = 0
-    bot_joined_at: Optional[int] = None
-    last_active: Optional[int] = None
-    culture_summary: Optional[str] = None
+    bot_joined_at: int | None = None
+    last_active: int | None = None
+    culture_summary: str | None = None
     profile_version: int = 1
-    created_at: Optional[int] = None
-    updated_at: Optional[int] = None
+    created_at: int | None = None
+    updated_at: int | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "chat_id": self.chat_id,
@@ -50,24 +48,24 @@ class ChatProfile:
 class ChatFact:
     """Chat fact entity."""
 
-    fact_id: Optional[int]
+    fact_id: int | None
     chat_id: int
     fact_category: str
     fact_key: str
     fact_value: str
-    fact_description: Optional[str] = None
+    fact_description: str | None = None
     confidence: float = 0.7
     evidence_count: int = 1
-    first_observed: Optional[int] = None
-    last_reinforced: Optional[int] = None
-    participant_consensus: Optional[float] = None
+    first_observed: int | None = None
+    last_reinforced: int | None = None
+    participant_consensus: float | None = None
     is_active: int = 1
     decay_rate: float = 0.0
-    created_at: Optional[int] = None
-    updated_at: Optional[int] = None
-    evidence_text: Optional[str] = None  # Temporary field for extraction
+    created_at: int | None = None
+    updated_at: int | None = None
+    evidence_text: str | None = None  # Temporary field for extraction
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "fact_id": self.fact_id,
@@ -88,7 +86,7 @@ class ChatFact:
         }
 
     @classmethod
-    def from_row(cls, row: Dict[str, Any]) -> "ChatFact":
+    def from_row(cls, row: dict[str, Any]) -> ChatFact:
         """Create from database row."""
         return cls(
             fact_id=row.get("id"),
@@ -116,7 +114,7 @@ class ChatProfileRepository(Repository):
         self,
         chat_id: int,
         chat_type: str,
-        chat_title: Optional[str] = None,
+        chat_title: str | None = None,
     ) -> ChatProfile:
         """Get or create chat profile.
 
@@ -145,7 +143,7 @@ class ChatProfileRepository(Repository):
         now = int(time.time())
         await self._execute(
             """
-            INSERT INTO chat_profiles 
+            INSERT INTO chat_profiles
             (chat_id, chat_type, chat_title, bot_joined_at, last_active, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
@@ -154,7 +152,7 @@ class ChatProfileRepository(Repository):
 
         return await self._get_profile(chat_id)
 
-    async def _get_profile(self, chat_id: int) -> Optional[ChatProfile]:
+    async def _get_profile(self, chat_id: int) -> ChatProfile | None:
         """Get chat profile by ID."""
         query = "SELECT * FROM chat_profiles WHERE chat_id = ?"
         row = await self._fetch_one(query, (chat_id,))
@@ -184,9 +182,9 @@ class ChatProfileRepository(Repository):
         category: str,
         fact_key: str,
         fact_value: str,
-        fact_description: Optional[str] = None,
+        fact_description: str | None = None,
         confidence: float = 0.7,
-        evidence_text: Optional[str] = None,
+        evidence_text: str | None = None,
     ) -> int:
         """Add or update a chat fact.
 
@@ -329,7 +327,7 @@ class ChatProfileRepository(Repository):
 
     async def _get_fact_by_key(
         self, chat_id: int, fact_key: str
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Get active fact by key."""
         query = """
             SELECT * FROM chat_facts
@@ -342,7 +340,7 @@ class ChatProfileRepository(Repository):
     async def _record_fact_version(
         self,
         fact_id: int,
-        previous_version_id: Optional[int],
+        previous_version_id: int | None,
         version_number: int,
         change_type: str,
         confidence_delta: float,
@@ -373,8 +371,8 @@ class ChatProfileRepository(Repository):
         chat_id: int,
         limit: int = 10,
         min_confidence: float = 0.6,
-        categories: Optional[List[str]] = None,
-    ) -> List[ChatFact]:
+        categories: list[str] | None = None,
+    ) -> list[ChatFact]:
         """Get top chat facts for context inclusion.
 
         Ranking factors:
@@ -451,9 +449,7 @@ class ChatProfileRepository(Repository):
         # Return top facts
         return [ChatFact.from_row(dict(row)) for score, row in scored_facts[:limit]]
 
-    async def get_chat_summary(
-        self, chat_id: int, max_facts: int = 10
-    ) -> Optional[str]:
+    async def get_chat_summary(self, chat_id: int, max_facts: int = 10) -> str | None:
         """Generate concise chat profile summary for context.
 
         Format:
@@ -475,7 +471,7 @@ class ChatProfileRepository(Repository):
             return None
 
         # Group by category
-        by_category: Dict[str, List[ChatFact]] = {}
+        by_category: dict[str, list[ChatFact]] = {}
         for fact in facts:
             by_category.setdefault(fact.fact_category, []).append(fact)
 
@@ -519,7 +515,7 @@ class ChatProfileRepository(Repository):
 
     async def get_all_facts(
         self, chat_id: int, include_inactive: bool = False
-    ) -> List[ChatFact]:
+    ) -> list[ChatFact]:
         """Get all facts for a chat.
 
         Args:
@@ -541,7 +537,7 @@ class ChatProfileRepository(Repository):
         return [ChatFact.from_row(dict(row)) for row in rows]
 
     # Abstract method implementations (required by base Repository)
-    async def find_by_id(self, id: int) -> Optional[ChatProfile]:
+    async def find_by_id(self, id: int) -> ChatProfile | None:
         """Find chat profile by ID.
 
         Args:

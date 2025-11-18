@@ -1,8 +1,8 @@
 """Unit tests for database migrator."""
 
-import pytest
-from pathlib import Path
 import aiosqlite
+import pytest
+
 from app.infrastructure.database.migrator import DatabaseMigrator, Migration
 
 

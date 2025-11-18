@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from app.services.user_profile import UserProfileStore
 from app.services.tools.memory_tools import set_pronouns_tool
+from app.services.user_profile import UserProfileStore
 
 
 @pytest.mark.asyncio

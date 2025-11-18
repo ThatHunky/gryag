@@ -8,17 +8,18 @@ and adaptive retention.
 
 from __future__ import annotations
 
+from app.services.context.episodic_memory import Episode, EpisodicMemoryStore
+
 # Import implemented classes
 from app.services.context.hybrid_search import HybridSearchEngine, SearchResult
-from app.services.context.episodic_memory import EpisodicMemoryStore, Episode
 from app.services.context.multi_level_context import (
-    MultiLevelContextManager,
-    LayeredContext,
-    ImmediateContext,
-    RecentContext,
-    RelevantContext,
     BackgroundContext,
     EpisodicContext,
+    ImmediateContext,
+    LayeredContext,
+    MultiLevelContextManager,
+    RecentContext,
+    RelevantContext,
 )
 
 __all__ = [

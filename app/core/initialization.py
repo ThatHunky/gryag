@@ -7,7 +7,7 @@ and components of the bot application.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from app.config import Settings
 
@@ -25,7 +25,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-async def init_redis_client(settings: Settings) -> Optional[RedisClient]:
+async def init_redis_client(settings: Settings) -> RedisClient | None:
     """Initialize Redis client if enabled and available.
 
     Args:
@@ -42,10 +42,10 @@ async def init_redis_client(settings: Settings) -> Optional[RedisClient]:
         return None
 
     import asyncio
-    
+
     max_retries = 3
     retry_delay = 2.0
-    
+
     for attempt in range(max_retries):
         try:
             redis_client = redis.from_url(
@@ -64,7 +64,9 @@ async def init_redis_client(settings: Settings) -> Optional[RedisClient]:
                 )
                 await asyncio.sleep(retry_delay)
             else:
-                logger.warning(f"Не вдалося під'єднати Redis після {max_retries} спроб: {exc}")
+                logger.warning(
+                    f"Не вдалося під'єднати Redis після {max_retries} спроб: {exc}"
+                )
                 return None
-    
+
     return None

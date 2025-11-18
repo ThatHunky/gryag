@@ -17,15 +17,15 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import asyncpg
-from app.infrastructure.query_converter import convert_query_to_postgres
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.infrastructure.db_utils import get_db_connection
+from app.infrastructure.query_converter import convert_query_to_postgres
 
 if TYPE_CHECKING:
     from aiogram import Bot
+
     from app.services.context_store import ContextStore
 
 logger = logging.getLogger(__name__)
@@ -141,7 +141,9 @@ class DonationScheduler:
         except Exception as e:
             logger.error(f"Failed to start donation scheduler: {e}", exc_info=True)
             self._running = False
-            logger.warning("Donation scheduler will continue trying to initialize on next attempt")
+            logger.warning(
+                "Donation scheduler will continue trying to initialize on next attempt"
+            )
 
     async def stop(self) -> None:
         """Stop the donation reminder scheduler."""
@@ -279,7 +281,7 @@ class DonationScheduler:
             )
             async with get_db_connection(self.database_url) as conn:
                 row = await conn.fetchrow(query, *params)
-                count = row['count'] if row else 0
+                count = row["count"] if row else 0
 
                 return count > 0
 
@@ -316,7 +318,7 @@ class DonationScheduler:
                     # Never sent before, should send
                     return True
 
-                last_send_ts = row['last_send_ts']
+                last_send_ts = row["last_send_ts"]
                 time_since_last = current_ts - last_send_ts
 
                 # Check if enough time has passed based on the interval

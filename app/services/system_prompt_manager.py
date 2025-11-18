@@ -5,12 +5,11 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
 
 import asyncpg
-from app.infrastructure.query_converter import convert_query_to_postgres
+
 from app.infrastructure.db_utils import get_db_connection
+from app.infrastructure.query_converter import convert_query_to_postgres
 
 logger = logging.getLogger(__name__)
 
@@ -422,7 +421,10 @@ class SystemPromptManager:
         return self._last_cache_hit
 
     def _cache_prompt(
-        self, chat_id: int | None, prompt: SystemPrompt | None, timestamp: float | None = None
+        self,
+        chat_id: int | None,
+        prompt: SystemPrompt | None,
+        timestamp: float | None = None,
     ) -> None:
         """Store prompt result in local cache."""
         self._prompt_cache[chat_id] = (prompt, timestamp or time.time())

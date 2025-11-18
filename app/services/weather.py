@@ -17,10 +17,12 @@ import aiohttp
 
 # Import logging framework
 try:
-    from app.services.tool_logging import log_tool_execution, ToolLogger
+    from app.services.tool_logging import ToolLogger, log_tool_execution
 except ImportError:
     # Fallback if logging framework not available
-    log_tool_execution = lambda name: lambda f: f  # No-op decorator
+    def log_tool_execution(name):
+        return lambda f: f  # No-op decorator
+
     ToolLogger = None
 
 # Setup tool logger
@@ -108,7 +110,7 @@ class WeatherService:
 
         except aiohttp.ClientError as e:
             self.logger.error(f"Network error fetching weather: {e}")
-            raise ValueError("Помилка з'єднання з сервісом погоди")
+            raise ValueError("Помилка з'єднання з сервісом погоди") from e
 
     async def get_forecast(self, location: str, days: int = 3) -> dict[str, Any]:
         """
@@ -177,7 +179,7 @@ class WeatherService:
 
         except aiohttp.ClientError as e:
             self.logger.error(f"Network error fetching forecast: {e}")
-            raise ValueError("Помилка з'єднання з сервісом погоди")
+            raise ValueError("Помилка з'єднання з сервісом погоди") from e
 
     def _format_current_weather(self, data: dict[str, Any]) -> dict[str, Any]:
         """Format current weather API response."""
@@ -273,8 +275,8 @@ def _get_weather_service() -> WeatherService:
                 api_key=settings.openweather_api_key,
                 base_url=settings.openweather_base_url,
             )
-        except ImportError:
-            raise ValueError("Settings not available")
+        except ImportError as e:
+            raise ValueError("Settings not available") from e
 
     return _weather_service
 
@@ -305,39 +307,48 @@ async def weather_tool(params: dict[str, Any]) -> str:
     # Check throttling if enabled
     if user_id and feature_limiter:
         from app.config import Settings
+
         settings = Settings()
 
         if settings.enable_feature_throttling:
             # Check rate limit (requests per hour)
-            allowed, retry_after, should_show_error = await feature_limiter.check_rate_limit(
-                user_id=user_id,
-                feature="weather",
-                limit_per_hour=settings.weather_limit_per_hour,
+            allowed, retry_after, should_show_error = (
+                await feature_limiter.check_rate_limit(
+                    user_id=user_id,
+                    feature="weather",
+                    limit_per_hour=settings.weather_limit_per_hour,
+                )
             )
 
             if not allowed and should_show_error:
                 minutes = retry_after // 60
-                return json.dumps({
-                    "error": f"⏱ Ліміт запитів погоди вичерпано. Спробуй за {minutes} хв.",
-                    "throttled": True,
-                    "retry_after_seconds": retry_after,
-                })
+                return json.dumps(
+                    {
+                        "error": f"⏱ Ліміт запитів погоди вичерпано. Спробуй за {minutes} хв.",
+                        "throttled": True,
+                        "retry_after_seconds": retry_after,
+                    }
+                )
             elif not allowed:
                 # Silently throttled (error already shown recently)
                 return json.dumps({"throttled": True, "silent": True})
 
             # Check cooldown (minimum time between requests)
-            allowed, retry_after, should_show_error = await feature_limiter.check_cooldown(
-                user_id=user_id,
-                feature="weather",
+            allowed, retry_after, should_show_error = (
+                await feature_limiter.check_cooldown(
+                    user_id=user_id,
+                    feature="weather",
+                )
             )
 
             if not allowed and should_show_error:
-                return json.dumps({
-                    "error": f"⏱ Почекай {retry_after} секунд перед наступним запитом погоди.",
-                    "throttled": True,
-                    "retry_after_seconds": retry_after,
-                })
+                return json.dumps(
+                    {
+                        "error": f"⏱ Почекай {retry_after} секунд перед наступним запитом погоди.",
+                        "throttled": True,
+                        "retry_after_seconds": retry_after,
+                    }
+                )
             elif not allowed:
                 # Silently throttled
                 return json.dumps({"throttled": True, "silent": True})

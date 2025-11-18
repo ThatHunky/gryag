@@ -15,8 +15,6 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
-
 from app.infrastructure.db_utils import get_db_connection
 
 LOGGER = logging.getLogger(__name__)
@@ -124,7 +122,7 @@ class EmbeddingCache:
                 self._hits += 1
 
                 LOGGER.debug(
-                    f"Embedding cache hit (in-memory)",
+                    "Embedding cache hit (in-memory)",
                     extra={"text_preview": text[:50], "model": model},
                 )
                 return embedding
@@ -134,7 +132,9 @@ class EmbeddingCache:
             text_hash = self._hash_text(text)
 
             try:
-                async with asyncio.timeout(10):  # 10-second timeout for database operations
+                async with asyncio.timeout(
+                    10
+                ):  # 10-second timeout for database operations
                     async with get_db_connection(self.db_path) as db:
                         async with db.execute(
                             "SELECT embedding, cached_at FROM embedding_cache WHERE text_hash = ? AND model = ?",
@@ -162,17 +162,20 @@ class EmbeddingCache:
                                     self._hits += 1
 
                                 LOGGER.debug(
-                                    f"Embedding cache hit (persistent)",
+                                    "Embedding cache hit (persistent)",
                                     extra={"text_preview": text[:50], "model": model},
                                 )
                                 return embedding
                             except json.JSONDecodeError:
                                 LOGGER.warning(
-                                    f"Failed to decode cached embedding",
+                                    "Failed to decode cached embedding",
                                     extra={"text_hash": text_hash},
                                 )
-            except asyncio.TimeoutError:
-                LOGGER.warning(f"Timeout accessing persistent embedding cache (10s timeout)", extra={"text_hash": text_hash, "model": model})
+            except TimeoutError:
+                LOGGER.warning(
+                    "Timeout accessing persistent embedding cache (10s timeout)",
+                    extra={"text_hash": text_hash, "model": model},
+                )
                 # Fall through to cache miss - don't block the request
 
         # Cache miss
@@ -209,7 +212,9 @@ class EmbeddingCache:
             embedding_json = json.dumps(embedding)
 
             try:
-                async with asyncio.timeout(10):  # 10-second timeout for database operations
+                async with asyncio.timeout(
+                    10
+                ):  # 10-second timeout for database operations
                     async with get_db_connection(self.db_path) as db:
                         await db.execute(
                             """
@@ -223,11 +228,16 @@ class EmbeddingCache:
                             (text_hash, text_preview, embedding_json, model, now, now),
                         )
                         await db.commit()
-            except asyncio.TimeoutError:
-                LOGGER.warning(f"Timeout persisting embedding to cache (10s timeout)", extra={"text_hash": text_hash, "model": model})
+            except TimeoutError:
+                LOGGER.warning(
+                    "Timeout persisting embedding to cache (10s timeout)",
+                    extra={"text_hash": text_hash, "model": model},
+                )
                 # Don't block the request if persistence fails - in-memory cache is sufficient
             except Exception as e:
-                LOGGER.error(f"Failed to persist embedding to cache: {e}", exc_info=True)
+                LOGGER.error(
+                    f"Failed to persist embedding to cache: {e}", exc_info=True
+                )
                 # Continue - in-memory cache will still work
 
     def _evict_if_needed(self) -> None:
@@ -289,8 +299,11 @@ class EmbeddingCache:
                     )
 
                 return deleted
-        except asyncio.TimeoutError:
-            LOGGER.warning(f"Timeout pruning embedding cache (30s timeout)", extra={"retention_days": retention_days})
+        except TimeoutError:
+            LOGGER.warning(
+                "Timeout pruning embedding cache (30s timeout)",
+                extra={"retention_days": retention_days},
+            )
             return 0
         except Exception as e:
             LOGGER.error(f"Error pruning embedding cache: {e}", exc_info=True)

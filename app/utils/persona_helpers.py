@@ -39,4 +39,3 @@ def get_response(
                 "Missing variable while formatting default response for key=%s", key
             )
     return default
-

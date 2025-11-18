@@ -111,7 +111,7 @@ class BotProfileStore:
         if not vec1 or not vec2 or len(vec1) != len(vec2):
             return 0.0
 
-        dot_product = sum(a * b for a, b in zip(vec1, vec2))
+        dot_product = sum(a * b for a, b in zip(vec1, vec2, strict=False))
         magnitude1 = math.sqrt(sum(a * a for a in vec1))
         magnitude2 = math.sqrt(sum(b * b for b in vec2))
 
@@ -164,7 +164,7 @@ class BotProfileStore:
         best_match = None
         best_similarity = 0.0
 
-        for fact_id, fact_key, fact_value, fact_embedding_json in rows:
+        for fact_id, _fact_key, _fact_value, fact_embedding_json in rows:
             try:
                 fact_embedding = json.loads(fact_embedding_json)
                 similarity = self._cosine_similarity(embedding, fact_embedding)

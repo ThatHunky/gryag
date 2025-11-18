@@ -9,7 +9,7 @@ import asyncio
 import logging
 from typing import Any
 
-from app.services.resource_monitor import get_resource_monitor, ResourceStats
+from app.services.resource_monitor import ResourceStats, get_resource_monitor
 from app.services.telemetry import telemetry
 
 logger = logging.getLogger(__name__)

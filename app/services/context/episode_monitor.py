@@ -11,17 +11,15 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from app.config import Settings
 from app.services.context.episode_boundary_detector import (
-    BoundarySignal,
     EpisodeBoundaryDetector,
     MessageSequence,
 )
-from app.services.context.episodic_memory import EpisodicMemoryStore
 from app.services.context.episode_summarizer import EpisodeSummarizer
+from app.services.context.episodic_memory import EpisodicMemoryStore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -198,13 +196,10 @@ class EpisodeMonitor:
 
     async def _check_all_windows(self) -> None:
         """Check all active windows for boundaries or expiration."""
-        batch_delay_ms = getattr(
-            self.settings, "episode_monitor_batch_delay_ms", 100
-        )
+        batch_delay_ms = getattr(self.settings, "episode_monitor_batch_delay_ms", 100)
         batch_delay = batch_delay_ms / 1000.0  # Convert to seconds
-        
+
         async with self._lock:
-            keys_to_remove = []
             windows_to_check = list(self.windows.items())
 
         # Process windows sequentially with delays to reduce CPU spikes
@@ -216,11 +211,9 @@ class EpisodeMonitor:
 
                 # Check if window expired
                 if window.is_expired(self.window_timeout):
-                    LOGGER.info(
-                        f"Window expired for chat {key[0]}, thread {key[1]}"
-                    )
+                    LOGGER.info(f"Window expired for chat {key[0]}, thread {key[1]}")
                     await self._create_episode_from_window(window, "timeout")
-                    
+
                     async with self._lock:
                         if key in self.windows:
                             del self.windows[key]
@@ -286,7 +279,7 @@ class EpisodeMonitor:
                     del self.windows[key]
                 else:
                     # Just log detection (will be handled later)
-                    LOGGER.debug(f"Boundary detected but auto_close=False")
+                    LOGGER.debug("Boundary detected but auto_close=False")
 
         except Exception as e:
             LOGGER.error(
@@ -351,7 +344,7 @@ class EpisodeMonitor:
                         gemini_summary = result.get("summary")
                         gemini_valence = result.get("emotional_valence", "neutral")
                         gemini_tags = result.get("tags", [])
-                        
+
                         if gemini_topic:
                             topic = gemini_topic
                         if gemini_summary:
@@ -360,7 +353,7 @@ class EpisodeMonitor:
                             emotional_valence = gemini_valence
                         if gemini_tags:
                             tags = [reason] + gemini_tags[:4]  # Limit tags
-                            
+
                         LOGGER.debug(
                             f"Enhanced episode with Gemini summary (topic: {topic[:50]})"
                         )

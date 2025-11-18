@@ -9,7 +9,6 @@ Tests the video/sticker context fix implementation:
 """
 
 import pytest
-from unittest.mock import MagicMock
 
 from app.services.conversation_formatter import describe_media, format_history_compact
 

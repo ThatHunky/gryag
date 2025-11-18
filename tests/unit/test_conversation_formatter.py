@@ -5,6 +5,7 @@ Tests compact plain text formatting for reduced token usage.
 """
 
 import pytest
+
 from app.services.conversation_formatter import (
     build_collision_map,
     describe_media,

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List
 
 import aiosqlite
 
@@ -91,7 +90,7 @@ class DatabaseMigrator:
                 "Migration failed",
                 context={"db_path": str(self.db_path)},
                 cause=e,
-            )
+            ) from None
 
     async def get_current_version(self) -> int:
         """Get current database version.
@@ -111,7 +110,7 @@ class DatabaseMigrator:
                 "Failed to get database version",
                 context={"db_path": str(self.db_path)},
                 cause=e,
-            )
+            ) from None
 
     async def rollback(self, target_version: int = 0) -> int:
         """Rollback migrations to target version.
@@ -153,7 +152,7 @@ class DatabaseMigrator:
                 "Rollback failed",
                 context={"target_version": target_version},
                 cause=e,
-            )
+            ) from None
 
     async def _ensure_migrations_table(self, db: aiosqlite.Connection) -> None:
         """Create migrations tracking table if it doesn't exist."""
@@ -168,7 +167,7 @@ class DatabaseMigrator:
         )
         await db.commit()
 
-    async def _get_applied_migrations(self, db: aiosqlite.Connection) -> List[int]:
+    async def _get_applied_migrations(self, db: aiosqlite.Connection) -> list[int]:
         """Get list of applied migration versions."""
         cursor = await db.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
@@ -202,9 +201,9 @@ class DatabaseMigrator:
                 f"Failed to apply migration {migration.version}",
                 context={"migration": migration.name},
                 cause=e,
-            )
+            ) from None
 
-    def _load_migrations(self) -> List[Migration]:
+    def _load_migrations(self) -> list[Migration]:
         """Load all migration files from migrations directory.
 
         Migration files should be named: {version}_{name}.sql

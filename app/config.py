@@ -841,12 +841,12 @@ class Settings(BaseSettings):
         # Validate admin user IDs format
         if self.admin_user_ids:
             try:
-                self.admin_user_ids_list  # This will raise if format is invalid
+                _ = self.admin_user_ids_list  # This will raise if format is invalid
             except Exception as e:
                 raise ValueError(
                     f"Invalid ADMIN_USER_IDS format: {e}. "
                     "Use comma-separated integers: 123456789,987654321"
-                )
+                ) from e
 
         # Check Redis configuration if enabled
         if self.use_redis and not self.redis_url:

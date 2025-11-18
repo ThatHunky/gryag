@@ -3,55 +3,56 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
-
-import aiohttp
 from typing import Any, cast
 
+import aiohttp
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import BotCommand
 
 from app.config import get_settings
-from app.constants import USER_COMMANDS, CHECKERS_COMMANDS
-from app.handlers.admin import router as admin_router, ADMIN_COMMANDS
+from app.constants import CHECKERS_COMMANDS, USER_COMMANDS
+from app.core.initialization import init_redis_client
+from app.handlers.admin import ADMIN_COMMANDS
+from app.handlers.admin import router as admin_router
 from app.handlers.chat import router as chat_router
-from app.handlers.profile_admin import router as profile_admin_router, PROFILE_COMMANDS
-from app.handlers.chat_admin import router as chat_admin_router, CHAT_COMMANDS
-from app.handlers.prompt_admin import router as prompt_admin_router, PROMPT_COMMANDS
+from app.handlers.chat_admin import CHAT_COMMANDS
+from app.handlers.chat_admin import router as chat_admin_router
 from app.handlers.chat_members import router as chat_members_router
 from app.handlers.checkers import router as checkers_router
 from app.handlers.handlers import router as handlers_router
+from app.handlers.profile_admin import PROFILE_COMMANDS
+from app.handlers.profile_admin import router as profile_admin_router
+from app.handlers.prompt_admin import PROMPT_COMMANDS
+from app.handlers.prompt_admin import router as prompt_admin_router
 from app.middlewares.chat_filter import ChatFilterMiddleware
 from app.middlewares.chat_meta import ChatMetaMiddleware
 from app.middlewares.command_throttle import CommandThrottleMiddleware
 from app.middlewares.processing_lock import ProcessingLockMiddleware
-from app.core.initialization import init_redis_client
-from app.services.context_store import ContextStore, run_retention_pruning_task
-from app.services.gemini import GeminiClient
-from app.services.user_profile_adapter import UserProfileStoreAdapter
+from app.observability.metrics import start_metrics_server
 from app.repositories.chat_profile import ChatProfileRepository
+from app.repositories.memory_repository import MemoryRepository
+from app.services.bot_learning import BotLearningEngine
+from app.services.bot_profile import BotProfileStore
+from app.services.context import EpisodicMemoryStore, HybridSearchEngine
+from app.services.context.episode_boundary_detector import EpisodeBoundaryDetector
+from app.services.context.episode_monitor import EpisodeMonitor
+from app.services.context.episode_summarizer import EpisodeSummarizer
+from app.services.context_store import ContextStore, run_retention_pruning_task
+from app.services.donation_scheduler import DonationScheduler
+from app.services.feature_rate_limiter import FeatureRateLimiter
+from app.services.gemini import GeminiClient
 from app.services.profile_summarization import ProfileSummarizer
 from app.services.rate_limiter import RateLimiter
-from app.services.feature_rate_limiter import FeatureRateLimiter
-from app.services.donation_scheduler import DonationScheduler
 from app.services.resource_monitor import (
     get_resource_monitor,
     run_resource_monitoring_task,
 )
-from app.services.system_prompt_manager import SystemPromptManager
 from app.services.resource_optimizer import (
     get_resource_optimizer,
-    periodic_optimization_check,
 )
-from app.services.context import HybridSearchEngine, EpisodicMemoryStore
-from app.services.context.episode_boundary_detector import EpisodeBoundaryDetector
-from app.services.context.episode_monitor import EpisodeMonitor
-from app.services.context.episode_summarizer import EpisodeSummarizer
-from app.services.bot_profile import BotProfileStore
-from app.services.bot_learning import BotLearningEngine
-from app.repositories.memory_repository import MemoryRepository
+from app.services.system_prompt_manager import SystemPromptManager
 from app.services.telegram_service import TelegramService
-from app.observability.metrics import start_metrics_server
+from app.services.user_profile_adapter import UserProfileStoreAdapter
 
 
 async def get_public_ip() -> str:
@@ -69,7 +70,7 @@ async def get_public_ip() -> str:
                         ip = (await response.text()).strip()
                         if ip:
                             return ip
-            except (aiohttp.ClientError, asyncio.TimeoutError):
+            except (TimeoutError, aiohttp.ClientError):
                 continue
 
     try:
@@ -142,7 +143,7 @@ async def main() -> None:
     dispatcher = Dispatcher()
 
     # Initialize PostgreSQL database
-    from app.infrastructure.db_utils import init_database, apply_migrations
+    from app.infrastructure.db_utils import apply_migrations, init_database
 
     await init_database(settings.database_url)
     if settings.run_db_migrations:
@@ -183,7 +184,9 @@ async def main() -> None:
     )
 
     # Initialize user profiling system
-    profile_store = UserProfileStoreAdapter(settings.database_url, redis_client=redis_client)
+    profile_store = UserProfileStoreAdapter(
+        settings.database_url, redis_client=redis_client
+    )
     await profile_store.init()
 
     # Initialize the new memory repository
@@ -244,7 +247,9 @@ async def main() -> None:
             ignored_chat_ids=[],
         )
         await donation_scheduler.init()  # Initialize table even when scheduler is disabled
-        logging.info("Donation scheduler disabled (ENABLE_DONATION_SCHEDULER=false), but table initialized for on-demand sends")
+        logging.info(
+            "Donation scheduler disabled (ENABLE_DONATION_SCHEDULER=false), but table initialized for on-demand sends"
+        )
 
     # Phase 3: Initialize hybrid search and episodic memory
     hybrid_search = HybridSearchEngine(
@@ -490,8 +495,8 @@ async def main() -> None:
         logging.info("Donation scheduler stopped")
 
         # Cleanup: Close aiohttp sessions for external services
-        from app.services.weather import cleanup_weather_service
         from app.services.currency import cleanup_currency_service
+        from app.services.weather import cleanup_weather_service
 
         try:
             await cleanup_weather_service()

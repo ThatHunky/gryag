@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import base64
 import asyncio
-import inspect
+import base64
 import json
 import logging
 import random
 import time
-from typing import Any, Awaitable, Callable, Iterable, cast
+from collections.abc import Awaitable, Callable, Iterable
+from typing import Any, cast
 
 from google import genai
 from google.genai import types
@@ -385,13 +385,13 @@ class GeminiClient:
     ) -> list[dict[str, Any]]:
         """
         Remove internal metadata fields (mime, kind) from media parts before sending to API.
-        
+
         The build_media_parts method adds mime and kind fields for internal use, but these
         are not part of the Gemini API schema and cause Pydantic validation errors.
-        
+
         Args:
             contents: List of Content objects with parts that may contain media
-            
+
         Returns:
             Contents with mime and kind fields removed from all media parts
         """
@@ -400,7 +400,7 @@ class GeminiClient:
             if not isinstance(content, dict):
                 cleaned_contents.append(content)
                 continue
-                
+
             cleaned_content = {}
             for key, value in content.items():
                 if key == "parts" and isinstance(value, list):
@@ -414,10 +414,14 @@ class GeminiClient:
                                 if part_key in ("mime", "kind"):
                                     continue
                                 # Recursively clean nested parts if present
-                                elif part_key == "parts" and isinstance(part_value, list):
-                                    cleaned_part[part_key] = self._clean_media_parts_for_api(
-                                        [{"parts": part_value}]
-                                    )[0].get("parts", [])
+                                elif part_key == "parts" and isinstance(
+                                    part_value, list
+                                ):
+                                    cleaned_part[part_key] = (
+                                        self._clean_media_parts_for_api(
+                                            [{"parts": part_value}]
+                                        )[0].get("parts", [])
+                                    )
                                 else:
                                     # Preserve all other fields (inline_data, file_data, text, etc.)
                                     cleaned_part[part_key] = part_value
@@ -428,7 +432,7 @@ class GeminiClient:
                 else:
                     cleaned_content[key] = value
             cleaned_contents.append(cleaned_content)
-        
+
         return cleaned_contents
 
     async def _invoke_model(
@@ -474,7 +478,7 @@ class GeminiClient:
         last_server_exc: Exception | None = None
         server_error_retries = 3  # Retry server errors up to 3 times
 
-        for attempt in range(max(1, attempts)):
+        for _attempt in range(max(1, attempts)):
             client, key = await self._acquire_client()
 
             # Retry loop for transient server errors
@@ -493,7 +497,7 @@ class GeminiClient:
                         timeout=self._generate_timeout,
                     )
                     return response
-                except asyncio.TimeoutError as exc:
+                except TimeoutError as exc:
                     raise GeminiError("Gemini request timed out") from exc
                 except Exception as exc:
                     # Handle quota errors (rotate keys)
@@ -569,13 +573,17 @@ class GeminiClient:
                 file_uri = item["file_uri"]
                 if file_uri:
                     # Preserve metadata for easier extraction later
-                    kind = item.get("kind", "video")  # YouTube URLs are typically videos
+                    kind = item.get(
+                        "kind", "video"
+                    )  # YouTube URLs are typically videos
                     mime = item.get("mime", "video/mp4")  # Default for YouTube
-                    parts.append({
-                        "file_data": {"file_uri": file_uri},
-                        "mime": mime,
-                        "kind": kind,
-                    })
+                    parts.append(
+                        {
+                            "file_data": {"file_uri": file_uri},
+                            "mime": mime,
+                            "kind": kind,
+                        }
+                    )
                     if logger:
                         logger.debug(f"Added file_uri media: {file_uri}")
                 continue
@@ -609,11 +617,13 @@ class GeminiClient:
 
             data = base64.b64encode(blob).decode("ascii")
             # Preserve metadata as top-level fields for easier extraction
-            parts.append({
-                "inline_data": {"mime_type": mime, "data": data},
-                "mime": mime,
-                "kind": kind,
-            })
+            parts.append(
+                {
+                    "inline_data": {"mime_type": mime, "data": data},
+                    "mime": mime,
+                    "kind": kind,
+                }
+            )
             if logger:
                 logger.debug(
                     f"Added inline media: mime={mime}, kind={kind}, size={size} bytes, base64_len={len(data)}",
@@ -694,7 +704,9 @@ class GeminiClient:
                 if "function_declarations" in tool:
                     for func in tool["function_declarations"]:
                         tool_names.append(func.get("name", "unknown"))
-            self._logger.info(f"Requesting with {len(tool_names)} tools: {', '.join(tool_names)}")
+            self._logger.info(
+                f"Requesting with {len(tool_names)} tools: {', '.join(tool_names)}"
+            )
 
             # Enforcement check: warn if tools are provided but not supported
             if not self._tools_supported:
@@ -703,7 +715,9 @@ class GeminiClient:
                     f"Model: {self._model_name}. Tools will be filtered out!"
                 )
         if tool_callbacks:
-            self._logger.info(f"Tool callbacks registered: {', '.join(tool_callbacks.keys())}")
+            self._logger.info(
+                f"Tool callbacks registered: {', '.join(tool_callbacks.keys())}"
+            )
 
         # Check if tools were filtered out
         if tools and not filtered_tools:
@@ -875,7 +889,12 @@ class GeminiClient:
         # Log if extracted text contains tool-related keywords
         if extracted_text:
             lower_text = extracted_text.lower()
-            tool_keywords = ["tool_call", "function_call", "generate_image", "search_web"]
+            tool_keywords = [
+                "tool_call",
+                "function_call",
+                "generate_image",
+                "search_web",
+            ]
             found_keywords = [kw for kw in tool_keywords if kw in lower_text]
             if found_keywords:
                 self._logger.warning(
@@ -998,7 +1017,7 @@ class GeminiClient:
                 finish_reason = getattr(candidate, "finish_reason", None)
                 if finish_reason:
                     self._logger.info(f"Candidate finish_reason: {finish_reason}")
-                    
+
                     # Check if content was blocked due to safety filters
                     if "PROHIBITED_CONTENT" in str(finish_reason):
                         safety_ratings = getattr(candidate, "safety_ratings", None)
@@ -1164,7 +1183,7 @@ class GeminiClient:
                     include_thinking=include_thinking,
                 )
             except Exception as exc:  # pragma: no cover
-                err_text = str(exc)
+                str(exc)
                 self._logger.exception(
                     "Gemini tool-followup failed; retrying without tools"
                 )
@@ -1222,7 +1241,7 @@ class GeminiClient:
                         None,  # No tools - force text response
                         system_instruction,
                     )
-                except Exception as exc:
+                except Exception:
                     self._logger.exception("Failed to force text response after tools")
                     # Continue with current_response - handler will use fallback
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Tuple
 
 from app.infrastructure.db_utils import get_db_connection
 from app.services import telemetry
@@ -74,7 +73,7 @@ class RateLimiter:
 
     async def check_and_increment(
         self, user_id: int, now: int | None = None
-    ) -> Tuple[bool, int, int]:
+    ) -> tuple[bool, int, int]:
         """
         Check if the user is within the allowed rate and increment on success.
 
@@ -130,7 +129,7 @@ class RateLimiter:
                 params = (user_id, window_start)
                 row = await conn.fetchrow(query, *params)
 
-                if row and row['request_count'] >= self._limit:
+                if row and row["request_count"] >= self._limit:
                     telemetry.increment_counter(
                         "rate_limiter.blocked",
                         user_id=user_id,
@@ -145,7 +144,7 @@ class RateLimiter:
                     """
                     params = (current_ts, user_id, window_start)
                     await conn.execute(query, *params)
-                    new_count = row['request_count'] + 1
+                    new_count = row["request_count"] + 1
                 else:
                     query = """
                         INSERT INTO rate_limits (user_id, window_start, request_count, last_seen)
@@ -185,7 +184,9 @@ class RateLimiter:
             async with get_db_connection(self._database_url) as conn:
                 result = await conn.execute("DELETE FROM rate_limits")
                 # Extract row count from result string like "DELETE 5"
-                pg_deleted = int(result.split()[-1]) if result.split()[-1].isdigit() else 0
+                pg_deleted = (
+                    int(result.split()[-1]) if result.split()[-1].isdigit() else 0
+                )
                 deleted += pg_deleted
 
         telemetry.increment_counter(
@@ -218,7 +219,9 @@ class RateLimiter:
                 query = "DELETE FROM rate_limits WHERE user_id = $1"
                 params = (user_id,)
                 result = await conn.execute(query, *params)
-                pg_deleted = int(result.split()[-1]) if result.split()[-1].isdigit() else 0
+                pg_deleted = (
+                    int(result.split()[-1]) if result.split()[-1].isdigit() else 0
+                )
                 deleted += pg_deleted
 
         telemetry.increment_counter(

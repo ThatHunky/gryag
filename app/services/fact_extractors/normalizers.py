@@ -11,7 +11,6 @@ import re
 import unicodedata
 from typing import Any
 
-
 # Canonical mappings for programming languages (handles common variants)
 PROGRAMMING_LANGUAGE_CANONICAL = {
     "js": "javascript",

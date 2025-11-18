@@ -20,7 +20,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 from app.config import Settings
 from app.services import telemetry
 
@@ -165,9 +164,7 @@ class MultiLevelContextManager:
         from app.services.context.token_optimizer import calculate_dynamic_budget
 
         # Get recent message count for activity detection
-        recent_messages = await self.context_store.recent(
-            chat_id, thread_id, limit=10
-        )
+        recent_messages = await self.context_store.recent(chat_id, thread_id, limit=10)
         recent_message_count = len(recent_messages)
 
         # Check if profile facts exist
@@ -241,14 +238,16 @@ class MultiLevelContextManager:
         # Detect query type to adjust context retrieval
         query_type = self._detect_query_type(query_text)
         is_news_query = query_type == "news"
-        
+
         # For news queries, reduce or skip relevant context (past conversations)
         # to prevent pulling in irrelevant old conversations
         if include_relevant and self.hybrid_search:
             if is_news_query:
                 # For news queries, significantly reduce relevant context budget
                 # or skip it entirely to avoid confusion from old conversations
-                news_relevant_budget = int(relevant_budget * 0.3)  # 30% of normal budget
+                news_relevant_budget = int(
+                    relevant_budget * 0.3
+                )  # 30% of normal budget
                 tasks.append(
                     self._get_relevant_context(
                         query_text, chat_id, thread_id, user_id, news_relevant_budget
@@ -256,7 +255,7 @@ class MultiLevelContextManager:
                 )
                 LOGGER.debug(
                     f"News query detected, reducing relevant context budget to {news_relevant_budget} tokens",
-                    extra={"chat_id": chat_id, "query": query_text[:100]}
+                    extra={"chat_id": chat_id, "query": query_text[:100]},
                 )
             else:
                 tasks.append(
@@ -552,9 +551,7 @@ class MultiLevelContextManager:
         time_span = 0
         if recent_only:
             timestamps = [
-                msg.get("ts")
-                for msg in recent_only
-                if msg.get("ts") is not None
+                msg.get("ts") for msg in recent_only if msg.get("ts") is not None
             ]
             if len(timestamps) >= 2:
                 # Calculate span from oldest to newest
@@ -580,75 +577,143 @@ class MultiLevelContextManager:
     def _detect_query_type(self, query: str) -> str:
         """
         Detect query type based on patterns, keywords, and structure.
-        
+
         Returns: "news", "factual", "conversational", "command", "general"
         """
         if not query:
             return "general"
-        
+
         query_lower = query.lower().strip()
         query_words = query_lower.split()
         query_length = len(query_words)
-        
+
         # News-related keywords (Ukrainian and English)
         news_keywords = [
-            "новини", "новин", "новина", "новинка",
-            "атака", "атаки", "атаку", "атакою",
-            "події", "подій", "подія", "подією",
-            "сьогодні", "сьогоднішня", "сьогоднішні", "сьогоднішньої",
-            "останні", "останніх", "остання", "останнє",
-            "що сталося", "що відбулося", "що трапилося",
-            "news", "latest", "recent", "today", "attack", "attacks",
-            "events", "happened", "breaking", "breaking news"
+            "новини",
+            "новин",
+            "новина",
+            "новинка",
+            "атака",
+            "атаки",
+            "атаку",
+            "атакою",
+            "події",
+            "подій",
+            "подія",
+            "подією",
+            "сьогодні",
+            "сьогоднішня",
+            "сьогоднішні",
+            "сьогоднішньої",
+            "останні",
+            "останніх",
+            "остання",
+            "останнє",
+            "що сталося",
+            "що відбулося",
+            "що трапилося",
+            "news",
+            "latest",
+            "recent",
+            "today",
+            "attack",
+            "attacks",
+            "events",
+            "happened",
+            "breaking",
+            "breaking news",
         ]
-        
+
         # Factual/lookup question words (Ukrainian and English)
         factual_indicators = [
-            "що", "хто", "коли", "де", "як", "чому", "скільки",
-            "what", "who", "when", "where", "how", "why", "how many", "how much",
-            "який", "яка", "яке", "які",
-            "which", "whose"
+            "що",
+            "хто",
+            "коли",
+            "де",
+            "як",
+            "чому",
+            "скільки",
+            "what",
+            "who",
+            "when",
+            "where",
+            "how",
+            "why",
+            "how many",
+            "how much",
+            "який",
+            "яка",
+            "яке",
+            "які",
+            "which",
+            "whose",
         ]
-        
+
         # Command indicators
         command_indicators = [
-            "зроби", "створи", "напиши", "покажи", "знайди", "пошукай",
-            "do", "create", "write", "show", "find", "search", "generate",
-            "згенеруй", "зроби", "створи", "намалюй"
+            "зроби",
+            "створи",
+            "напиши",
+            "покажи",
+            "знайди",
+            "пошукай",
+            "do",
+            "create",
+            "write",
+            "show",
+            "find",
+            "search",
+            "generate",
+            "згенеруй",
+            "зроби",
+            "створи",
+            "намалюй",
         ]
-        
+
         # Conversational indicators (greetings, casual)
         conversational_indicators = [
-            "привіт", "вітаю", "добрий день", "доброго ранку", "добрий вечір",
-            "hello", "hi", "hey", "good morning", "good evening", "good day",
-            "як справи", "що нового", "how are you", "what's up"
+            "привіт",
+            "вітаю",
+            "добрий день",
+            "доброго ранку",
+            "добрий вечір",
+            "hello",
+            "hi",
+            "hey",
+            "good morning",
+            "good evening",
+            "good day",
+            "як справи",
+            "що нового",
+            "how are you",
+            "what's up",
         ]
-        
+
         # Check for news keywords
         for keyword in news_keywords:
             if keyword in query_lower:
                 return "news"
-        
+
         # Check for factual questions (question words at start)
         if query_words and query_words[0] in factual_indicators:
             return "factual"
-        
+
         # Check for any factual indicators in query
         if any(indicator in query_lower for indicator in factual_indicators):
             return "factual"
-        
+
         # Check for commands (imperative verbs)
         if any(indicator in query_lower for indicator in command_indicators):
             return "command"
-        
+
         # Check for conversational patterns
         if any(indicator in query_lower for indicator in conversational_indicators):
             return "conversational"
-        
+
         # Very short queries (< 3 words) are likely conversational or follow-ups
         if query_length < 3:
             return "conversational"
-        
+
         return "general"
 
     async def _get_relevant_context(
@@ -675,14 +740,14 @@ class MultiLevelContextManager:
         # Detect query type
         query_type = self._detect_query_type(query)
         is_news_query = query_type == "news"
-        
+
         # For news queries, exclude old context
         time_range_days = None
         if is_news_query:
             time_range_days = self.settings.exclude_old_context_for_news_days
             LOGGER.debug(
                 f"News query detected, excluding context older than {time_range_days} days",
-                extra={"query": query[:100], "chat_id": chat_id}
+                extra={"query": query[:100], "chat_id": chat_id},
             )
 
         # Determine how many results we need
@@ -708,11 +773,15 @@ class MultiLevelContextManager:
                 )
                 last_error = None  # Success
                 break  # Success, exit retry loop
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Timeout errors shouldn't be retried
                 LOGGER.warning(
                     f"Hybrid search timeout for chat {chat_id}",
-                    extra={"chat_id": chat_id, "query": query[:100], "attempt": attempt + 1}
+                    extra={
+                        "chat_id": chat_id,
+                        "query": query[:100],
+                        "attempt": attempt + 1,
+                    },
                 )
                 last_error = "timeout"
                 break
@@ -720,17 +789,17 @@ class MultiLevelContextManager:
                 last_error = e
                 if attempt < max_retries:
                     # Retry with exponential backoff
-                    wait_time = 0.1 * (2 ** attempt)
+                    wait_time = 0.1 * (2**attempt)
                     LOGGER.warning(
                         f"Hybrid search failed (attempt {attempt + 1}/{max_retries + 1}), retrying in {wait_time}s: {e}",
-                        extra={"chat_id": chat_id, "query": query[:100]}
+                        extra={"chat_id": chat_id, "query": query[:100]},
                     )
                     await asyncio.sleep(wait_time)
                 else:
                     LOGGER.error(
                         f"Hybrid search failed after {max_retries + 1} attempts: {e}",
                         exc_info=True,
-                        extra={"chat_id": chat_id, "query": query[:100]}
+                        extra={"chat_id": chat_id, "query": query[:100]},
                     )
 
         # Check if we have results (search succeeded)
@@ -780,6 +849,7 @@ class MultiLevelContextManager:
         avg_relevance = total_relevance / len(snippets) if snippets else 0.0
         # Use accurate token estimation
         from app.services.context.token_optimizer import estimate_tokens_accurate
+
         tokens = sum(estimate_tokens_accurate(s.get("text", "")) for s in snippets)
 
         return RelevantContext(
@@ -877,13 +947,19 @@ class MultiLevelContextManager:
 
             summary_tokens = estimate_tokens_accurate(summary) if summary else 0
             facts_tokens = sum(
-                estimate_tokens_accurate(f.get("fact_key", "") + " " + f.get("fact_value", ""))
+                estimate_tokens_accurate(
+                    f.get("fact_key", "") + " " + f.get("fact_value", "")
+                )
                 for f in facts
             )
 
-            chat_summary_tokens = estimate_tokens_accurate(chat_summary) if chat_summary else 0
+            chat_summary_tokens = (
+                estimate_tokens_accurate(chat_summary) if chat_summary else 0
+            )
             chat_facts_tokens = sum(
-                estimate_tokens_accurate(f.get("fact_key", "") + " " + f.get("fact_value", ""))
+                estimate_tokens_accurate(
+                    f.get("fact_key", "") + " " + f.get("fact_value", "")
+                )
                 for f in chat_facts
             )
 
@@ -920,7 +996,7 @@ class MultiLevelContextManager:
             LOGGER.error(
                 f"Failed to get background context: {e}",
                 exc_info=True,
-                extra={"user_id": user_id, "chat_id": chat_id, "query": query[:100]}
+                extra={"user_id": user_id, "chat_id": chat_id, "query": query[:100]},
             )
             return BackgroundContext(
                 profile_summary=None,
@@ -993,7 +1069,7 @@ class MultiLevelContextManager:
             LOGGER.error(
                 f"Failed to get episodic context: {e}",
                 exc_info=True,
-                extra={"user_id": user_id, "chat_id": chat_id, "query": query[:100]}
+                extra={"user_id": user_id, "chat_id": chat_id, "query": query[:100]},
             )
             return EpisodicContext(
                 episodes=[],
@@ -1275,7 +1351,7 @@ class MultiLevelContextManager:
         # Phase 1: Filter unsupported media types
         filtered_by_type = 0
         if self.gemini_client:
-            for msg_idx, msg in enumerate(modified_history):
+            for _msg_idx, msg in enumerate(modified_history):
                 parts = msg.get("parts", [])
                 new_parts = []
 
@@ -1374,10 +1450,10 @@ class MultiLevelContextManager:
     def format_for_gemini(self, context: LayeredContext) -> dict[str, Any]:
         """
         Format layered context for Gemini API using native format.
-        
+
         This method now delegates to format_for_gemini_native() to ensure
         all code paths use the native Gemini format (no [meta] blocks).
-        
+
         Returns dict with history (clean native format) and system_context (markdown).
         """
         # Use native format (delegates to format_for_gemini_native)
@@ -1401,8 +1477,8 @@ class MultiLevelContextManager:
         - token_count: Estimated tokens
         """
         from app.services.conversation_formatter import (
-            format_history_compact,
             estimate_tokens,
+            format_history_compact,
         )
 
         # Combine immediate + recent into single list
@@ -1477,77 +1553,79 @@ class MultiLevelContextManager:
     def _strip_meta_blocks(self, parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """
         Remove [meta] blocks from message parts, keeping only text and media.
-        
+
         Returns clean parts list with [meta] blocks filtered out.
         """
         import re
-        
+
         cleaned_parts = []
         for part in parts:
             if not isinstance(part, dict):
                 continue
-                
+
             # Keep media parts as-is
             if "inline_data" in part or "file_data" in part:
                 cleaned_parts.append(part)
                 continue
-            
+
             # Process text parts - remove [meta] blocks
             if "text" in part:
                 text = part.get("text", "")
                 # Remove [meta] blocks (lines starting with [meta] or containing [meta] at start)
                 # Pattern: [meta] followed by any content until end of line or newline
-                text = re.sub(r'\[meta\][^\n]*\n?', '', text, flags=re.IGNORECASE)
-                text = re.sub(r'\[meta\][^\n]*$', '', text, flags=re.IGNORECASE | re.MULTILINE)
+                text = re.sub(r"\[meta\][^\n]*\n?", "", text, flags=re.IGNORECASE)
+                text = re.sub(
+                    r"\[meta\][^\n]*$", "", text, flags=re.IGNORECASE | re.MULTILINE
+                )
                 # Clean up multiple newlines that might result
-                text = re.sub(r'\n\n+', '\n\n', text).strip()
-                
+                text = re.sub(r"\n\n+", "\n\n", text).strip()
+
                 # Only add if there's actual content left
                 if text:
                     cleaned_parts.append({"text": text})
-        
+
         return cleaned_parts
 
     def format_for_gemini_native(self, context: LayeredContext) -> dict[str, Any]:
         """
         Format layered context for Gemini API using native format.
-        
+
         Returns clean native format:
         - History: list of messages with only role and parts (text/media, no [meta] blocks)
         - System context: markdown-formatted context sections
         - Metadata: extracted metadata for system instruction inclusion
-        
+
         This is the native Gemini format - no custom syntax, just role + parts.
         """
         # Immediate + Recent become conversation history
         history = []
-        
+
         if context.immediate:
             history.extend(context.immediate.messages)
-        
+
         if context.recent:
             history.extend(context.recent.messages)
-        
+
         # Limit media/images to prevent Gemini API errors
         max_media = getattr(self.settings, "gemini_max_media_items", 28)
         history = self._limit_media_in_history(history, max_media)
-        
+
         # Extract metadata from history messages for system instruction
         # and clean history to remove [meta] blocks
         cleaned_history = []
         extracted_metadata = []
-        
+
         for msg in history:
             # Create clean message copy
             clean_msg = {
                 "role": msg.get("role", "user"),
-                "parts": self._strip_meta_blocks(msg.get("parts", []))
+                "parts": self._strip_meta_blocks(msg.get("parts", [])),
             }
-            
+
             # Only add if there are parts left after stripping metadata
             if clean_msg["parts"]:
                 cleaned_history.append(clean_msg)
-            
+
             # Extract metadata from original message for system instruction
             # (we'll use this later when building system instruction)
             parts = msg.get("parts", [])
@@ -1556,28 +1634,32 @@ class MultiLevelContextManager:
                     text = part.get("text", "")
                     if "[meta]" in text.lower():
                         # Store metadata for system instruction inclusion
-                        extracted_metadata.append({
-                            "message_id": msg.get("message_id"),
-                            "role": msg.get("role"),
-                            "meta_text": text
-                        })
-        
+                        extracted_metadata.append(
+                            {
+                                "message_id": msg.get("message_id"),
+                                "role": msg.get("role"),
+                                "meta_text": text,
+                            }
+                        )
+
         # Format system context as markdown sections
         system_parts = []
-        
+
         if context.background and context.background.profile_summary:
             system_parts.append(
                 f"## User Profile\n\n{self._sanitize_text(context.background.profile_summary)}"
             )
-        
+
         if context.background and context.background.key_facts:
-            facts_text = "\n".join([
-                f"- {f.get('fact_key', '')}: {f.get('fact_value', '')}"
-                for f in context.background.key_facts[:10]
-            ])
+            facts_text = "\n".join(
+                [
+                    f"- {f.get('fact_key', '')}: {f.get('fact_value', '')}"
+                    for f in context.background.key_facts[:10]
+                ]
+            )
             if facts_text:
                 system_parts.append(f"## Key Facts\n\n{facts_text}")
-        
+
         if context.relevant and context.relevant.snippets:
             relevant_texts = []
             for s in context.relevant.snippets[:5]:
@@ -1586,8 +1668,10 @@ class MultiLevelContextManager:
                 score = s.get("score", 0.0)
                 relevant_texts.append(f"- [Relevance: {score:.2f}] {txt}...")
             if relevant_texts:
-                system_parts.append("## Relevant Past Context\n\n" + "\n".join(relevant_texts))
-        
+                system_parts.append(
+                    "## Relevant Past Context\n\n" + "\n".join(relevant_texts)
+                )
+
         if context.episodes and context.episodes.episodes:
             episode_texts = []
             for ep in context.episodes.episodes:
@@ -1595,10 +1679,12 @@ class MultiLevelContextManager:
                 summary = self._sanitize_text(ep.get("summary", "")[:150])
                 episode_texts.append(f"- **{topic}**: {summary}...")
             if episode_texts:
-                system_parts.append("## Memorable Events\n\n" + "\n".join(episode_texts))
-        
+                system_parts.append(
+                    "## Memorable Events\n\n" + "\n".join(episode_texts)
+                )
+
         system_context = "\n\n".join(system_parts) if system_parts else None
-        
+
         return {
             "history": cleaned_history,
             "system_context": system_context,

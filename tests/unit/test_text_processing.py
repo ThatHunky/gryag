@@ -2,9 +2,7 @@
 Tests for shared text processing utilities.
 """
 
-import pytest
-
-from app.utils.text_processing import extract_keywords, cosine_similarity
+from app.utils.text_processing import cosine_similarity, extract_keywords
 
 
 class TestKeywordExtraction:
@@ -80,4 +78,3 @@ class TestCosineSimilarity:
         b = [1.0, 2.0, 3.0]
         result = cosine_similarity(a, b)
         assert result == 0.0
-

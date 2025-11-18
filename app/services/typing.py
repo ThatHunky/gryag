@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
 
 from aiogram import Bot
 from aiogram.enums import ChatAction
@@ -14,10 +13,10 @@ class TypingIndicator:
         self._bot = bot
         self._chat_id = chat_id
         self._interval = max(interval, 1.0)
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
         self._active = False
 
-    async def __aenter__(self) -> "TypingIndicator":
+    async def __aenter__(self) -> TypingIndicator:
         self._active = True
         await self._send()
         self._task = asyncio.create_task(self._loop())

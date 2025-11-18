@@ -56,9 +56,7 @@ async def search_web_tool(
 
     try:
         # Run search in thread pool since DDGS is synchronous
-        results = await asyncio.to_thread(
-            _search_sync, query, search_type, max_results
-        )
+        results = await asyncio.to_thread(_search_sync, query, search_type, max_results)
 
         return json.dumps(
             {
@@ -220,43 +218,47 @@ class TextExtractor(HTMLParser):
 async def fetch_web_content_tool(params: dict[str, Any]) -> str:
     """
     Fetch detailed content from a web page URL.
-    
+
     Can be used after search_web to get full page content from specific results.
     Requires a URL to fetch from. Optional parameters (result_index, search_query) are
     included in the response for context/tracking purposes only.
-    
+
     Args:
         params: Tool parameters containing:
             - 'url' (required): URL of the web page to fetch
             - 'result_index' (optional): Index from previous search_web results (for context)
             - 'search_query' (optional): Original search query (for context)
-    
+
     Returns:
         JSON string with fetched content or error message
     """
     url = params.get("url", "")
     result_index = params.get("result_index")
     search_query = params.get("search_query", "")
-    
+
     # Validate URL
     if not url or not isinstance(url, str):
-        return json.dumps({
-            "error": "URL is required",
-            "url": url,
-        })
-    
+        return json.dumps(
+            {
+                "error": "URL is required",
+                "url": url,
+            }
+        )
+
     # Basic URL validation
     parsed = urlparse(url)
     if not parsed.scheme or not parsed.netloc:
-        return json.dumps({
-            "error": f"Invalid URL format: {url}",
-            "url": url,
-        })
-    
+        return json.dumps(
+            {
+                "error": f"Invalid URL format: {url}",
+                "url": url,
+            }
+        )
+
     # Ensure URL has a scheme
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
-    
+
     try:
         # Fetch page content with timeout
         timeout = aiohttp.ClientTimeout(total=10, connect=5)
@@ -265,33 +267,41 @@ async def fetch_web_content_tool(params: dict[str, Any]) -> str:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
             }
-            
-            async with session.get(url, headers=headers, allow_redirects=True) as response:
+
+            async with session.get(
+                url, headers=headers, allow_redirects=True
+            ) as response:
                 if response.status != 200:
-                    return json.dumps({
-                        "error": f"HTTP {response.status}: Failed to fetch URL",
-                        "url": url,
-                        "status": response.status,
-                    })
-                
+                    return json.dumps(
+                        {
+                            "error": f"HTTP {response.status}: Failed to fetch URL",
+                            "url": url,
+                            "status": response.status,
+                        }
+                    )
+
                 # Check content type
                 content_type = response.headers.get("Content-Type", "").lower()
                 if "text/html" not in content_type and "text/plain" not in content_type:
-                    return json.dumps({
-                        "error": f"Unsupported content type: {content_type}",
-                        "url": url,
-                        "content_type": content_type,
-                    })
-                
+                    return json.dumps(
+                        {
+                            "error": f"Unsupported content type: {content_type}",
+                            "url": url,
+                            "content_type": content_type,
+                        }
+                    )
+
                 # Read content with size limit (1MB max)
                 content = await response.read()
                 if len(content) > 1024 * 1024:  # 1MB limit
-                    return json.dumps({
-                        "error": "Page content too large (max 1MB)",
-                        "url": url,
-                        "size_bytes": len(content),
-                    })
-                
+                    return json.dumps(
+                        {
+                            "error": "Page content too large (max 1MB)",
+                            "url": url,
+                            "size_bytes": len(content),
+                        }
+                    )
+
                 # Decode HTML
                 try:
                     html_content = content.decode("utf-8", errors="replace")
@@ -300,49 +310,64 @@ async def fetch_web_content_tool(params: dict[str, Any]) -> str:
                     try:
                         html_content = content.decode("latin-1", errors="replace")
                     except Exception:
-                        return json.dumps({
-                            "error": "Failed to decode page content",
-                            "url": url,
-                        })
-                
+                        return json.dumps(
+                            {
+                                "error": "Failed to decode page content",
+                                "url": url,
+                            }
+                        )
+
                 # Extract text from HTML
                 parser = TextExtractor()
                 parser.feed(html_content)
                 extracted_text = parser.get_text(max_length=5000)
-                
+
                 # Try to extract title from HTML
-                title_match = re.search(r"<title[^>]*>(.*?)</title>", html_content, re.IGNORECASE | re.DOTALL)
+                title_match = re.search(
+                    r"<title[^>]*>(.*?)</title>",
+                    html_content,
+                    re.IGNORECASE | re.DOTALL,
+                )
                 title = title_match.group(1).strip() if title_match else ""
                 # Clean title HTML entities
                 title = re.sub(r"<[^>]+>", "", title)
                 title = title.replace("&nbsp;", " ").strip()
-                
-                return json.dumps({
-                    "url": url,
-                    "title": title or "No title",
-                    "content": extracted_text,
-                    "content_length": len(extracted_text),
-                    "original_size": len(html_content),
-                    "result_index": result_index,
-                    "search_query": search_query,
-                }, ensure_ascii=False)
-    
-    except asyncio.TimeoutError:
-        return json.dumps({
-            "error": "Request timeout: URL took too long to respond",
-            "url": url,
-        })
+
+                return json.dumps(
+                    {
+                        "url": url,
+                        "title": title or "No title",
+                        "content": extracted_text,
+                        "content_length": len(extracted_text),
+                        "original_size": len(html_content),
+                        "result_index": result_index,
+                        "search_query": search_query,
+                    },
+                    ensure_ascii=False,
+                )
+
+    except TimeoutError:
+        return json.dumps(
+            {
+                "error": "Request timeout: URL took too long to respond",
+                "url": url,
+            }
+        )
     except aiohttp.ClientError as e:
-        return json.dumps({
-            "error": f"Network error: {str(e)}",
-            "url": url,
-        })
+        return json.dumps(
+            {
+                "error": f"Network error: {str(e)}",
+                "url": url,
+            }
+        )
     except Exception as e:
         logger.exception(f"Failed to fetch web content from {url}")
-        return json.dumps({
-            "error": f"Failed to fetch content: {str(e)}",
-            "url": url,
-        })
+        return json.dumps(
+            {
+                "error": f"Failed to fetch content: {str(e)}",
+                "url": url,
+            }
+        )
 
 
 async def analyze_text_results(
@@ -353,13 +378,13 @@ async def analyze_text_results(
 ) -> dict[str, Any]:
     """
     Analyze text/news search results using LLM.
-    
+
     Args:
         query: Original search query
         results: Original search results
         fetched_content: List of fetched content dicts with 'url', 'title', 'content'
         gemini_client: Gemini client for analysis
-    
+
     Returns:
         Dict with summary, key_points, and sources
     """
@@ -369,7 +394,7 @@ async def analyze_text_results(
             "key_points": [],
             "sources": [],
         }
-    
+
     # Build analysis prompt
     content_texts = []
     for idx, content in enumerate(fetched_content):
@@ -377,15 +402,17 @@ async def analyze_text_results(
         title = content.get("title", "")
         text = content.get("content", "")
         if text:
-            content_texts.append(f"Source {idx + 1} ({url}):\nTitle: {title}\nContent: {text[:2000]}\n")
-    
+            content_texts.append(
+                f"Source {idx + 1} ({url}):\nTitle: {title}\nContent: {text[:2000]}\n"
+            )
+
     if not content_texts:
         return {
             "summary": "",
             "key_points": [],
             "sources": [],
         }
-    
+
     prompt = f"""Analyze the following search results for the query: "{query}"
 
 {chr(10).join(content_texts)}
@@ -401,20 +428,20 @@ Format your response as JSON:
     "key_points": ["point 1", "point 2", ...],
     "relevant_sources": [0, 1, ...]  // indices of most relevant sources
 }}"""
-    
+
     try:
         response = await gemini_client.generate(
             system_prompt="You are a helpful assistant that analyzes web search results and extracts relevant information.",
             history=None,
             user_parts=[{"text": prompt}],
         )
-        
+
         text_response = response.get("text", "").strip()
-        
+
         # Try to parse JSON from response
         try:
             # Extract JSON if wrapped in markdown code blocks
-            json_match = re.search(r'\{[^{}]*\}', text_response, re.DOTALL)
+            json_match = re.search(r"\{[^{}]*\}", text_response, re.DOTALL)
             if json_match:
                 analysis = json.loads(json_match.group(0))
             else:
@@ -426,18 +453,20 @@ Format your response as JSON:
                 "key_points": [],
                 "relevant_sources": list(range(len(fetched_content))),
             }
-        
+
         # Build sources list
         sources = []
         relevant_indices = set(analysis.get("relevant_sources", []))
         for idx, content in enumerate(fetched_content):
-            sources.append({
-                "index": idx,
-                "url": content.get("url", ""),
-                "title": content.get("title", ""),
-                "relevant": idx in relevant_indices,
-            })
-        
+            sources.append(
+                {
+                    "index": idx,
+                    "url": content.get("url", ""),
+                    "title": content.get("title", ""),
+                    "relevant": idx in relevant_indices,
+                }
+            )
+
         return {
             "summary": analysis.get("summary", ""),
             "key_points": analysis.get("key_points", []),
@@ -460,13 +489,13 @@ async def analyze_image_results(
 ) -> dict[str, Any]:
     """
     Analyze image search results using vision model.
-    
+
     Args:
         query: Original search query
         results: Original search results
         downloaded_images: List of (image_data, filename) tuples
         gemini_client: Gemini client with vision support
-    
+
     Returns:
         Dict with summary, descriptions, and selected indices
     """
@@ -476,16 +505,16 @@ async def analyze_image_results(
             "descriptions": [],
             "selected_indices": [],
         }
-    
+
     # Analyze each image
     descriptions = []
     selected_indices = []
-    
+
     for idx, (image_data, filename) in enumerate(downloaded_images):
         try:
             # Convert image to base64
             image_b64 = base64.b64encode(image_data).decode("utf-8")
-            
+
             # Determine MIME type from filename or default to jpeg
             mime_type = "image/jpeg"
             if filename.lower().endswith(".png"):
@@ -494,12 +523,12 @@ async def analyze_image_results(
                 mime_type = "image/gif"
             elif filename.lower().endswith(".webp"):
                 mime_type = "image/webp"
-            
+
             # Build analysis prompt
             prompt = f"""Analyze this image in the context of the search query: "{query}"
 
 Describe what you see and how relevant it is to the query. Be concise (1-2 sentences)."""
-            
+
             # Use Gemini to analyze image
             response = await gemini_client.generate(
                 system_prompt="You are a helpful assistant that analyzes images and describes their relevance to search queries.",
@@ -514,36 +543,48 @@ Describe what you see and how relevant it is to the query. Be concise (1-2 sente
                     {"text": prompt},
                 ],
             )
-            
+
             description = response.get("text", "").strip()
-            descriptions.append({
-                "index": idx,
-                "description": description,
-                "url": results[idx].get("url", "") if idx < len(results) else "",
-            })
-            
+            descriptions.append(
+                {
+                    "index": idx,
+                    "description": description,
+                    "url": results[idx].get("url", "") if idx < len(results) else "",
+                }
+            )
+
             # Consider image relevant if description is not empty
             if description:
                 selected_indices.append(idx)
-                
+
         except Exception as e:
             logger.warning(f"Failed to analyze image {idx}: {e}")
-            descriptions.append({
-                "index": idx,
-                "description": "",
-                "url": results[idx].get("url", "") if idx < len(results) else "",
-            })
-    
+            descriptions.append(
+                {
+                    "index": idx,
+                    "description": "",
+                    "url": results[idx].get("url", "") if idx < len(results) else "",
+                }
+            )
+
     # Generate overall summary
     if descriptions:
         summary_prompt = f"""Based on the analyzed images for query "{query}", provide a brief summary (1-2 sentences) of what was found."""
-        
+
         try:
-            desc_text = "\n".join([f"Image {d['index']}: {d['description']}" for d in descriptions if d['description']])
+            desc_text = "\n".join(
+                [
+                    f"Image {d['index']}: {d['description']}"
+                    for d in descriptions
+                    if d["description"]
+                ]
+            )
             response = await gemini_client.generate(
                 system_prompt="You are a helpful assistant that summarizes image search results.",
                 history=None,
-                user_parts=[{"text": f"{summary_prompt}\n\nImage descriptions:\n{desc_text}"}],
+                user_parts=[
+                    {"text": f"{summary_prompt}\n\nImage descriptions:\n{desc_text}"}
+                ],
             )
             summary = response.get("text", "").strip()
         except Exception as e:
@@ -551,7 +592,7 @@ Describe what you see and how relevant it is to the query. Be concise (1-2 sente
             summary = f"Found {len(selected_indices)} relevant images for '{query}'."
     else:
         summary = ""
-    
+
     return {
         "summary": summary,
         "descriptions": descriptions,
@@ -566,12 +607,12 @@ async def analyze_video_results(
 ) -> dict[str, Any]:
     """
     Analyze video search results using LLM.
-    
+
     Args:
         query: Original search query
         results: Video search results with metadata
         gemini_client: Gemini client for analysis
-    
+
     Returns:
         Dict with summary, key_points, and selected indices
     """
@@ -581,7 +622,7 @@ async def analyze_video_results(
             "key_points": [],
             "selected_indices": [],
         }
-    
+
     # Build analysis prompt from video metadata
     video_info = []
     for idx, result in enumerate(results):
@@ -590,7 +631,7 @@ async def analyze_video_results(
         publisher = result.get("publisher", "")
         duration = result.get("duration", "")
         url = result.get("url", "")
-        
+
         info = f"Video {idx + 1}:\n"
         if title:
             info += f"Title: {title}\n"
@@ -603,7 +644,7 @@ async def analyze_video_results(
         if url:
             info += f"URL: {url}\n"
         video_info.append(info)
-    
+
     prompt = f"""Analyze the following video search results for the query: "{query}"
 
 {chr(10).join(video_info)}
@@ -619,19 +660,19 @@ Format your response as JSON:
     "key_points": ["point 1", "point 2", ...],
     "relevant_indices": [0, 1, ...]  // indices of most relevant videos
 }}"""
-    
+
     try:
         response = await gemini_client.generate(
             system_prompt="You are a helpful assistant that analyzes video search results and extracts relevant information.",
             history=None,
             user_parts=[{"text": prompt}],
         )
-        
+
         text_response = response.get("text", "").strip()
-        
+
         # Try to parse JSON from response
         try:
-            json_match = re.search(r'\{[^{}]*\}', text_response, re.DOTALL)
+            json_match = re.search(r"\{[^{}]*\}", text_response, re.DOTALL)
             if json_match:
                 analysis = json.loads(json_match.group(0))
             else:
@@ -643,11 +684,13 @@ Format your response as JSON:
                 "key_points": [],
                 "relevant_indices": list(range(len(results))),
             }
-        
+
         return {
             "summary": analysis.get("summary", ""),
             "key_points": analysis.get("key_points", []),
-            "selected_indices": analysis.get("relevant_indices", list(range(len(results)))),
+            "selected_indices": analysis.get(
+                "relevant_indices", list(range(len(results)))
+            ),
         }
     except Exception as e:
         logger.warning(f"Failed to analyze video results: {e}")

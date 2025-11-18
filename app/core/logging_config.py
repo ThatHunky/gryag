@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import logging.handlers
-from pathlib import Path
 
 from app.config import Settings
 
@@ -58,7 +57,9 @@ class JSONFormatter(logging.Formatter):
                 continue
             # Mask sensitive keys
             lk = key.lower()
-            if any(s in lk for s in ("token", "api_key", "apikey", "secret", "password")):
+            if any(
+                s in lk for s in ("token", "api_key", "apikey", "secret", "password")
+            ):
                 try:
                     extras[key] = _mask(value)  # type: ignore[arg-type]
                 except Exception:
@@ -72,12 +73,20 @@ class JSONFormatter(logging.Formatter):
                     # Basic containers: make best effort shallow conversion
                     if isinstance(value, (list, tuple)):
                         extras[key] = [
-                            (v if isinstance(v, (str, int, float, bool)) or v is None else str(v))
+                            (
+                                v
+                                if isinstance(v, (str, int, float, bool)) or v is None
+                                else str(v)
+                            )
                             for v in value
                         ]
                     elif isinstance(value, dict):
                         extras[key] = {
-                            str(k): (v if isinstance(v, (str, int, float, bool)) or v is None else str(v))
+                            str(k): (
+                                v
+                                if isinstance(v, (str, int, float, bool)) or v is None
+                                else str(v)
+                            )
                             for k, v in value.items()
                         }
                     else:

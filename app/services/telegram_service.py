@@ -4,7 +4,6 @@ This service handles interactions with the Telegram API, such as moderation acti
 
 import logging
 from datetime import datetime, timedelta
-from pathlib import Path
 
 from aiogram import Bot
 from aiogram.types import ChatPermissions
@@ -107,7 +106,8 @@ class TelegramService:
             async with get_db_connection(self.settings.db_path) as db:
                 # Search in user_profiles table by username or display_name
                 # Select only 3 columns to normalize with message search
-                cursor = await db.execute("""
+                cursor = await db.execute(
+                    """
                     SELECT user_id, username, display_name
                     FROM user_profiles
                     WHERE chat_id = ? AND (
@@ -117,13 +117,16 @@ class TelegramService:
                         LOWER(last_name) LIKE ?
                     )
                     LIMIT 10
-                """, (chat_id, query, f"%{query}%", f"%{query}%", f"%{query}%"))
+                """,
+                    (chat_id, query, f"%{query}%", f"%{query}%", f"%{query}%"),
+                )
 
                 results = await cursor.fetchall()
 
                 if not results:
                     # Search in messages table as fallback for recent message senders
-                    cursor = await db.execute("""
+                    cursor = await db.execute(
+                        """
                         SELECT DISTINCT external_user_id, sender_username, sender_name
                         FROM messages
                         WHERE chat_id = ? AND (
@@ -132,12 +135,16 @@ class TelegramService:
                         )
                         ORDER BY ts DESC
                         LIMIT 10
-                    """, (chat_id, query, f"%{query}%"))
+                    """,
+                        (chat_id, query, f"%{query}%"),
+                    )
 
                     message_results = await cursor.fetchall()
 
                     if not message_results:
-                        return {"error": f"No user found matching '{query}' in this chat"}
+                        return {
+                            "error": f"No user found matching '{query}' in this chat"
+                        }
 
                     # Normalize message results: convert external_user_id (TEXT) to int
                     normalized = []
@@ -147,7 +154,9 @@ class TelegramService:
                                 user_id = int(r[0])
                                 normalized.append((user_id, r[1], r[2]))
                             except (ValueError, TypeError):
-                                logger.warning(f"Could not convert external_user_id '{r[0]}' to int")
+                                logger.warning(
+                                    f"Could not convert external_user_id '{r[0]}' to int"
+                                )
 
                     results = normalized
 
@@ -169,12 +178,14 @@ class TelegramService:
 
                     # Validate against system user
                     if user_id == 777000:
-                        return {"error": "Cannot moderate Telegram Service system account"}
+                        return {
+                            "error": "Cannot moderate Telegram Service system account"
+                        }
 
                     return {
                         "user_id": user_id,
                         "username": username or "N/A",
-                        "display_name": display_name or "N/A"
+                        "display_name": display_name or "N/A",
                     }
                 else:
                     # Multiple matches - return list for user to disambiguate
@@ -182,14 +193,16 @@ class TelegramService:
                         {
                             "user_id": r[0],
                             "username": r[1] or "N/A",
-                            "display_name": r[2] or "N/A"
+                            "display_name": r[2] or "N/A",
                         }
                         for r in results
                     ]
                     return {
                         "error": f"Found {len(matches)} users matching '{query}'. Please be more specific.",
-                        "matches": matches
+                        "matches": matches,
                     }
         except Exception as e:
-            logger.error(f"Failed to find user '{query}' in chat {chat_id}: {e}", exc_info=True)
+            logger.error(
+                f"Failed to find user '{query}' in chat {chat_id}: {e}", exc_info=True
+            )
             return {"error": f"Failed to search for user: {str(e)}"}

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from aiogram.types import Message
 
@@ -45,9 +45,9 @@ class ChatFactExtractor:
 
     async def extract_chat_facts(
         self,
-        messages: List[Message],
+        messages: list[Message],
         chat_id: int,
-    ) -> List[ChatFact]:
+    ) -> list[ChatFact]:
         """Extract facts about the chat/group from conversation.
 
         Signals for chat-level facts:
@@ -64,7 +64,7 @@ class ChatFactExtractor:
         Returns:
             List of ChatFact objects
         """
-        all_facts: List[ChatFact] = []
+        all_facts: list[ChatFact] = []
 
         # Method 1: Pattern-based extraction (fast, 70% coverage)
         if self.enable_patterns:
@@ -115,8 +115,8 @@ class ChatFactExtractor:
         return deduplicated_facts
 
     async def _extract_via_patterns(
-        self, messages: List[Message], chat_id: int
-    ) -> List[ChatFact]:
+        self, messages: list[Message], chat_id: int
+    ) -> list[ChatFact]:
         """Pattern-based extraction for common chat facts."""
         facts = []
 
@@ -207,7 +207,7 @@ class ChatFactExtractor:
 
         return facts
 
-    def _extract_preference(self, text: str) -> Optional[Dict[str, str]]:
+    def _extract_preference(self, text: str) -> dict[str, str] | None:
         """Extract preference from text."""
         # Simple keyword extraction
         if "humor" in text or "гумор" in text:
@@ -225,7 +225,7 @@ class ChatFactExtractor:
                 }
         return None
 
-    def _extract_tradition(self, text: str) -> Optional[Dict[str, str]]:
+    def _extract_tradition(self, text: str) -> dict[str, str] | None:
         """Extract tradition from text."""
         # Look for day patterns
         if "friday" in text or "п'ятниц" in text:
@@ -240,7 +240,7 @@ class ChatFactExtractor:
             }
         return None
 
-    def _extract_rule(self, text: str) -> Optional[Dict[str, str]]:
+    def _extract_rule(self, text: str) -> dict[str, str] | None:
         """Extract rule from text."""
         # Look for forbidden topics
         if "politic" in text or "політик" in text:
@@ -255,7 +255,7 @@ class ChatFactExtractor:
             }
         return None
 
-    def _extract_topic(self, text: str) -> Optional[str]:
+    def _extract_topic(self, text: str) -> str | None:
         """Extract discussed topic from text."""
         # Simple extraction - look for quoted text or keywords after verbs
         match = re.search(r"discussed?\s+[\"']([^\"']+)[\"']", text, re.IGNORECASE)
@@ -269,8 +269,8 @@ class ChatFactExtractor:
         return None
 
     async def _extract_statistical_facts(
-        self, messages: List[Message], chat_id: int
-    ) -> List[ChatFact]:
+        self, messages: list[Message], chat_id: int
+    ) -> list[ChatFact]:
         """Extract facts from message patterns and statistics."""
         facts = []
 
@@ -356,8 +356,8 @@ class ChatFactExtractor:
         return has_caps and few_exclamations and has_periods
 
     async def _extract_via_llm(
-        self, messages: List[Message], chat_id: int
-    ) -> List[ChatFact]:
+        self, messages: list[Message], chat_id: int
+    ) -> list[ChatFact]:
         """LLM-based extraction for complex chat dynamics."""
         if not self.gemini_client:
             return []
@@ -466,8 +466,8 @@ Return empty array if no group-level facts detected.
             return []
 
     async def _deduplicate_chat_facts(
-        self, facts: List[ChatFact], chat_id: int
-    ) -> List[ChatFact]:
+        self, facts: list[ChatFact], chat_id: int
+    ) -> list[ChatFact]:
         """Deduplicate chat facts by key and similarity.
 
         Args:
@@ -481,14 +481,14 @@ Return empty array if no group-level facts detected.
             return []
 
         # Group by key
-        by_key: Dict[str, List[ChatFact]] = {}
+        by_key: dict[str, list[ChatFact]] = {}
         for fact in facts:
             key = f"{fact.fact_category}:{fact.fact_key}"
             by_key.setdefault(key, []).append(fact)
 
         # For each key, keep highest confidence
         deduplicated = []
-        for key, key_facts in by_key.items():
+        for _key, key_facts in by_key.items():
             # Sort by confidence
             key_facts.sort(key=lambda f: f.confidence, reverse=True)
 

@@ -64,17 +64,49 @@ AGE_PATTERNS = [
 
 # Programming languages keywords (same as Ukrainian for detection)
 PROGRAMMING_LANGUAGES = {
-    "python", "javascript", "js", "typescript", "ts",
-    "java", "c++", "cpp", "c#", "csharp", "go", "golang",
-    "rust", "php", "ruby", "kotlin", "swift", "scala",
-    "perl", "r", "matlab", "julia", "dart", "elixir",
+    "python",
+    "javascript",
+    "js",
+    "typescript",
+    "ts",
+    "java",
+    "c++",
+    "cpp",
+    "c#",
+    "csharp",
+    "go",
+    "golang",
+    "rust",
+    "php",
+    "ruby",
+    "kotlin",
+    "swift",
+    "scala",
+    "perl",
+    "r",
+    "matlab",
+    "julia",
+    "dart",
+    "elixir",
 }
 
 # Spoken languages
 SPOKEN_LANGUAGES = {
-    "ukrainian", "english", "russian", "polish", "german",
-    "french", "spanish", "italian", "chinese", "japanese",
-    "korean", "arabic", "portuguese", "dutch", "turkish",
+    "ukrainian",
+    "english",
+    "russian",
+    "polish",
+    "german",
+    "french",
+    "spanish",
+    "italian",
+    "chinese",
+    "japanese",
+    "korean",
+    "arabic",
+    "portuguese",
+    "dutch",
+    "turkish",
 }
 
 

@@ -13,9 +13,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Awaitable
+from typing import Any
 
 LOGGER = logging.getLogger(__name__)
 
@@ -255,7 +256,7 @@ class EventQueue:
                 await asyncio.wait_for(self._queue.put(event), timeout=5.0)
                 self._stats["events_queued"] += 1
                 return True
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._stats["events_dropped"] += 1
                 return False
 
@@ -297,7 +298,7 @@ class EventQueue:
             try:
                 # Get event with timeout to allow graceful shutdown
                 event = await asyncio.wait_for(self._queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
             # Process event

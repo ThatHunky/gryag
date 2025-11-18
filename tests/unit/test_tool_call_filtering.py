@@ -6,7 +6,6 @@ tool call descriptions that the model might return instead of executing.
 
 import re
 
-
 # Standalone implementation for testing (extracted from app/handlers/chat.py)
 _META_PREFIX_RE = re.compile(r"^\s*\[meta(?:\s+[^\]]*)?\]\s*", re.IGNORECASE)
 _META_ANYWHERE_RE = re.compile(r"\[meta(?:\s+[^\]]*)?\]", re.IGNORECASE)
@@ -103,7 +102,10 @@ def test_clean_response_text_removes_tool_invocations():
     """Test that tool invocations like generate_image(...) are removed."""
     test_cases = [
         ("generate_image(prompt='a cat')", ""),
-        ("I'll create that. generate_image(prompt='sunset') Done!", "I'll create that. Done!"),
+        (
+            "I'll create that. generate_image(prompt='sunset') Done!",
+            "I'll create that. Done!",
+        ),
         ("edit_image(prompt='make it blue')", ""),
         ("search_web(query='news')", ""),
         ("calculate(expression='2+2')", ""),

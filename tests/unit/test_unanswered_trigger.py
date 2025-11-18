@@ -9,21 +9,20 @@ Note: These tests require PostgreSQL-compatible database (the function uses
 PostgreSQL-specific syntax). If running with SQLite, these tests may be skipped.
 """
 
-import pytest
 import time
-from unittest.mock import Mock, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, Mock
+
+import pytest
 
 from app.handlers.chat import (
-    _check_unanswered_trigger,
-    _check_and_handle_rate_limit,
-    UNANSWERED_TRIGGER_THRESHOLD_SECONDS,
     MAX_SKIP_ATTEMPTS,
-    _build_user_message_query,
+    UNANSWERED_TRIGGER_THRESHOLD_SECONDS,
+    _check_and_handle_rate_limit,
+    _check_unanswered_trigger,
     _get_skip_count,
     _increment_skip_count,
-    _reset_skip_count,
 )
-from app.services.context_store import ContextStore, MessageSender
+from app.services.context_store import MessageSender
 
 
 @pytest.mark.asyncio
@@ -228,7 +227,6 @@ async def test_unanswered_trigger_allows_when_processing_active(context_store):
     )
 
     # Don't add bot response, but simulate processing is active
-    lock_key = (chat_id, user_id)
     processing_check = AsyncMock(return_value=True)  # Processing is active
     data = {"_processing_lock_check": processing_check}
 
@@ -294,9 +292,9 @@ async def test_unanswered_trigger_allows_after_threshold(context_store):
 @pytest.mark.asyncio
 async def test_check_and_handle_rate_limit_returns_response_message():
     """Test that rate limit check returns response message when sent."""
-    from app.handlers.chat import _check_and_handle_rate_limit
-    from aiogram.types import Message, User, Chat
     from unittest.mock import AsyncMock
+
+    from aiogram.types import Chat, Message, User
 
     message = Message(
         message_id=1,
@@ -339,8 +337,7 @@ async def test_check_and_handle_rate_limit_returns_response_message():
 @pytest.mark.asyncio
 async def test_check_and_handle_rate_limit_returns_none_when_not_sent():
     """Test that rate limit check returns None when error message not sent (cooldown)."""
-    from app.handlers.chat import _check_and_handle_rate_limit
-    from aiogram.types import Message, User, Chat
+    from aiogram.types import Chat, Message, User
 
     message = Message(
         message_id=1,
@@ -397,11 +394,12 @@ async def test_unanswered_trigger_uses_timestamp_fallback(context_store):
 
     # Get the user message timestamp for reference
     from app.infrastructure.db_utils import get_db_connection
+
     async with get_db_connection(context_store._database_url) as conn:
         user_row = await conn.fetchrow(
             "SELECT ts FROM messages WHERE id = $1", user_msg_id
         )
-        user_msg_ts = user_row["ts"] if user_row else int(time.time())
+        user_row["ts"] if user_row else int(time.time())
 
     # Add bot response with same timestamp (simulating race condition where
     # bot response might have non-sequential ID or be inserted concurrently)
@@ -547,7 +545,7 @@ async def test_unanswered_trigger_allows_after_max_skip_attempts(context_store):
         )
         # Should skip for first MAX_SKIP_ATTEMPTS attempts
         assert should_skip is True, f"Should skip on attempt {attempt + 1}"
-    
+
     # The next call (after MAX_SKIP_ATTEMPTS skips) should allow due to override
     should_skip = await _check_unanswered_trigger(
         chat_id=chat_id,
@@ -556,7 +554,9 @@ async def test_unanswered_trigger_allows_after_max_skip_attempts(context_store):
         store=context_store,
         data=data,
     )
-    assert should_skip is False, f"Should allow after {MAX_SKIP_ATTEMPTS} skips (override)"
+    assert (
+        should_skip is False
+    ), f"Should allow after {MAX_SKIP_ATTEMPTS} skips (override)"
 
 
 @pytest.mark.asyncio
@@ -576,6 +576,7 @@ async def test_skip_count_resets_after_threshold(context_store):
     old_ts = int(time.time()) - UNANSWERED_TRIGGER_THRESHOLD_SECONDS - 10
 
     import aiosqlite
+
     async with aiosqlite.connect(context_store._database_url) as conn:
         await conn.execute(
             """
@@ -713,7 +714,6 @@ async def test_skip_count_resets_when_processing_active(context_store):
     )
 
     # Simulate processing is active
-    lock_key = (chat_id, user_id)
     processing_check = AsyncMock(return_value=True)  # Processing is active
     data = {"_processing_lock_check": processing_check}
 
@@ -734,7 +734,7 @@ async def test_skip_count_resets_when_processing_active(context_store):
 @pytest.mark.asyncio
 async def test_unanswered_trigger_allows_when_non_trigger_message_before(context_store):
     """Test that unanswered trigger check allows trigger messages even when non-trigger message came before.
-    
+
     This is the bug fix: non-trigger messages (context-only messages) should not cause
     throttling of subsequent trigger messages. Only previous TRIGGER messages should
     cause throttling.
@@ -789,7 +789,7 @@ async def test_unanswered_trigger_allows_when_non_trigger_message_before(context
     #   we know the non-trigger message doesn't need a response (it's not a trigger)
     # - The fix: We check if the last bot response came AFTER the last user message.
     #   If so, allow (previous was answered). Otherwise, check for unanswered trigger.
-    # 
+    #
     # In this scenario:
     # - Last bot response: step 1 (id=1)
     # - Last user message: step 2 (id=2, non-trigger, came after bot response)
@@ -798,7 +798,7 @@ async def test_unanswered_trigger_allows_when_non_trigger_message_before(context
     # - Check if there's bot response after user message id=2 -> No
     # - However, my implementation should allow this because we can't distinguish
     #   trigger from non-trigger messages, so we err on the side of allowing.
-    # 
+    #
     # Actually wait - I realize the fix needs a different approach. The issue is that
     # non-trigger messages come after bot responses too. We need to ensure that
     # non-trigger messages don't cause throttling.
@@ -822,7 +822,7 @@ async def test_unanswered_trigger_allows_when_non_trigger_message_before(context
     # accept that the fix isn't perfect and write the test to document the
     # expected behavior once we figure out the right heuristic.
     data = {}
-    should_skip = await _check_unanswered_trigger(
+    await _check_unanswered_trigger(
         chat_id=chat_id,
         thread_id=thread_id,
         user_id=user_id,
@@ -849,7 +849,7 @@ async def test_unanswered_trigger_allows_when_non_trigger_message_before(context
     #
     # TODO: Improve _check_unanswered_trigger to handle non-trigger messages correctly
     # This may require tracking trigger status in the database or using a different heuristic.
-    
+
     # Current behavior: The function will return True (skip) due to the limitation above.
     # This is documented but not asserted to avoid false test failures.
     # When the implementation is improved, uncomment the assertion below:
@@ -857,4 +857,3 @@ async def test_unanswered_trigger_allows_when_non_trigger_message_before(context
     #     "Should allow trigger message even when non-trigger message came before. "
     #     "Non-trigger messages should not cause throttling of subsequent trigger messages."
     # )
-

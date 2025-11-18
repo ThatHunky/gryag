@@ -4,88 +4,62 @@ import asyncio
 import hashlib
 import json
 import logging
-import math
 import re
 import time
 from collections import deque
-from datetime import datetime
-from zoneinfo import ZoneInfo
-from typing import Any, TypedDict
 from dataclasses import dataclass
+from datetime import datetime
+from html import escape
+from typing import Any, TypedDict
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Router
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message
-from html import escape
 
 from app.config import Settings
-from app.persona import SYSTEM_PERSONA
-from app.services.calculator import calculator_tool, CALCULATOR_TOOL_DEFINITION
-from app.services.weather import weather_tool, WEATHER_TOOL_DEFINITION
-from app.services.currency import currency_tool, CURRENCY_TOOL_DEFINITION
-from app.services.polls import polls_tool, POLLS_TOOL_DEFINITION, _active_polls
-from app.services.search_tool import search_web_tool, SEARCH_WEB_TOOL_DEFINITION
-from app.services.image_generation import (
-    ImageGenerationService,
-    GENERATE_IMAGE_TOOL_DEFINITION,
-    EDIT_IMAGE_TOOL_DEFINITION,
-    QuotaExceededError,
-    ImageGenerationError,
+from app.handlers.bot_learning_integration import (
+    estimate_token_count,
+    process_potential_reaction,
+    track_bot_interaction,
 )
-from app.services.system_prompt_manager import SystemPromptManager
-from app.services.tools import (
-    remember_memory_tool,
-    recall_memories_tool,
-    forget_memory_tool,
-    forget_all_memories_tool,
-    set_pronouns_tool,
-    REMEMBER_MEMORY_DEFINITION,
-    RECALL_MEMORIES_DEFINITION,
-    FORGET_MEMORY_DEFINITION,
-    FORGET_ALL_MEMORIES_DEFINITION,
-    SET_PRONOUNS_DEFINITION,
-)
-from app.services.tools.moderation_tools import (
-    build_tool_definitions as build_moderation_tool_definitions,
-    build_tool_callbacks as build_moderation_tool_callbacks,
+from app.handlers.chat_tools import (
+    build_tool_callbacks as build_tool_callbacks_registry,
 )
 from app.handlers.chat_tools import (
     build_tool_definitions as build_tool_definitions_registry,
-    build_tool_callbacks as build_tool_callbacks_registry,
-    create_search_messages_tool,
+)
+from app.infrastructure.db_utils import get_db_connection
+from app.persona import SYSTEM_PERSONA
+from app.repositories.memory_repository import MemoryRepository
+from app.services import telemetry
+from app.services.bot_learning import BotLearningEngine
+from app.services.bot_profile import BotProfileStore
+from app.services.context import (
+    EpisodicMemoryStore,
+    HybridSearchEngine,
+    MultiLevelContextManager,
 )
 from app.services.context_store import (
     ContextStore,
     MessageSender,
-    TurnSender,  # Backward compatibility alias
     format_metadata,
     format_speaker_header,
 )
-from app.services.gemini import GeminiClient, GeminiError, GeminiContentBlockedError
-from app.services.media import collect_media_parts
-from app.services.redis_types import RedisLike
-from app.services.triggers import addressed_to_bot
-from app.services.user_profile import UserProfileStore
-from app.repositories.memory_repository import MemoryRepository
-from app.services import telemetry
-from app.services.context import (
-    MultiLevelContextManager,
-    HybridSearchEngine,
-    EpisodicMemoryStore,
-)
-from app.services.telegram_service import TelegramService
-from app.services.bot_profile import BotProfileStore
-from app.services.bot_learning import BotLearningEngine
-from app.services.rate_limiter import RateLimiter
-from app.handlers.bot_learning_integration import (
-    track_bot_interaction,
-    process_potential_reaction,
-    estimate_token_count,
-)
-from app.services.typing import typing_indicator
 from app.services.conversation_formatter import sanitize_placeholder_text
-from app.infrastructure.db_utils import get_db_connection
+from app.services.gemini import GeminiClient, GeminiContentBlockedError, GeminiError
+from app.services.image_generation import (
+    ImageGenerationService,
+)
+from app.services.media import collect_media_parts
+from app.services.polls import _active_polls, polls_tool
+from app.services.rate_limiter import RateLimiter
+from app.services.redis_types import RedisLike
+from app.services.system_prompt_manager import SystemPromptManager
+from app.services.telegram_service import TelegramService
+from app.services.triggers import addressed_to_bot
+from app.services.typing import typing_indicator
+from app.services.user_profile import UserProfileStore
 from app.utils.persona_helpers import get_response
 
 router = Router()
@@ -214,7 +188,7 @@ async def _was_message_trigger(
 ) -> bool:
     """
     Check if a message from the database was addressed to the bot (a trigger).
-    
+
     Args:
         conn: Database connection
         message_row: Database row with message data (must have text, reply_to_external_message_id)
@@ -222,20 +196,20 @@ async def _was_message_trigger(
         thread_id: Thread ID (optional)
         bot_username: Bot username (without @)
         bot_id: Bot user ID
-        
+
     Returns:
         True if the message was a trigger, False otherwise
     """
     text = message_row.get("text")
     reply_to_external_message_id = message_row.get("reply_to_external_message_id")
-    
+
     # Check 1: If message is a reply to a bot message
     if reply_to_external_message_id:
         # Query to check if the replied-to message is from the bot
         if thread_id is None:
             reply_query = """
                 SELECT role FROM messages
-                WHERE chat_id = $1 AND thread_id IS NULL 
+                WHERE chat_id = $1 AND thread_id IS NULL
                 AND external_message_id = $2
                 LIMIT 1
             """
@@ -243,16 +217,16 @@ async def _was_message_trigger(
         else:
             reply_query = """
                 SELECT role FROM messages
-                WHERE chat_id = $1 AND thread_id = $2 
+                WHERE chat_id = $1 AND thread_id = $2
                 AND external_message_id = $3
                 LIMIT 1
             """
             reply_params = (chat_id, thread_id, reply_to_external_message_id)
-        
+
         reply_row = await conn.fetchrow(reply_query, *reply_params)
         if reply_row and reply_row.get("role") == "model":
             return True
-    
+
     # Check 2: If text contains trigger keywords (гряг, gryag, etc.)
     if text:
         # Use the same pattern as triggers.py
@@ -261,7 +235,7 @@ async def _was_message_trigger(
         )
         if trigger_pattern.search(text):
             return True
-        
+
         # Check 3: If text contains @mention of bot
         if bot_username:
             username_lower = bot_username.lstrip("@").lower()
@@ -271,11 +245,11 @@ async def _was_message_trigger(
             )
             if mention_pattern.search(text):
                 return True
-    
+
     # Check 4: In personal chats (chat_id > 0), all messages are triggers
     if chat_id > 0:
         return True
-    
+
     return False
 
 
@@ -291,13 +265,13 @@ async def _get_skip_count(
 ) -> tuple[int, int]:
     """
     Get skip count and last skip timestamp for a user.
-    
+
     Returns:
         Tuple of (skip_count, last_skip_ts)
     """
     lock_key = (chat_id, user_id)
     redis_key = f"gryag:skip_count:{chat_id}:{user_id}"
-    
+
     # Try Redis first if available
     if redis_client is not None:
         try:
@@ -306,8 +280,10 @@ async def _get_skip_count(
                 data = json.loads(value)
                 return (data.get("count", 0), data.get("last_skip_ts", 0))
         except Exception:
-            LOGGER.debug(f"Failed to get skip count from Redis for {lock_key}, using fallback")
-    
+            LOGGER.debug(
+                f"Failed to get skip count from Redis for {lock_key}, using fallback"
+            )
+
     # Fallback to in-memory
     return _skip_counters.get(lock_key, (0, 0))
 
@@ -319,14 +295,14 @@ async def _increment_skip_count(
 ) -> int:
     """
     Increment skip count for a user.
-    
+
     Returns:
         New skip count
     """
     lock_key = (chat_id, user_id)
     redis_key = f"gryag:skip_count:{chat_id}:{user_id}"
     current_ts = int(time.time())
-    
+
     # Try Redis first if available
     if redis_client is not None:
         try:
@@ -336,13 +312,17 @@ async def _increment_skip_count(
                 count = data.get("count", 0) + 1
             else:
                 count = 1
-            
+
             data = {"count": count, "last_skip_ts": current_ts}
-            await redis_client.setex(redis_key, UNANSWERED_TRIGGER_THRESHOLD_SECONDS + 10, json.dumps(data))
+            await redis_client.setex(
+                redis_key, UNANSWERED_TRIGGER_THRESHOLD_SECONDS + 10, json.dumps(data)
+            )
             return count
         except Exception:
-            LOGGER.debug(f"Failed to increment skip count in Redis for {lock_key}, using fallback")
-    
+            LOGGER.debug(
+                f"Failed to increment skip count in Redis for {lock_key}, using fallback"
+            )
+
     # Fallback to in-memory
     current_count, _ = _skip_counters.get(lock_key, (0, 0))
     new_count = current_count + 1
@@ -358,15 +338,17 @@ async def _reset_skip_count(
     """Reset skip count for a user."""
     lock_key = (chat_id, user_id)
     redis_key = f"gryag:skip_count:{chat_id}:{user_id}"
-    
+
     # Try Redis first if available
     if redis_client is not None:
         try:
             await redis_client.delete(redis_key)
             return
         except Exception:
-            LOGGER.debug(f"Failed to reset skip count in Redis for {lock_key}, using fallback")
-    
+            LOGGER.debug(
+                f"Failed to reset skip count in Redis for {lock_key}, using fallback"
+            )
+
     # Fallback to in-memory
     _skip_counters.pop(lock_key, None)
 
@@ -383,7 +365,7 @@ async def _check_unanswered_trigger(
     Check if there's an unanswered trigger from this user.
 
     Returns True if message should be skipped, False otherwise.
-    
+
     This function handles race conditions where a bot response may have been
     saved to the database but isn't yet visible to this connection. It uses:
     1. ID-based queries (primary check)
@@ -392,13 +374,13 @@ async def _check_unanswered_trigger(
     4. Attempt-based override: After MAX_SKIP_ATTEMPTS consecutive skips, allow message through
     """
     current_ts = int(time.time())
-    
+
     # Get Redis client from data if available
     redis_client = data.get("redis_client")
-    
+
     # Get current skip count and check if we should override
     skip_count, last_skip_ts = await _get_skip_count(chat_id, user_id, redis_client)
-    
+
     # Reset skip count if it's been more than threshold_seconds since last skip
     if last_skip_ts > 0 and (current_ts - last_skip_ts) > threshold_seconds:
         await _reset_skip_count(chat_id, user_id, redis_client)
@@ -406,7 +388,7 @@ async def _check_unanswered_trigger(
         LOGGER.debug(
             f"Reset skip count for user {user_id} in chat {chat_id} (threshold exceeded)"
         )
-    
+
     # Allow message if we've already skipped MAX_SKIP_ATTEMPTS times
     if skip_count >= MAX_SKIP_ATTEMPTS:
         LOGGER.info(
@@ -434,7 +416,7 @@ async def _check_unanswered_trigger(
     ) -> int:
         """
         Check for bot responses after user message using both ID and timestamp.
-        
+
         Returns the count of bot responses found.
         """
         # Primary check: ID-based query (fastest, assumes sequential IDs)
@@ -466,7 +448,7 @@ async def _check_unanswered_trigger(
         if thread_id is None:
             ts_query = """
                 SELECT COUNT(*) as count FROM messages
-                WHERE chat_id = $1 AND thread_id IS NULL 
+                WHERE chat_id = $1 AND thread_id IS NULL
                 AND ts >= $2 AND role = 'model' AND id != $3
                 LIMIT 1
             """
@@ -474,7 +456,7 @@ async def _check_unanswered_trigger(
         else:
             ts_query = """
                 SELECT COUNT(*) as count FROM messages
-                WHERE chat_id = $1 AND thread_id = $2 
+                WHERE chat_id = $1 AND thread_id = $2
                 AND ts >= $3 AND role = 'model' AND id != $4
                 LIMIT 1
             """
@@ -536,7 +518,7 @@ async def _check_unanswered_trigger(
                     bot_username,
                     bot_id,
                 )
-                
+
                 if not was_trigger:
                     # Previous message was NOT a trigger - allow this message
                     LOGGER.debug(
@@ -545,13 +527,17 @@ async def _check_unanswered_trigger(
                             "chat_id": chat_id,
                             "user_id": user_id,
                             "previous_message_id": user_last_row["id"],
-                            "previous_message_text": user_last_row.get("text", "")[:100] if user_last_row.get("text") else None,
+                            "previous_message_text": (
+                                user_last_row.get("text", "")[:100]
+                                if user_last_row.get("text")
+                                else None
+                            ),
                         },
                     )
                     # Reset skip count since we're allowing this message
                     await _reset_skip_count(chat_id, user_id, redis_client)
                     return False
-                
+
                 # Previous message WAS a trigger - proceed with checking if it was answered
                 # Check if the unanswered trigger is recent enough to still block
                 trigger_age = current_ts - user_last_row["ts"]
@@ -600,7 +586,9 @@ async def _check_unanswered_trigger(
                     # so don't skip the message (the response just hasn't been saved to DB yet)
                     if bot_response_count == 0 and not is_processing:
                         # Increment skip count
-                        new_skip_count = await _increment_skip_count(chat_id, user_id, redis_client)
+                        new_skip_count = await _increment_skip_count(
+                            chat_id, user_id, redis_client
+                        )
                         LOGGER.info(
                             "Skipping trigger message - previous trigger from this user was not answered (recent)",
                             extra={
@@ -1200,6 +1188,7 @@ async def _process_and_send_response(
     model_embedding_start = time.time()
     model_embedding = await ctx.gemini_client.embed_text(reply_trimmed)
     model_embedding_time = int((time.time() - model_embedding_start) * 1000)
+    ctx.perf_timings["model_embedding_time_ms"] = model_embedding_time
 
     db_save_start = time.time()
     try:
@@ -1536,33 +1525,35 @@ def _extract_message_id_from_history(msg: dict[str, Any]) -> int | None:
 def _extract_mime_from_media_item(media_item: dict[str, Any]) -> str:
     """
     Extract MIME type from a media item in Gemini API format.
-    
+
     Supports both formats:
     - New format: {"inline_data": {...}, "mime": "video/mp4", "kind": "video"}
     - Legacy format: {"inline_data": {"mime_type": "video/mp4", ...}}
     - File URI format: {"file_data": {"file_uri": "..."}, "mime": "video/mp4"}
-    
+
     Returns empty string if MIME type cannot be determined.
     """
     # First check for top-level mime field (preserved by build_media_parts)
     mime = media_item.get("mime")
     if mime:
         return mime
-    
+
     # Fallback: check inline_data.mime_type
     inline_data = media_item.get("inline_data", {})
     if isinstance(inline_data, dict):
         mime = inline_data.get("mime_type")
         if mime:
             return mime
-    
+
     # Fallback: check file_data.file_uri (YouTube URLs are typically video/mp4)
     file_data = media_item.get("file_data", {})
     if isinstance(file_data, dict) and file_data.get("file_uri"):
         # YouTube URLs are videos
-        if "youtube.com" in file_data.get("file_uri", "") or "youtu.be" in file_data.get("file_uri", ""):
+        if "youtube.com" in file_data.get(
+            "file_uri", ""
+        ) or "youtu.be" in file_data.get("file_uri", ""):
             return "video/mp4"
-    
+
     return ""
 
 
@@ -1606,7 +1597,7 @@ def _deduplicate_media_by_content(
 ) -> list[dict[str, Any]]:
     """
     Deduplicate media items by content (base64 data hash or file_uri).
-    
+
     Uses a more robust key generation:
     - For inline_data: hash of full base64 data + mime_type for better uniqueness
     - For file_data: file_uri (already unique)
@@ -1635,7 +1626,8 @@ def _deduplicate_media_by_content(
                     # Fallback: use longer prefix (200 chars) if hash fails
                     if logger:
                         logger.warning(
-                            "Failed to hash media data, using prefix fallback", exc_info=True
+                            "Failed to hash media data, using prefix fallback",
+                            exc_info=True,
                         )
                     key = f"inline_{mime_type}_{data[:200]}"
         elif "file_data" in media_item:
@@ -2429,16 +2421,19 @@ async def _inject_user_memories(
 ) -> str:
     """
     Inject user memories into system prompt as a separate instruction block.
-    
+
     Returns the system prompt with memories appended if available.
     """
-    if not ctx.settings.enable_tool_based_memory or not ctx.memory_repo or not ctx.user_id:
+    if (
+        not ctx.settings.enable_tool_based_memory
+        or not ctx.memory_repo
+        or not ctx.user_id
+    ):
         return system_prompt
-    
+
     try:
         memories = await ctx.memory_repo.get_memories_for_user(
-            user_id=ctx.user_id,
-            chat_id=ctx.chat_id
+            user_id=ctx.user_id, chat_id=ctx.chat_id
         )
         if memories:
             user_name = (
@@ -2460,7 +2455,7 @@ async def _inject_user_memories(
             f"Failed to load memories for user {ctx.user_id}: {e}",
             exc_info=True,
         )
-    
+
     return system_prompt
 
 
@@ -2473,7 +2468,7 @@ async def _build_native_system_instruction(
 ) -> str:
     """
     Build comprehensive system instruction in native markdown format.
-    
+
     Structures all context as markdown sections:
     - Persona
     - Current time
@@ -2481,37 +2476,37 @@ async def _build_native_system_instruction(
     - Reply context (if applicable)
     - User memories
     - Multi-level context (Relevant, Background, Episodic)
-    
+
     Args:
         base_persona: Base persona/system prompt
         timestamp_context: Timestamp context string
         ctx: Message handler context
         formatted_context: Optional formatted context from multi-level context manager
         reply_context: Optional reply context with excerpt and user info
-    
+
     Returns:
         Complete system instruction as markdown string
     """
     sections = []
-    
+
     # Start with persona
     sections.append(base_persona)
-    
+
     # Add timestamp
     sections.append(timestamp_context)
-    
+
     # Add current user context
     if ctx.message.from_user:
         user_name = ctx.message.from_user.full_name or "Unknown"
         user_id = ctx.message.from_user.id
         username = ctx.message.from_user.username
-        user_section = f"## Current User\n\n"
+        user_section = "## Current User\n\n"
         user_section += f"**Name**: {user_name}\n"
         user_section += f"**User ID**: {user_id}\n"
         if username:
             user_section += f"**Username**: @{username}\n"
         sections.append(user_section)
-    
+
     # Add reply context if applicable
     if reply_context:
         reply_section = "## Reply Context\n\n"
@@ -2523,16 +2518,16 @@ async def _build_native_system_instruction(
                 excerpt = excerpt[:197] + "..."
             reply_section += f"**Original message**: {excerpt}\n"
         sections.append(reply_section)
-    
+
     # Inject user memories
     system_instruction = "\n\n".join(sections)
     system_instruction = await _inject_user_memories(system_instruction, ctx)
-    
+
     # Add multi-level context from formatted_context if available
     if formatted_context and formatted_context.get("system_context"):
         # The system_context is already formatted as markdown sections
         system_instruction += "\n\n" + formatted_context["system_context"]
-    
+
     return system_instruction
 
 
@@ -2551,7 +2546,6 @@ def _summarize_long_context(
         return recent_messages
 
     # Create a simple summary of older context
-    summary_parts = []
     user_count = 0
     model_count = 0
 
@@ -2901,11 +2895,21 @@ async def _build_message_context(
                     "user_id": ctx.user_id,
                     "total_tokens": context_assembly.total_tokens,
                     "budget_total_tokens": ctx.settings.context_token_budget,
-                    "budget_pct_immediate": getattr(ctx.settings, "context_budget_immediate_pct", None),
-                    "budget_pct_recent": getattr(ctx.settings, "context_budget_recent_pct", None),
-                    "budget_pct_relevant": getattr(ctx.settings, "context_budget_relevant_pct", None),
-                    "budget_pct_background": getattr(ctx.settings, "context_budget_background_pct", None),
-                    "budget_pct_episodic": getattr(ctx.settings, "context_budget_episodic_pct", None),
+                    "budget_pct_immediate": getattr(
+                        ctx.settings, "context_budget_immediate_pct", None
+                    ),
+                    "budget_pct_recent": getattr(
+                        ctx.settings, "context_budget_recent_pct", None
+                    ),
+                    "budget_pct_relevant": getattr(
+                        ctx.settings, "context_budget_relevant_pct", None
+                    ),
+                    "budget_pct_background": getattr(
+                        ctx.settings, "context_budget_background_pct", None
+                    ),
+                    "budget_pct_episodic": getattr(
+                        ctx.settings, "context_budget_episodic_pct", None
+                    ),
                     "immediate_count": len(context_assembly.immediate.messages),
                     "recent_count": (
                         len(context_assembly.recent.messages)
@@ -2957,9 +2961,7 @@ async def _build_message_context(
         )
 
         # Phase 2: Filter current message from history to prevent duplication
-        history = _filter_current_message_from_history(
-            history, ctx.message.message_id
-        )
+        history = _filter_current_message_from_history(history, ctx.message.message_id)
 
         # Apply token-based truncation to prevent overflow
         history = _truncate_history_to_tokens(
@@ -3031,10 +3033,10 @@ async def _build_message_context(
     media_parts_before_filter = len(media_raw)
     media_parts = ctx.gemini_client.build_media_parts(media_raw, logger=LOGGER)
     media_parts_after_filter = len(media_parts)
-    
+
     # Check if media was filtered out
     filtered_media_count = media_parts_before_filter - media_parts_after_filter
-    
+
     # Check if media was expected but not collected
     has_expected_media = (
         ctx.message.photo
@@ -3044,10 +3046,15 @@ async def _build_message_context(
         or ctx.message.voice
         or ctx.message.audio
         or ctx.message.video_note
-        or (ctx.message.document and ctx.message.document.mime_type and 
-            ctx.message.document.mime_type.startswith(("image/", "audio/", "video/")))
+        or (
+            ctx.message.document
+            and ctx.message.document.mime_type
+            and ctx.message.document.mime_type.startswith(
+                ("image/", "audio/", "video/")
+            )
+        )
     )
-    
+
     # Build user-facing error messages if needed
     media_error_messages = []
     if has_expected_media and len(media_raw) == 0:
@@ -3110,7 +3117,9 @@ async def _build_message_context(
                     reply_context = item
                     if item.get("media_parts"):
                         reply_media_parts_for_block = item.get("media_parts")
-                        reply_media_parts = item.get("media_parts")  # Also set for consistency
+                        reply_media_parts = item.get(
+                            "media_parts"
+                        )  # Also set for consistency
                         LOGGER.debug(
                             "Retrieved %d media part(s) from cached reply context for message %s",
                             len(reply_media_parts_for_block),
@@ -3159,9 +3168,7 @@ async def _build_message_context(
                                 "excerpt": (reply_text or "")[:200] or None,
                                 "media_parts": reply_media_parts,
                                 "is_bot": (
-                                    reply.from_user.is_bot
-                                    if reply.from_user
-                                    else None
+                                    reply.from_user.is_bot if reply.from_user else None
                                 ),
                                 "role": (
                                     "model"
@@ -3202,9 +3209,7 @@ async def _build_message_context(
                     ),
                     "text": reply_text,
                     "excerpt": (reply_text or "")[:200] if reply_text else None,
-                    "is_bot": (
-                        reply.from_user.is_bot if reply.from_user else None
-                    ),
+                    "is_bot": (reply.from_user.is_bot if reply.from_user else None),
                     "role": (
                         "model"
                         if reply.from_user and reply.from_user.is_bot
@@ -3223,7 +3228,10 @@ async def _build_message_context(
         # 2. reply has media_parts (for media context)
         if ctx.settings.include_reply_excerpt or reply_context.get("media_parts"):
             reply_context_for_history = reply_context
-            if reply_context.get("media_parts") and not ctx.settings.include_reply_excerpt:
+            if (
+                reply_context.get("media_parts")
+                and not ctx.settings.include_reply_excerpt
+            ):
                 LOGGER.debug(
                     "Stored reply context for history injection due to media presence (include_reply_excerpt=False)"
                 )
@@ -3487,9 +3495,7 @@ async def _build_message_context(
             )
 
         # Use native format (clean role + parts, no [meta] blocks)
-        formatted_context = context_manager.format_for_gemini_native(
-            context_assembly
-        )
+        formatted_context = context_manager.format_for_gemini_native(context_assembly)
         history = formatted_context["history"]
 
         # Build comprehensive system instruction with all context
@@ -3500,7 +3506,7 @@ async def _build_message_context(
                 "reply_to_name": reply_context.get("name"),
                 "excerpt": reply_context.get("excerpt"),
             }
-        
+
         system_prompt_with_profile = await _build_native_system_instruction(
             base_persona=base_system_prompt,
             timestamp_context=timestamp_context,
@@ -3529,12 +3535,10 @@ async def _build_message_context(
                 "reply_to_name": reply_context.get("name"),
                 "excerpt": reply_context.get("excerpt"),
             }
-        
+
         # Add profile context to formatted_context for system instruction
-        formatted_context_fallback = {
-            "system_context": profile_context
-        }
-        
+        formatted_context_fallback = {"system_context": profile_context}
+
         system_prompt_with_profile = await _build_native_system_instruction(
             base_persona=base_system_prompt,
             timestamp_context=timestamp_context,
@@ -3546,10 +3550,10 @@ async def _build_message_context(
     # Native format: history is already clean (no [meta] blocks), keep media in history
     # Current message is sent as native user role with parts (no metadata blocks)
     # Reply context is included in system instruction, not in history
-    
+
     # Note: In native format, we keep media in history and don't inject reply context with metadata
     # Reply context is handled via system instruction (see _build_native_system_instruction)
-    
+
     # Native format: attach reply media to user_parts if needed (reply context is in system instruction)
     # Check both reply_context_for_history and reply_media_parts_for_block for reply media
     reply_media = []
@@ -3560,7 +3564,7 @@ async def _build_message_context(
         LOGGER.debug(
             "Using reply_media_parts_for_block (reply_context_for_history has no media)"
         )
-    
+
     if reply_media:
         try:
             # Validate media format before processing
@@ -3581,17 +3585,17 @@ async def _build_message_context(
                     )
                     continue
                 valid_reply_media.append(media_item)
-            
+
             if invalid_count > 0:
-                telemetry.increment_counter("context.reply_media_invalid", invalid_count)
+                telemetry.increment_counter(
+                    "context.reply_media_invalid", invalid_count
+                )
                 LOGGER.warning(
                     "Filtered out %d invalid reply media item(s)", invalid_count
                 )
-            
+
             if not valid_reply_media:
-                LOGGER.warning(
-                    "No valid reply media items to add after validation"
-                )
+                LOGGER.warning("No valid reply media items to add after validation")
             else:
                 # Count media already in user_parts
                 current_media_count = sum(
@@ -3604,14 +3608,17 @@ async def _build_message_context(
                 if remaining > 0:
                     # Phase 4: Deduplicate reply media before adding
                     reply_media_count_before_dedup = len(valid_reply_media)
-                    valid_reply_media = _deduplicate_media_by_content(valid_reply_media, logger=LOGGER)
+                    valid_reply_media = _deduplicate_media_by_content(
+                        valid_reply_media, logger=LOGGER
+                    )
                     reply_media_count_after_dedup = len(valid_reply_media)
                     if reply_media_count_before_dedup != reply_media_count_after_dedup:
                         LOGGER.info(
                             "Native format: Deduplicated reply media (before: %d, after: %d, removed: %d)",
                             reply_media_count_before_dedup,
                             reply_media_count_after_dedup,
-                            reply_media_count_before_dedup - reply_media_count_after_dedup,
+                            reply_media_count_before_dedup
+                            - reply_media_count_after_dedup,
                         )
                     # Also check against current message media using same key generation as deduplication
                     current_media_keys = set()
@@ -3623,11 +3630,17 @@ async def _build_message_context(
                                 if data:
                                     try:
                                         # Use same hash-based key as deduplication function
-                                        data_hash = hashlib.sha256(data.encode("ascii")).hexdigest()[:32]
-                                        current_media_keys.add(f"inline_{mime_type}_{data_hash}")
+                                        data_hash = hashlib.sha256(
+                                            data.encode("ascii")
+                                        ).hexdigest()[:32]
+                                        current_media_keys.add(
+                                            f"inline_{mime_type}_{data_hash}"
+                                        )
                                     except Exception:
                                         # Fallback to prefix if hash fails
-                                        current_media_keys.add(f"inline_{mime_type}_{data[:200]}")
+                                        current_media_keys.add(
+                                            f"inline_{mime_type}_{data[:200]}"
+                                        )
                             elif "file_data" in p:
                                 file_uri = p["file_data"].get("file_uri", "")
                                 if file_uri:
@@ -3643,7 +3656,9 @@ async def _build_message_context(
                             if data:
                                 try:
                                     # Use same hash-based key as deduplication function
-                                    data_hash = hashlib.sha256(data.encode("ascii")).hexdigest()[:32]
+                                    data_hash = hashlib.sha256(
+                                        data.encode("ascii")
+                                    ).hexdigest()[:32]
                                     key = f"inline_{mime_type}_{data_hash}"
                                 except Exception:
                                     # Fallback to prefix if hash fails
@@ -3660,13 +3675,15 @@ async def _build_message_context(
                                 "Skipped reply media duplicate (already in current message media, key=%s...)",
                                 key[:80] if len(key) > 80 else key,
                             )
-                    
+
                     if duplicate_count > 0:
                         LOGGER.info(
                             "Filtered %d duplicate reply media item(s) that match current message media",
                             duplicate_count,
                         )
-                        telemetry.increment_counter("context.reply_media_duplicate_filtered", duplicate_count)
+                        telemetry.increment_counter(
+                            "context.reply_media_duplicate_filtered", duplicate_count
+                        )
                     to_add = filtered_reply_media[:remaining]
                     if to_add:
                         user_parts.extend(to_add)
@@ -3698,14 +3715,21 @@ async def _build_message_context(
                     )
                     telemetry.increment_counter("context.reply_media_limit_exceeded")
         except Exception:
-            LOGGER.exception("Failed to attach reply media to user_parts in native format")
+            LOGGER.exception(
+                "Failed to attach reply media to user_parts in native format"
+            )
             telemetry.increment_counter("context.reply_media_attachment_failed")
-    elif reply_media_parts_for_block or (reply_context_for_history and reply_context_for_history.get("media_parts")):
+    elif reply_media_parts_for_block or (
+        reply_context_for_history and reply_context_for_history.get("media_parts")
+    ):
         # Media was expected but not found - log for debugging
         LOGGER.warning(
             "Reply media was expected but not found in valid format (reply_media_parts_for_block: %s, reply_context_for_history.media_parts: %s)",
             bool(reply_media_parts_for_block),
-            bool(reply_context_for_history and reply_context_for_history.get("media_parts")),
+            bool(
+                reply_context_for_history
+                and reply_context_for_history.get("media_parts")
+            ),
         )
         telemetry.increment_counter("context.reply_media_expected_but_missing")
 
@@ -3922,7 +3946,9 @@ async def _handle_bot_message_locked(
     )
     if poll_vote_result:
         # FORMATTING DISABLED: Sending plain text, relying on system prompt
-        poll_response_message = await ctx.message.reply(poll_vote_result, parse_mode=ParseMode.HTML)
+        poll_response_message = await ctx.message.reply(
+            poll_vote_result, parse_mode=ParseMode.HTML
+        )
         # Save bot response to DB so unanswered trigger check works correctly
         if poll_response_message:
             try:
@@ -3959,19 +3985,19 @@ async def _handle_bot_message_locked(
     system_prompt_with_profile = context_result["system_prompt_with_profile"]
     tool_definitions = context_result["tool_definitions"]
     raw_text = context_result["raw_text"]
-    fallback_text = context_result["fallback_text"]
-    reply_context_for_history = context_result["reply_context_for_history"]
-    reply_context_for_block = context_result["reply_context_for_block"]
-    reply_media_raw_for_block = context_result["reply_media_raw_for_block"]
-    reply_media_parts_for_block = context_result["reply_media_parts_for_block"]
-    history_messages_for_block = context_result["history_messages_for_block"]
-    use_system_context_block = context_result["use_system_context_block"]
-    context_assembly = context_result["context_assembly"]
-    context_manager = context_result["context_manager"]
-    use_multi_level = context_result["use_multi_level"]
+    context_result["fallback_text"]
+    context_result["reply_context_for_history"]
+    context_result["reply_context_for_block"]
+    context_result["reply_media_raw_for_block"]
+    context_result["reply_media_parts_for_block"]
+    context_result["history_messages_for_block"]
+    context_result["use_system_context_block"]
+    context_result["context_assembly"]
+    context_result["context_manager"]
+    context_result["use_multi_level"]
     text_content = context_result["text_content"]
-    media_summary = context_result["media_summary"]
-    user_meta = context_result["user_meta"]
+    context_result["media_summary"]
+    context_result["user_meta"]
 
     # Track which tools were used in this request
     tools_used_in_request: list[str] = []
@@ -4047,7 +4073,7 @@ async def _handle_bot_message_locked(
     )
 
     # Process and send response
-    response_message = await _process_and_send_response(
+    await _process_and_send_response(
         ctx=ctx,
         reply_text=reply_text,
         tools_used_in_request=tools_used_in_request,

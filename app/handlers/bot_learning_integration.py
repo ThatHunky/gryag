@@ -7,16 +7,14 @@ to populate the bot self-learning system without blocking message flow.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from datetime import datetime
-from typing import Any
 
 from aiogram.types import Message
 
-from app.services.bot_profile import BotProfileStore
 from app.services.bot_learning import BotLearningEngine
+from app.services.bot_profile import BotProfileStore
 from app.services.context_store import ContextStore
 
 LOGGER = logging.getLogger(__name__)

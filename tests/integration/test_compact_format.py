@@ -4,11 +4,9 @@ Integration test for compact conversation format.
 Tests end-to-end flow with compact format enabled.
 """
 
-import asyncio
 from app.services.conversation_formatter import (
-    format_history_compact,
-    format_message_compact,
     estimate_tokens,
+    format_history_compact,
 )
 
 
@@ -107,7 +105,7 @@ def test_long_conversation():
                 {
                     "role": "model",
                     "parts": [
-                        {"text": f'[meta] name="gryag"'},
+                        {"text": '[meta] name="gryag"'},
                         {"text": f"Відповідь {i}"},
                     ],
                 }

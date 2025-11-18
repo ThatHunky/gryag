@@ -22,11 +22,8 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import math
 import time
 from pathlib import Path
-
-import aiosqlite
 
 from app.infrastructure.db_utils import get_db_connection
 from app.services import telemetry
@@ -155,7 +152,9 @@ class AdaptiveThrottleManager:
                 # Calculate metrics
                 burst_count = self._count_bursts(timestamps)
                 avg_spacing = self._calculate_avg_spacing(timestamps)
-                throttle_rate = throttled_count / total_requests if total_requests > 0 else 0
+                throttle_rate = (
+                    throttled_count / total_requests if total_requests > 0 else 0
+                )
 
                 # Calculate spam score (0.0 = good, 1.0 = bad)
                 # Factors:
@@ -236,11 +235,7 @@ class AdaptiveThrottleManager:
         for i in range(len(timestamps)):
             window_end = timestamps[i] + self.BURST_WINDOW_SECONDS
             # Count requests in this 60s window
-            count = sum(
-                1
-                for ts in timestamps[i:]
-                if ts <= window_end
-            )
+            count = sum(1 for ts in timestamps[i:] if ts <= window_end)
             if count >= self.BURST_THRESHOLD:
                 bursts += 1
 
@@ -251,7 +246,9 @@ class AdaptiveThrottleManager:
         if len(timestamps) < 2:
             return 0.0
 
-        spacings = [timestamps[i+1] - timestamps[i] for i in range(len(timestamps) - 1)]
+        spacings = [
+            timestamps[i + 1] - timestamps[i] for i in range(len(timestamps) - 1)
+        ]
         return sum(spacings) / len(spacings)
 
     def _calculate_multiplier(self, reputation_score: float) -> float:
@@ -337,7 +334,9 @@ class AdaptiveThrottleManager:
                 "multiplier": multiplier,
                 "total_requests": total_requests,
                 "throttled_requests": throttled_requests,
-                "throttle_rate": throttled_requests / total_requests if total_requests > 0 else 0,
+                "throttle_rate": (
+                    throttled_requests / total_requests if total_requests > 0 else 0
+                ),
                 "burst_count": burst_requests,
                 "avg_spacing_seconds": avg_spacing,
                 "last_update": last_update,

@@ -6,10 +6,11 @@ Ensures:
 - Callback registry exposes callbacks for all defined tools when enabled
 """
 
-import pytest
 import types
 
-from app.handlers.chat_tools import build_tool_definitions, build_tool_callbacks
+import pytest
+
+from app.handlers.chat_tools import build_tool_callbacks, build_tool_definitions
 
 
 class _DummySettings:
@@ -51,17 +52,18 @@ class _DummyMemoryRepo:
         class Memory:
             def __init__(self):
                 self.id = 1
+
         return Memory()
-    
+
     async def get_memories_for_user(self, user_id: int, chat_id: int):
         return []
-    
+
     async def get_memory_by_id(self, memory_id: int):
         return None
-    
+
     async def delete_memory(self, memory_id: int):
         return True
-    
+
     async def delete_all_memories(self, user_id: int, chat_id: int):
         return 0
 
@@ -69,13 +71,15 @@ class _DummyMemoryRepo:
 class _DummyTelegramService:
     async def find_user(self, query: str, chat_id: int):
         return {"user_id": 123, "username": "test"}
-    
+
     async def kick_user(self, user_id: int, chat_id: int):
         return "User kicked"
-    
-    async def mute_user(self, user_id: int, chat_id: int, duration_minutes: int | None = None):
+
+    async def mute_user(
+        self, user_id: int, chat_id: int, duration_minutes: int | None = None
+    ):
         return "User muted"
-    
+
     async def unmute_user(self, user_id: int, chat_id: int):
         return "User unmuted"
 

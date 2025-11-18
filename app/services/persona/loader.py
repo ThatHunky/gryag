@@ -66,7 +66,7 @@ class PersonaLoader:
                 )
                 return self._get_default_persona()
 
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 data = yaml.safe_load(f)
 
             # Parse admin users
@@ -80,7 +80,7 @@ class PersonaLoader:
             if "system_prompt_template" in data:
                 template_path = Path(data["system_prompt_template"])
                 if template_path.exists():
-                    with open(template_path, "r", encoding="utf-8") as f:
+                    with open(template_path, encoding="utf-8") as f:
                         system_prompt = f.read()
                 else:
                     LOGGER.warning(
@@ -112,7 +112,7 @@ class PersonaLoader:
     @staticmethod
     def _ensure_plain_system_prompt(prompt: str) -> None:
         """Validate system prompt template for well-formed variable placeholders.
-        
+
         Allows variable placeholders like {timestamp}, {current_year}, etc.
         Only warns about unclosed braces or malformed placeholders.
         """
@@ -122,12 +122,12 @@ class PersonaLoader:
         # Check for unclosed braces (malformed placeholders)
         open_braces = prompt.count("{")
         close_braces = prompt.count("}")
-        
+
         if open_braces != close_braces:
             LOGGER.warning(
                 f"System prompt has mismatched braces: {open_braces} open, {close_braces} close"
             )
-        
+
         # Check for malformed placeholders (e.g., {{ or }} without proper escaping)
         # Allow {variable} format
         placeholder_pattern = r"\{[^}]*\}"
@@ -149,7 +149,7 @@ class PersonaLoader:
                 )
                 return self._get_default_responses()
 
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 templates = json.load(f)
 
             return templates
@@ -188,33 +188,33 @@ class PersonaLoader:
 
     def get_system_prompt(self, **kwargs: Any) -> str:
         """Return the configured system prompt with variable substitution.
-        
+
         Supports the following variables:
         - {timestamp} - Full formatted timestamp (e.g., "Monday, January 15, 2025 at 14:30:45")
         - {current_year} - Just the year (extracted from timestamp)
         - {current_date} - Date portion only (e.g., "Monday, January 15, 2025")
         - Any other variables passed via kwargs
-        
+
         Args:
             **kwargs: Variables for template substitution. Special handling for 'current_time'.
-        
+
         Returns:
             System prompt with variables substituted
         """
         prompt = self.persona.system_prompt
-        
+
         # If no variables in prompt, return as-is
         if "{" not in prompt:
             return prompt
-        
+
         # Prepare substitution variables
         substitution_vars: dict[str, Any] = {}
-        
+
         # Extract timestamp-related variables from current_time if provided
         current_time = kwargs.get("current_time")
         if current_time:
             substitution_vars["timestamp"] = current_time
-            
+
             # Extract year from timestamp (format: "Monday, January 15, 2025 at 14:30:45")
             year_match = re.search(r"\b(19|20)\d{2}\b", current_time)
             if year_match:
@@ -223,12 +223,14 @@ class PersonaLoader:
                 # Fallback: try to extract from datetime if parsing fails
                 try:
                     # Try to parse the timestamp string
-                    dt = datetime.strptime(current_time.split(" at ")[0], "%A, %B %d, %Y")
+                    dt = datetime.strptime(
+                        current_time.split(" at ")[0], "%A, %B %d, %Y"
+                    )
                     substitution_vars["current_year"] = str(dt.year)
                 except (ValueError, IndexError):
                     # If parsing fails, use current year as fallback
                     substitution_vars["current_year"] = str(datetime.now().year)
-            
+
             # Extract date portion (everything before " at ")
             if " at " in current_time:
                 substitution_vars["current_date"] = current_time.split(" at ")[0]
@@ -240,6 +242,7 @@ class PersonaLoader:
             kyiv_tz = None
             try:
                 import pytz
+
                 kyiv_tz = pytz.timezone("Europe/Kyiv")
                 now = datetime.now(kyiv_tz)
             except ImportError:
@@ -248,15 +251,17 @@ class PersonaLoader:
             except Exception:
                 # If timezone fails, use local time
                 pass
-            
+
             timestamp_str = now.strftime("%A, %B %d, %Y at %H:%M:%S")
             substitution_vars["timestamp"] = timestamp_str
             substitution_vars["current_year"] = str(now.year)
             substitution_vars["current_date"] = now.strftime("%A, %B %d, %Y")
-        
+
         # Add any other kwargs as variables
-        substitution_vars.update({k: v for k, v in kwargs.items() if k != "current_time"})
-        
+        substitution_vars.update(
+            {k: v for k, v in kwargs.items() if k != "current_time"}
+        )
+
         # Perform substitution
         try:
             prompt = prompt.format(**substitution_vars)
@@ -269,7 +274,7 @@ class PersonaLoader:
         except ValueError as e:
             LOGGER.warning(f"Error formatting system prompt: {e}")
             # Return original if formatting fails
-        
+
         return prompt
 
     def get_response(self, key: str, **kwargs: Any) -> str:

@@ -6,7 +6,7 @@ Provides common CRUD operations for all repositories.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Generic, List, Optional, TypeVar
+from typing import Any, Generic, TypeVar
 
 import asyncpg
 
@@ -51,12 +51,11 @@ class Repository(ABC, Generic[T]):
             - Proper error handling
         """
         return get_db_connection(self.database_url)
-    
 
     async def _execute(
         self,
         query: str,
-        params: tuple | Dict[str, Any] | None = None,
+        params: tuple | dict[str, Any] | None = None,
     ) -> str:
         """Execute query and return result.
 
@@ -85,13 +84,13 @@ class Repository(ABC, Generic[T]):
                 "Query execution failed",
                 context={"query": query[:100], "params": str(params)[:100]},
                 cause=e,
-            )
+            ) from None
 
     async def _fetch_one(
         self,
         query: str,
-        params: tuple | Dict[str, Any] | None = None,
-    ) -> Optional[asyncpg.Record]:
+        params: tuple | dict[str, Any] | None = None,
+    ) -> asyncpg.Record | None:
         """Fetch single row from query.
 
         Args:
@@ -119,13 +118,13 @@ class Repository(ABC, Generic[T]):
                 "Failed to fetch row",
                 context={"query": query[:100]},
                 cause=e,
-            )
+            ) from None
 
     async def _fetch_all(
         self,
         query: str,
-        params: tuple | Dict[str, Any] | None = None,
-    ) -> List[asyncpg.Record]:
+        params: tuple | dict[str, Any] | None = None,
+    ) -> list[asyncpg.Record]:
         """Fetch all rows from query.
 
         Args:
@@ -153,10 +152,10 @@ class Repository(ABC, Generic[T]):
                 "Failed to fetch rows",
                 context={"query": query[:100]},
                 cause=e,
-            )
+            ) from None
 
     @abstractmethod
-    async def find_by_id(self, id: Any) -> Optional[T]:
+    async def find_by_id(self, id: Any) -> T | None:
         """Find entity by ID.
 
         Args:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable
+from collections.abc import Callable
 
 from app.config import Settings
 
@@ -14,6 +14,7 @@ try:
     PROMETHEUS_AVAILABLE = True
 except ImportError:
     PROMETHEUS_AVAILABLE = False
+
     # Create dummy classes for when prometheus_client is not available
     class Counter:
         def __init__(self, *args, **kwargs):
@@ -41,6 +42,7 @@ except ImportError:
 
     def start_http_server(*args, **kwargs):
         pass
+
 
 # Core metrics (will be no-ops if prometheus_client is not available)
 if PROMETHEUS_AVAILABLE:
@@ -107,5 +109,3 @@ def track_handler_latency() -> Callable:
         return _wrapper
 
     return _decorator
-
-

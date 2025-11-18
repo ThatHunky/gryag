@@ -5,7 +5,6 @@ Tests the _clean_response_text function to ensure system metadata
 and technical markers are properly removed from bot responses.
 """
 
-import pytest
 from app.handlers.chat import _clean_response_text
 
 

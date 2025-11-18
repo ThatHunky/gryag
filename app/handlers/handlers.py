@@ -16,5 +16,3 @@ logger = logging.getLogger(__name__)
 async def ping_command(message: Message, settings: Settings) -> None:
     # Simple health check command; relies on middleware-injected Settings
     await message.reply("pong")
-
-

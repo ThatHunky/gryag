@@ -11,15 +11,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from pathlib import Path
 from typing import Any
 
 import asyncpg
-from app.infrastructure.query_converter import convert_query_to_postgres
 
 from app.infrastructure.db_utils import get_db_connection
-from app.services import telemetry
+from app.infrastructure.query_converter import convert_query_to_postgres
 from app.repositories.fact_repository import UnifiedFactRepository
+from app.services import telemetry
 from app.services.redis_types import RedisLike
 
 logger = logging.getLogger(__name__)
@@ -205,13 +204,13 @@ class UserProfileStoreAdapter:
 
         if chat_context is not None:
             query = """
-                SELECT COUNT(*) as count FROM facts 
+                SELECT COUNT(*) as count FROM facts
                 WHERE entity_type = $1 AND entity_id = $3 AND chat_context = $2 AND is_active = 1
             """
             params.insert(1, chat_context)
         else:
             query = """
-                SELECT COUNT(*) as count FROM facts 
+                SELECT COUNT(*) as count FROM facts
                 WHERE entity_type = $1 AND entity_id = $2 AND is_active = 1
             """
 
@@ -285,7 +284,7 @@ class UserProfileStoreAdapter:
 
             query, params = convert_query_to_postgres(
                 """
-                INSERT INTO user_profiles 
+                INSERT INTO user_profiles
                 (user_id, chat_id, display_name, username, pronouns, membership_status,
                  first_seen, last_seen, interaction_count, message_count,
                  profile_version, created_at, updated_at)
@@ -356,7 +355,9 @@ class UserProfileStoreAdapter:
         except Exception as exc:
             logger.warning(f"Redis profile cache set failed: {exc}")
 
-    async def _invalidate_profile_cache(self, user_id: int, chat_id: int | None) -> None:
+    async def _invalidate_profile_cache(
+        self, user_id: int, chat_id: int | None
+    ) -> None:
         """Invalidate cached profile."""
         if self._redis is None:
             return
@@ -382,7 +383,7 @@ class UserProfileStoreAdapter:
                 # Get user's most recent profile as base
                 query, params = convert_query_to_postgres(
                     """
-                    SELECT * FROM user_profiles 
+                    SELECT * FROM user_profiles
                     WHERE user_id = $1
                     ORDER BY last_seen DESC
                     LIMIT 1
@@ -482,7 +483,7 @@ class UserProfileStoreAdapter:
             query += " AND membership_status IN ('member', 'administrator', 'creator')"
 
         query += """
-            ORDER BY 
+            ORDER BY
                 CASE membership_status
                     WHEN 'member' THEN 0
                     WHEN 'administrator' THEN 0
@@ -506,7 +507,7 @@ class UserProfileStoreAdapter:
         """Get relationships for a user, sorted by strength."""
         query, params = convert_query_to_postgres(
             """
-            SELECT * FROM user_relationships 
+            SELECT * FROM user_relationships
             WHERE user_id = $1 AND chat_id = $2 AND strength >= $3
             ORDER BY strength DESC, interaction_count DESC
             """,

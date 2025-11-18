@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import time
 from typing import Any
 
 from app.services.bot_profile import BotProfileStore
@@ -65,7 +64,7 @@ class BotLearningEngine:
 
         Returns (sentiment_label, confidence_score).
         """
-        text_lower = text.lower()
+        text.lower()
 
         # Check for explicit patterns
         has_praise = any(re.search(p, text, re.IGNORECASE) for p in PRAISE_PATTERNS)
@@ -112,7 +111,7 @@ class BotLearningEngine:
         Extracts patterns about what works/doesn't work.
         """
         sentiment, confidence = self.detect_user_sentiment(user_message)
-        sentiment_score = self.calculate_sentiment_score(sentiment)
+        self.calculate_sentiment_score(sentiment)
 
         # Learn communication style patterns
         if sentiment in ("praised", "positive") and bot_previous_response:
@@ -138,7 +137,7 @@ class BotLearningEngine:
             )
             await self.bot_profile.add_fact(
                 category="communication_style",
-                key=f"preferred_length",
+                key="preferred_length",
                 value=length_category,
                 confidence=confidence * 0.6,
                 source_type="reaction_analysis",

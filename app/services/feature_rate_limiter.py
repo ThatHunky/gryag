@@ -30,8 +30,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from pathlib import Path
-from typing import Tuple
 
 from app.infrastructure.db_utils import get_db_connection
 from app.services import telemetry
@@ -147,7 +145,7 @@ class FeatureRateLimiter:
         feature: str,
         limit_per_hour: int | None = None,
         window_seconds: int | None = None,
-    ) -> Tuple[bool, int, bool]:
+    ) -> tuple[bool, int, bool]:
         """
         Check if user is within rate limit for a feature.
 
@@ -299,7 +297,7 @@ class FeatureRateLimiter:
         user_id: int,
         feature: str,
         cooldown_seconds: int | None = None,
-    ) -> Tuple[bool, int, bool]:
+    ) -> tuple[bool, int, bool]:
         """
         Check if user has waited long enough since last request (cooldown).
 
@@ -473,7 +471,9 @@ class FeatureRateLimiter:
                     query = "DELETE FROM feature_rate_limits WHERE user_id = $1"
                     params = (user_id,)
                 result = await conn.execute(query, *params)
-                pg_deleted = int(result.split()[-1]) if result.split()[-1].isdigit() else 0
+                pg_deleted = (
+                    int(result.split()[-1]) if result.split()[-1].isdigit() else 0
+                )
                 deleted += pg_deleted
 
         telemetry.increment_counter(

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 from app.core.exceptions import DatabaseError
 from app.repositories.base import Repository
@@ -32,7 +32,7 @@ class MemoryRepository(Repository[UserMemory]):
         # but good practice for repositories that might manage their own schema.
         pass
 
-    async def find_by_id(self, id: Any) -> Optional[UserMemory]:
+    async def find_by_id(self, id: Any) -> UserMemory | None:
         """Finds a memory by its primary key."""
         return await self.get_memory_by_id(id)
 
@@ -64,7 +64,7 @@ class MemoryRepository(Repository[UserMemory]):
         Note:
             If the user has 15 memories, the oldest one is automatically deleted (FIFO).
         """
-        now = int(datetime.now(timezone.utc).timestamp())
+        now = int(datetime.now(UTC).timestamp())
 
         # First, check if the user is at the memory limit
         count_query = (
@@ -74,11 +74,11 @@ class MemoryRepository(Repository[UserMemory]):
         if row and row[0] >= 15:
             # Auto-delete the oldest memory (FIFO) to make room
             delete_oldest_query = """
-                DELETE FROM user_memories 
+                DELETE FROM user_memories
                 WHERE id = (
-                    SELECT id FROM user_memories 
-                    WHERE user_id = $1 AND chat_id = $2 
-                    ORDER BY created_at ASC 
+                    SELECT id FROM user_memories
+                    WHERE user_id = $1 AND chat_id = $2
+                    ORDER BY created_at ASC
                     LIMIT 1
                 )
             """
@@ -91,7 +91,9 @@ class MemoryRepository(Repository[UserMemory]):
             RETURNING id
         """
         try:
-            row = await self._fetch_one(query, (user_id, chat_id, memory_text, now, now))
+            row = await self._fetch_one(
+                query, (user_id, chat_id, memory_text, now, now)
+            )
             if not row or row["id"] is None:
                 raise DatabaseError("Failed to get last row id.")
             return UserMemory(
@@ -108,12 +110,14 @@ class MemoryRepository(Repository[UserMemory]):
             # The UNIQUE constraint on (user_id, chat_id, memory_text) might fail
             error_str = str(e).lower()
             if "unique constraint" in error_str or "duplicate key" in error_str:
-                raise DatabaseError(f"This memory already exists for the user.")
+                raise DatabaseError(
+                    "This memory already exists for the user."
+                ) from None
             raise DatabaseError(f"Failed to add memory: {e}") from e
 
     async def get_memories_for_user(
         self, user_id: int, chat_id: int
-    ) -> List[UserMemory]:
+    ) -> list[UserMemory]:
         """
         Retrieves all memories for a given user in a specific chat.
 
@@ -128,7 +132,7 @@ class MemoryRepository(Repository[UserMemory]):
         rows = await self._fetch_all(query, (user_id, chat_id))
         return [UserMemory(**row) for row in rows]
 
-    async def get_memory_by_id(self, memory_id: int) -> Optional[UserMemory]:
+    async def get_memory_by_id(self, memory_id: int) -> UserMemory | None:
         """
         Retrieves a single memory by its ID.
 
@@ -156,7 +160,7 @@ class MemoryRepository(Repository[UserMemory]):
         result = await self._execute(query, (memory_id,))
         # PostgreSQL execute returns string like "DELETE 1" or "DELETE 0"
         # Extract the number to check if any rows were deleted
-        match = re.search(r'DELETE (\d+)', result)
+        match = re.search(r"DELETE (\d+)", result)
         if match:
             return int(match.group(1)) > 0
         return False
@@ -176,7 +180,7 @@ class MemoryRepository(Repository[UserMemory]):
         result = await self._execute(query, (user_id, chat_id))
         # PostgreSQL execute returns string like "DELETE 5"
         # Extract the number to get count of deleted rows
-        match = re.search(r'DELETE (\d+)', result)
+        match = re.search(r"DELETE (\d+)", result)
         if match:
             return int(match.group(1))
         return 0

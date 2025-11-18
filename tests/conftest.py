@@ -1,11 +1,12 @@
 """Pytest configuration and shared fixtures."""
 
 import asyncio
+from collections.abc import AsyncGenerator
+from pathlib import Path
+
+import aiosqlite
 import pytest
 import pytest_asyncio
-from pathlib import Path
-from typing import AsyncGenerator
-import aiosqlite
 
 
 # Configure asyncio for tests
@@ -54,7 +55,8 @@ def sample_message():
         Mock Message object with common fields populated
     """
     from unittest.mock import Mock
-    from aiogram.types import Message, User, Chat
+
+    from aiogram.types import Chat, Message, User
 
     user = User(
         id=123456,
@@ -105,9 +107,9 @@ def mock_gemini_client(monkeypatch):
     Returns:
         AsyncMock of GeminiClient
     """
-    from unittest.mock import AsyncMock
-    from types import ModuleType, SimpleNamespace
     import sys
+    from types import ModuleType, SimpleNamespace
+    from unittest.mock import AsyncMock
 
     try:
         from app.services.gemini import GeminiClient
@@ -131,7 +133,7 @@ def mock_gemini_client(monkeypatch):
         genai_module.types = types_module
 
         google_entry = sys.modules.setdefault("google", google_module)
-        setattr(google_entry, "genai", genai_module)
+        google_entry.genai = genai_module
         sys.modules["google.genai"] = genai_module
         sys.modules["google.genai.types"] = types_module
 

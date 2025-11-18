@@ -3,16 +3,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
-import math
+from typing import Any
 
 import asyncpg
-from app.infrastructure.query_converter import convert_query_to_postgres
 
 from app.infrastructure.db_utils import get_db_connection
+from app.infrastructure.query_converter import convert_query_to_postgres
 from app.services.context_cache import ContextCache
 from app.services.redis_types import RedisLike
 
@@ -66,6 +67,7 @@ SPEAKER_ALLOWED_ROLES = {"user", "assistant", "system", "tool"}
 @dataclass(slots=True)
 class MessageSender:
     """Sender information for a message (replaces old TurnSender)."""
+
     role: str | None = None
     name: str | None = None
     username: str | None = None
@@ -299,7 +301,7 @@ class ContextStore:
             if sender.is_bot is not None:
                 sender_is_bot = 1 if sender.is_bot else 0
 
-        from app.infrastructure.db_utils import get_db_connection, execute_with_retry
+        from app.infrastructure.db_utils import execute_with_retry, get_db_connection
 
         message_id = 0
 
@@ -337,9 +339,7 @@ class ContextStore:
                 message_id = row["id"] if row else 0
 
         await execute_with_retry(
-            insert_message, 
-            max_retries=5,
-            operation_name="add_message (insert_message)"
+            insert_message, max_retries=5, operation_name="add_message (insert_message)"
         )
         # NOTE: Retention pruning moved to background task in main.py to avoid blocking message processing
         # Previously: if retention_days: await self._maybe_prune(retention_days)
@@ -457,10 +457,10 @@ class ContextStore:
                 query, params = convert_query_to_postgres(
                     """
                     SELECT id FROM messages
-                    WHERE chat_id = $1 
-                      AND media IS NOT NULL 
+                    WHERE chat_id = $1
+                      AND media IS NOT NULL
                       AND media != ''
-                      AND (media::jsonb->'meta'->>'message_id') = $2 
+                      AND (media::jsonb->'meta'->>'message_id') = $2
                     LIMIT 1
                     """,
                     (chat_id, str(external_message_id)),
@@ -588,10 +588,16 @@ class ContextStore:
 
         # Try Redis cache first
         if self._context_cache is not None:
-            cached_context = await self._context_cache.get(chat_id, thread_id, max_messages)
+            cached_context = await self._context_cache.get(
+                chat_id, thread_id, max_messages
+            )
             if cached_context is not None:
                 # Return cached data (already limited to max_messages)
-                return cached_context[:max_messages] if len(cached_context) > max_messages else cached_context
+                return (
+                    cached_context[:max_messages]
+                    if len(cached_context) > max_messages
+                    else cached_context
+                )
 
         # Use max_messages directly (no multiplication needed)
         message_limit = max_messages
@@ -606,7 +612,11 @@ class ContextStore:
                     "AND (external_message_id IS NULL OR external_message_id != $2) "
                     "ORDER BY id DESC LIMIT $3"
                 )
-                params: tuple[Any, ...] = (chat_id, str(exclude_message_id), message_limit)
+                params: tuple[Any, ...] = (
+                    chat_id,
+                    str(exclude_message_id),
+                    message_limit,
+                )
             else:
                 query = (
                     "SELECT role, text, media, external_user_id, user_id, ts, "
@@ -645,13 +655,12 @@ class ContextStore:
             parts: list[dict[str, Any]] = []
             text = row["text"]
             media_json = row["media"]
-            stored_media: list[dict[str, Any]] = []
             stored_meta: dict[str, Any] = {}
             if media_json:
                 try:
                     payload = json.loads(media_json)
                     if isinstance(payload, dict):
-                        stored_media = [
+                        [
                             part
                             for part in payload.get("media", [])
                             if isinstance(part, dict)
@@ -660,9 +669,7 @@ class ContextStore:
                         if isinstance(meta, dict):
                             stored_meta = meta
                     elif isinstance(payload, list):
-                        stored_media = [
-                            part for part in payload if isinstance(part, dict)
-                        ]
+                        [part for part in payload if isinstance(part, dict)]
                 except json.JSONDecodeError:
                     pass
 
@@ -733,7 +740,7 @@ class ContextStore:
     def _cosine_similarity(a: list[float], b: list[float]) -> float:
         if not a or not b or len(a) != len(b):
             return 0.0
-        dot = sum(x * y for x, y in zip(a, b))
+        dot = sum(x * y for x, y in zip(a, b, strict=False))
         norm_a = math.sqrt(sum(x * x for x in a))
         norm_b = math.sqrt(sum(y * y for y in b))
         if norm_a == 0.0 or norm_b == 0.0:

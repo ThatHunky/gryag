@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 import time
 from collections import defaultdict
@@ -9,9 +11,6 @@ from urllib.parse import quote
 import aiohttp
 from aiogram import Bot
 from aiogram.types import Message
-import asyncio
-import logging
-
 
 LOGGER = logging.getLogger(__name__)
 
@@ -50,7 +49,7 @@ async def _download(bot: Bot, file_id: str) -> bytes:
     try:
         # Add timeout to bot.get_file() call (15 seconds for metadata)
         file = await asyncio.wait_for(bot.get_file(file_id), timeout=15.0)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         LOGGER.warning(
             "Timed out fetching file metadata for %s (timeout: 15s)", file_id
         )
@@ -120,7 +119,7 @@ async def _download(bot: Bot, file_id: str) -> bytes:
 
                     return data
 
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             last_exception = exc
             LOGGER.warning(
                 "Timed out downloading Telegram file %s (timeout: %ss) attempt=%d/%d: %s",
@@ -270,8 +269,9 @@ def _maybe_downscale_image(data: bytes, mime: str) -> tuple[bytes, str, int]:
     Returns: (bytes, mime, size)
     """
     try:
-        from PIL import Image
         import io
+
+        from PIL import Image
 
         # Quick size check to avoid work on small files
         if len(data) <= 1 * 1024 * 1024 and mime.lower() != "image/webp":

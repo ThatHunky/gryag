@@ -8,8 +8,9 @@ Tests Gemini-based episode summarization including:
 - Fallback behavior on errors
 """
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.services.context.episode_summarizer import EpisodeSummarizer
 
@@ -85,15 +86,15 @@ async def test_summarize_episode_success(summarizer, gemini_client, sample_messa
     # Mock Gemini response with structured output
     gemini_response = """
     TOPIC: Python 3.13 Features Discussion
-    
+
     SUMMARY: A technical discussion among developers about Python 3.13's new features,
     focusing on improved error messages, performance gains, and typing enhancements.
     The conversation was positive and informative.
-    
+
     EMOTIONAL_VALENCE: positive
-    
+
     TAGS: python, programming, python313, technical-discussion
-    
+
     KEY_POINTS:
     - Improved error messages enhance debugging experience
     - Noticeable performance improvements in Python 3.13
@@ -458,14 +459,14 @@ async def test_full_flow_with_real_structure(summarizer, gemini_client):
 
     gemini_response = """
     TOPIC: Code Review Session Planning
-    
+
     SUMMARY: Team members coordinate to set up a code review session for an API client
     implementation. The conversation is collaborative and productive.
-    
+
     EMOTIONAL_VALENCE: positive
-    
+
     TAGS: code-review, collaboration, planning, api
-    
+
     KEY_POINTS:
     - Code review session proposed
     - API client implementation to be reviewed

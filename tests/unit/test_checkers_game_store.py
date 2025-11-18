@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
-
-import sys
-from types import SimpleNamespace
 
 if "asyncpg" not in sys.modules:
     sys.modules["asyncpg"] = SimpleNamespace(
@@ -26,11 +25,13 @@ class FakeConnection:
     """Minimal in-memory substitute for asyncpg connection."""
 
     def __init__(self) -> None:
-        self.games: Dict[str, Dict[str, Any]] = {}
+        self.games: dict[str, dict[str, Any]] = {}
 
     async def execute(self, sql: str, *params: Any) -> None:
         if "INSERT INTO checkers_games" in sql:
-            game_id, chat_id, thread_id, challenger_id, game_state_json, timestamp = params
+            game_id, chat_id, thread_id, challenger_id, game_state_json, timestamp = (
+                params
+            )
             self.games[game_id] = {
                 "id": game_id,
                 "chat_id": chat_id,
@@ -97,7 +98,7 @@ class FakeConnection:
 
         raise AssertionError(f"Unexpected execute call: {sql}")
 
-    async def fetchrow(self, sql: str, *params: Any) -> Optional[Dict[str, Any]]:
+    async def fetchrow(self, sql: str, *params: Any) -> dict[str, Any] | None:
         if "SELECT challenger_id, game_status" in sql:
             game_id = params[0]
             record = self.games.get(game_id)
@@ -117,7 +118,7 @@ class FakeConnection:
 
         if "game_status IN ('pending', 'active')" in sql:
             chat_id, thread_id, user_id = params
-            candidates: List[Dict[str, Any]] = []
+            candidates: list[dict[str, Any]] = []
             for record in self.games.values():
                 if record["chat_id"] != chat_id:
                     continue
@@ -136,7 +137,7 @@ class FakeConnection:
 
         raise AssertionError(f"Unexpected fetchrow call: {sql}")
 
-    async def fetch(self, sql: str, *params: Any) -> List[Dict[str, Any]]:
+    async def fetch(self, sql: str, *params: Any) -> list[dict[str, Any]]:
         user_id = params[0]
         if "AND game_status = $2" in sql:
             status = params[1]
@@ -163,7 +164,9 @@ def fake_db(monkeypatch) -> FakeConnection:
     connection = FakeConnection()
 
     @asynccontextmanager
-    async def fake_get_db_connection(_database_url: str) -> AsyncIterator[FakeConnection]:
+    async def fake_get_db_connection(
+        _database_url: str,
+    ) -> AsyncIterator[FakeConnection]:
         yield connection
 
     monkeypatch.setattr(
@@ -260,4 +263,3 @@ async def test_update_game_finishes_match(fake_db: FakeConnection):
     recent_games = await store.get_user_games(user_id=50)
     assert len(recent_games) == 1
     assert recent_games[0]["id"] == game_id
-

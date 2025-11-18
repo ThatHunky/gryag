@@ -14,11 +14,8 @@ import asyncio
 import json
 import logging
 import re
-import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
-
 
 from app.config import Settings
 
@@ -435,7 +432,7 @@ class EpisodeBoundaryDetector:
 
         import math
 
-        dot = sum(x * y for x, y in zip(a, b))
+        dot = sum(x * y for x, y in zip(a, b, strict=False))
         norm_a = math.sqrt(sum(x * x for x in a))
         norm_b = math.sqrt(sum(y * y for y in b))
 

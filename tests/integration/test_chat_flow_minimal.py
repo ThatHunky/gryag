@@ -9,5 +9,3 @@ def test_chat_flow_plaintext_payload_generation():
     assert "<b>" not in payload and "**" not in payload and "`" not in payload
     # Ensure non-empty and contains Ukrainian text
     assert "Привіт, світ!" in payload
-
-

@@ -301,7 +301,7 @@ async def set_pronouns_tool(
     pronouns: str,
     # Injected by handler
     chat_id: int | None = None,
-    profile_store: "UserProfileStore | UserProfileStoreAdapter | None" = None,
+    profile_store: UserProfileStore | UserProfileStoreAdapter | None = None,
 ) -> str:
     """Update or clear a user's pronouns."""
     start_time = time.time()

@@ -5,8 +5,10 @@ This test verifies the fix for the bug where media parts were being
 ignored during token estimation, causing them to be excluded from context.
 """
 
-import pytest
 from unittest.mock import MagicMock
+
+import pytest
+
 from app.services.context.multi_level_context import MultiLevelContextManager
 
 

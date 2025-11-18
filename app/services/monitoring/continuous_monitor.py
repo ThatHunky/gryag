@@ -12,21 +12,21 @@ Chat Public Memory (Oct 2025): Extract and store group-level facts
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, List, Tuple
+from typing import TYPE_CHECKING, Any
 
 from aiogram.types import Message
 
 from app.config import Settings
 from app.services.context_store import ContextStore
 from app.services.gemini import GeminiClient
-from app.services.monitoring.message_classifier import MessageClassifier, MessageValue
 from app.services.monitoring.conversation_analyzer import (
     ConversationAnalyzer,
     ConversationWindow,
 )
+from app.services.monitoring.event_system import Event, EventPriority, EventQueue
 from app.services.monitoring.fact_quality_manager import FactQualityManager
+from app.services.monitoring.message_classifier import MessageClassifier
 from app.services.monitoring.proactive_trigger import ProactiveTrigger
-from app.services.monitoring.event_system import EventQueue, Event, EventPriority
 
 if TYPE_CHECKING:
     from app.services.user_profile import UserProfileStore
@@ -36,9 +36,9 @@ if TYPE_CHECKING:
 else:
     ProfileStoreType = Any
 
+from app.repositories.chat_profile import ChatFact, ChatProfileRepository
 from app.services.fact_extractors import FactExtractor
 from app.services.fact_extractors.chat_fact_extractor import ChatFactExtractor
-from app.repositories.chat_profile import ChatProfileRepository, ChatFact
 
 LOGGER = logging.getLogger(__name__)
 
@@ -439,7 +439,7 @@ Response:"""
 
     async def _extract_facts_from_window(
         self, window: ConversationWindow
-    ) -> Tuple[List[dict[str, Any]], List[ChatFact]]:
+    ) -> tuple[list[dict[str, Any]], list[ChatFact]]:
         """
         Extract both user facts and chat facts from a conversation window.
 
@@ -564,7 +564,7 @@ Response:"""
 
     async def _store_facts(
         self,
-        facts: Tuple[List[dict[str, Any]], List[ChatFact]],
+        facts: tuple[list[dict[str, Any]], list[ChatFact]],
         window: ConversationWindow,
     ) -> None:
         """
@@ -589,7 +589,7 @@ Response:"""
             await self._store_chat_facts(chat_facts, window)
 
     async def _store_user_facts(
-        self, facts: List[dict[str, Any]], window: ConversationWindow
+        self, facts: list[dict[str, Any]], window: ConversationWindow
     ) -> None:
         """
         Store user facts with quality processing.

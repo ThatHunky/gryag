@@ -13,20 +13,20 @@ from aiogram.filters import Command
 from aiogram.types import (
     BotCommand,
     BotCommandScopeChat,
-    Message,
     CallbackQuery,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
     InaccessibleMessage,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
 )
 
 from app.config import Settings
-from app.services.user_profile import UserProfileStore
-from app.services.context_store import ContextStore
-from app.services import telemetry
-from app.services.bot_profile import BotProfileStore
-from app.services.bot_learning import BotLearningEngine
 from app.repositories.memory_repository import MemoryRepository
+from app.services import telemetry
+from app.services.bot_learning import BotLearningEngine
+from app.services.bot_profile import BotProfileStore
+from app.services.context_store import ContextStore
+from app.services.user_profile import UserProfileStore
 from app.utils.persona_helpers import get_response
 
 router = Router()
@@ -335,7 +335,7 @@ async def get_user_profile_command(
     if profile.get("username"):
         response += f"📝 Username: @{profile['username']}\n"
 
-    response += f"\n📊 <b>Статистика:</b>\n"
+    response += "\n📊 <b>Статистика:</b>\n"
     response += f"• Взаємодій: {profile.get('interaction_count', 0)}\n"
     response += f"• Фактів: {fact_count}\n"
     response += (
@@ -575,7 +575,9 @@ async def get_user_facts_command(
                     dt = datetime.fromtimestamp(created_at)
                     time_str = dt.strftime("%Y-%m-%d %H:%M")
                 except (ValueError, TypeError, OSError) as e:
-                    logger.warning(f"Failed to format memory timestamp {created_at}: {e}")
+                    logger.warning(
+                        f"Failed to format memory timestamp {created_at}: {e}"
+                    )
                     time_str = "?"
 
                 line = f"💭 <code>[{memory_id}]</code> {memory_text}\n"
@@ -818,7 +820,7 @@ async def remove_fact_command(
 
     Usage:
         /gryagremovefact 123 - Remove fact with ID 123
-    
+
     ⚠️ DEPRECATED: This command is deprecated. Use the `forget_memory` tool instead.
     The model can now handle memory deletion autonomously via function calling.
     This command will be removed in a future version.
@@ -833,7 +835,7 @@ async def remove_fact_command(
         if admin_msg:
             await message.reply(admin_msg)
         return
-    
+
     # Deprecation warning
     deprecation_msg = (
         "⚠️ <b>Ця команда застаріла</b>\n\n"
@@ -860,7 +862,7 @@ async def forget_user_command(
         /gryagforget (reply) - Forget all facts about replied user
         /gryagforget @username - Forget facts about @username
         /gryagforgetconfirm - Confirm deletion
-    
+
     ⚠️ DEPRECATED: This command is deprecated. Use the `forget_all_memories` tool instead.
     The model can now handle memory deletion autonomously via function calling.
     This command will be removed in a future version.
@@ -875,7 +877,7 @@ async def forget_user_command(
         if admin_msg:
             await message.reply(admin_msg)
         return
-    
+
     # Deprecation warning
     deprecation_msg = (
         "⚠️ <b>Ця команда застаріла</b>\n\n"
@@ -1012,14 +1014,14 @@ async def cmd_bot_self_profile(
     ]
 
     response = "🤖 <b>Bot Self-Learning Profile</b>\n\n"
-    response += f"📊 <b>Effectiveness (last 7 days)</b>\n"
+    response += "📊 <b>Effectiveness (last 7 days)</b>\n"
     response += f"• Overall score: {summary['effectiveness_score']:.1%}\n"
     response += f"• Recent score: {summary['recent_effectiveness']:.1%}\n"
     response += f"• Total interactions: {summary['total_interactions']}\n"
     response += f"• Positive: {summary['positive_interactions']} ({summary['positive_interactions']/max(summary['total_interactions'],1):.1%})\n"
     response += f"• Negative: {summary['negative_interactions']} ({summary['negative_interactions']/max(summary['total_interactions'],1):.1%})\n\n"
 
-    response += f"⚡ <b>Performance</b>\n"
+    response += "⚡ <b>Performance</b>\n"
     response += f"• Avg response time: {summary['avg_response_time_ms']:.0f}ms\n"
     response += f"• Avg tokens: {summary['avg_token_count']:.0f}\n"
     response += f"• Avg sentiment: {summary['avg_sentiment']:.2f}\n\n"

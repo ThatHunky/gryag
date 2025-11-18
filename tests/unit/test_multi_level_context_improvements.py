@@ -2,8 +2,9 @@
 Tests for multi-level context improvements.
 """
 
-import pytest
 from unittest.mock import Mock
+
+import pytest
 
 from app.services.context.multi_level_context import MultiLevelContextManager
 
@@ -47,4 +48,3 @@ class TestQueryTypeDetection:
     def test_general_fallback(self, manager):
         assert manager._detect_query_type("Just some regular text here") == "general"
         assert manager._detect_query_type("") == "general"
-

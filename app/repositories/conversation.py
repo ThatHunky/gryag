@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from app.repositories.base import Repository
 
@@ -20,16 +20,16 @@ class Message:
 
     def __init__(
         self,
-        message_id: Optional[int],
+        message_id: int | None,
         chat_id: int,
-        thread_id: Optional[int],
+        thread_id: int | None,
         user_id: int,
         role: str,
         text: str,
-        media: Optional[Dict[str, Any]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        embedding: Optional[List[float]] = None,
-        created_at: Optional[datetime] = None,
+        media: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+        embedding: list[float] | None = None,
+        created_at: datetime | None = None,
     ):
         self.message_id = message_id
         self.chat_id = chat_id
@@ -42,7 +42,7 @@ class Message:
         self.embedding = embedding
         self.created_at = created_at or datetime.utcnow()
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
             "message_id": self.message_id,
@@ -64,7 +64,7 @@ class ConversationRepository(Repository[Message]):
     Provides data access methods for messages and conversation history.
     """
 
-    async def find_by_id(self, message_id: int) -> Optional[Message]:
+    async def find_by_id(self, message_id: int) -> Message | None:
         """Find message by ID.
 
         Args:
@@ -132,9 +132,9 @@ class ConversationRepository(Repository[Message]):
     async def get_recent_messages(
         self,
         chat_id: int,
-        thread_id: Optional[int] = None,
+        thread_id: int | None = None,
         limit: int = 10,
-    ) -> List[Message]:
+    ) -> list[Message]:
         """Get recent messages for a chat.
 
         Args:
@@ -169,7 +169,7 @@ class ConversationRepository(Repository[Message]):
         chat_id: int,
         user_id: int,
         limit: int = 100,
-    ) -> List[Message]:
+    ) -> list[Message]:
         """Get messages from specific user in a chat.
 
         Args:
@@ -194,7 +194,7 @@ class ConversationRepository(Repository[Message]):
         chat_id: int,
         query_text: str,
         limit: int = 20,
-    ) -> List[Message]:
+    ) -> list[Message]:
         """Search messages by text.
 
         Args:
@@ -217,10 +217,10 @@ class ConversationRepository(Repository[Message]):
     async def semantic_search(
         self,
         chat_id: int,
-        query_embedding: List[float],
-        thread_id: Optional[int] = None,
+        query_embedding: list[float],
+        thread_id: int | None = None,
         limit: int = 5,
-    ) -> List[tuple[Message, float]]:
+    ) -> list[tuple[Message, float]]:
         """Search messages by embedding similarity.
 
         Args:
@@ -283,12 +283,12 @@ class ConversationRepository(Repository[Message]):
             ),
         )
 
-    def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
+    def _cosine_similarity(self, a: list[float], b: list[float]) -> float:
         """Calculate cosine similarity between two vectors."""
         if len(a) != len(b):
             return 0.0
 
-        dot_product = sum(x * y for x, y in zip(a, b))
+        dot_product = sum(x * y for x, y in zip(a, b, strict=False))
         magnitude_a = sum(x * x for x in a) ** 0.5
         magnitude_b = sum(x * x for x in b) ** 0.5
 

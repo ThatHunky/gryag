@@ -1,11 +1,12 @@
 """Tests for command throttle middleware."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from aiogram.types import Message, User, Chat
 
-from app.middlewares.command_throttle import CommandThrottleMiddleware
+import pytest
+from aiogram.types import Chat, Message, User
+
 from app.config import Settings
+from app.middlewares.command_throttle import CommandThrottleMiddleware
 
 
 @pytest.fixture

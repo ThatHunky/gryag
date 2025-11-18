@@ -45,7 +45,7 @@ async def handle_chat_member_update(
     now = int(time.time())
 
     # Handle both enum and string status values
-    status_value = new_status.value if hasattr(new_status, 'value') else new_status
+    status_value = new_status.value if hasattr(new_status, "value") else new_status
 
     if new_status in _ACTIVE_STATUSES:
         await profile_store.get_or_create_profile(

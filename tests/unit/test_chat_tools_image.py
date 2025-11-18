@@ -5,8 +5,9 @@ when all runtime dependencies are provided to the registry.
 """
 
 import json
-import pytest
 import types
+
+import pytest
 
 from app.handlers.chat_tools import build_tool_callbacks
 
@@ -20,7 +21,14 @@ class _DummyBot:
     def __init__(self):
         self.sent = []
 
-    async def send_photo(self, chat_id, photo, caption=None, message_thread_id=None, reply_to_message_id=None):
+    async def send_photo(
+        self,
+        chat_id,
+        photo,
+        caption=None,
+        message_thread_id=None,
+        reply_to_message_id=None,
+    ):
         # Record call for assertions
         self.sent.append(
             {
@@ -35,7 +43,14 @@ class _DummyBot:
 
 
 class _DummyImageService:
-    async def generate_image(self, prompt, aspect_ratio="1:1", user_id=None, chat_id=None, context_images=None):
+    async def generate_image(
+        self,
+        prompt,
+        aspect_ratio="1:1",
+        user_id=None,
+        chat_id=None,
+        context_images=None,
+    ):
         # Return fixed bytes to simulate an image
         return b"PNG_BYTES"
 
@@ -59,7 +74,11 @@ class _DummyMessage:
 
 @pytest.mark.asyncio
 async def test_generate_image_registry_callback(monkeypatch):
-    settings = _DummySettings(enable_image_generation=True, enable_web_search=False, enable_tool_based_memory=False)
+    settings = _DummySettings(
+        enable_image_generation=True,
+        enable_web_search=False,
+        enable_tool_based_memory=False,
+    )
     bot = _DummyBot()
     image_service = _DummyImageService()
     profile_store = _DummyProfileStore()
@@ -82,7 +101,9 @@ async def test_generate_image_registry_callback(monkeypatch):
     )
 
     assert "generate_image" in callbacks, "generate_image should be registered"
-    raw = await callbacks["generate_image"]({"prompt": "draw cat", "aspect_ratio": "1:1"})
+    raw = await callbacks["generate_image"](
+        {"prompt": "draw cat", "aspect_ratio": "1:1"}
+    )
     data = json.loads(raw)
     assert data.get("success") is True
     assert tools_used == ["generate_image"]
@@ -92,7 +113,11 @@ async def test_generate_image_registry_callback(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_edit_image_registry_callback(monkeypatch):
-    settings = _DummySettings(enable_image_generation=True, enable_web_search=False, enable_tool_based_memory=False)
+    settings = _DummySettings(
+        enable_image_generation=True,
+        enable_web_search=False,
+        enable_tool_based_memory=False,
+    )
     bot = _DummyBot()
     image_service = _DummyImageService()
     profile_store = _DummyProfileStore()
@@ -102,9 +127,12 @@ async def test_edit_image_registry_callback(monkeypatch):
     async def _fake_collect_media_parts(bot_obj, reply_msg):
         return [{"kind": "image", "bytes": b"IMG"}]
 
-    from app import handlers as _h  # noqa: F401  # ensure package import
     import app.handlers.chat_tools as chat_tools_mod
-    monkeypatch.setattr(chat_tools_mod, "collect_media_parts", _fake_collect_media_parts)
+    from app import handlers as _h  # noqa: F401  # ensure package import
+
+    monkeypatch.setattr(
+        chat_tools_mod, "collect_media_parts", _fake_collect_media_parts
+    )
 
     reply = _DummyMessage()  # simple stub consumed by patched function
     message = _DummyMessage(reply_to_message=reply)
@@ -132,4 +160,3 @@ async def test_edit_image_registry_callback(monkeypatch):
     assert tools_used == ["edit_image"], tools_used
     assert bot.sent and bot.sent[-1]["chat_id"] == 456
     assert bot.sent[-1]["reply_to"] == 1001
-

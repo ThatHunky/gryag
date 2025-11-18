@@ -13,7 +13,6 @@ Handles:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import math
 import time
@@ -405,7 +404,7 @@ class FactQualityManager:
         if len(vec1) != len(vec2):
             return 0.0
 
-        dot_product = sum(a * b for a, b in zip(vec1, vec2))
+        dot_product = sum(a * b for a, b in zip(vec1, vec2, strict=False))
         magnitude1 = math.sqrt(sum(a * a for a in vec1))
         magnitude2 = math.sqrt(sum(b * b for b in vec2))
 
@@ -508,7 +507,7 @@ class FactQualityManager:
                 continue
 
             # Check if values are different (conflict)
-            values = set(f["fact_value"] for f in group_facts)
+            values = {f["fact_value"] for f in group_facts}
 
             if len(values) == 1:
                 # Same value, just merge (boost confidence)

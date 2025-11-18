@@ -6,19 +6,19 @@ import logging
 from typing import Any
 
 from aiogram import Bot, Router
+from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
+    InaccessibleMessage,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
-    InaccessibleMessage,
 )
-from aiogram.enums import ParseMode
 
 from app.config import Settings
-from app.services.checkers.game_engine import CheckersGame, Player
 from app.services.checkers.board_renderer import render_board
+from app.services.checkers.game_engine import CheckersGame, Player
 from app.services.checkers.game_store import CheckersGameStore
 
 router = Router()
@@ -89,12 +89,12 @@ def _create_board_keyboard(
     """Create inline keyboard for checkers board."""
     board = game.get_board()
     keyboard = []
-    
+
     # Get valid moves for current player
     valid_moves = game.get_valid_moves(current_player)
     valid_from_squares = {(m.from_row, m.from_col) for m in valid_moves}
-    valid_to_squares = {(m.to_row, m.to_col) for m in valid_moves}
-    
+    {(m.to_row, m.to_col) for m in valid_moves}
+
     # If a square is selected, show valid destination squares
     if selected_square:
         from_row, from_col = selected_square
@@ -105,7 +105,7 @@ def _create_board_keyboard(
         }
     else:
         valid_destinations = set()
-    
+
     # Only show playable squares (dark squares) for cleaner interface
     for row in range(8):
         row_buttons = []
@@ -140,9 +140,8 @@ def _create_board_keyboard(
                 # Check if this square is part of a valid move
                 is_valid_from = (row, col) in valid_from_squares
                 is_valid_to = (row, col) in valid_destinations
-                is_current_piece = (
-                    (current_player == 1 and piece in (1, 3)) or
-                    (current_player == 2 and piece in (2, 4))
+                is_current_piece = (current_player == 1 and piece in (1, 3)) or (
+                    current_player == 2 and piece in (2, 4)
                 )
 
                 if selected_square:
@@ -163,7 +162,7 @@ def _create_board_keyboard(
             )
 
         keyboard.append(row_buttons)
-    
+
     if selected_square:
         keyboard.append(
             [
@@ -175,10 +174,14 @@ def _create_board_keyboard(
         )
 
     # Add separator row (empty row for visual spacing)
-    keyboard.append([
-        InlineKeyboardButton(text="━━━━━━━━━━━━━━━━━━━━", callback_data="checkers:ignore")
-    ])
-    
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                text="━━━━━━━━━━━━━━━━━━━━", callback_data="checkers:ignore"
+            )
+        ]
+    )
+
     # Add control buttons with better visibility
     control_row = [
         InlineKeyboardButton(
@@ -186,7 +189,7 @@ def _create_board_keyboard(
         )
     ]
     keyboard.append(control_row)
-    
+
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
@@ -256,13 +259,13 @@ async def checkers_command(
     if not message.from_user:
         await message.reply("❌ Помилка: невідомий користувач")
         return
-    
+
     bot = message.bot
     user_id = message.from_user.id
     chat_id = message.chat.id
     thread_id = message.message_thread_id
     challenger_name = _get_user_display_name(message.from_user)
-    
+
     game_store = CheckersGameStore(settings.database_url)
     existing_game = await game_store.get_open_game(chat_id, thread_id, user_id)
 
@@ -324,12 +327,12 @@ async def checkers_abandon_command(
     if not message.from_user:
         await message.reply("❌ Помилка: невідомий користувач")
         return
-    
+
     bot = message.bot
     user_id = message.from_user.id
     chat_id = message.chat.id
     thread_id = message.message_thread_id
-    
+
     game_store = CheckersGameStore(settings.database_url)
     game_data = await game_store.get_open_game(chat_id, thread_id, user_id)
 
@@ -362,7 +365,9 @@ async def checkers_abandon_command(
                     reply_markup=None,
                 )
             except Exception as e:
-                logger.debug(f"Unable to edit challenge message {challenge_message_id}: {e}")
+                logger.debug(
+                    f"Unable to edit challenge message {challenge_message_id}: {e}"
+                )
 
         await message.reply("✅ Виклик скасовано.")
         return
@@ -384,7 +389,9 @@ async def checkers_abandon_command(
     try:
         game_engine = CheckersGame.from_json(game_data["game_state"])
     except Exception as e:
-        logger.error(f"Error parsing game state during abandon command: {e}", exc_info=True)
+        logger.error(
+            f"Error parsing game state during abandon command: {e}", exc_info=True
+        )
         await message.reply("❌ Неможливо завершити гру через помилку стану.")
         return
 
@@ -430,7 +437,9 @@ async def checkers_abandon_command(
             except Exception as e:
                 logger.debug(f"Unable to edit board message {board_message_id}: {e}")
     except Exception as e:
-        logger.error(f"Error rendering final board after abandon command: {e}", exc_info=True)
+        logger.error(
+            f"Error rendering final board after abandon command: {e}", exc_info=True
+        )
 
     _selected_squares.pop(game_id, None)
     await message.reply("🏳️ Ти здався. Гру завершено.")
@@ -497,7 +506,10 @@ async def checkers_callback(
             await callback.answer("❌ Зараз хід суперника")
             return
 
-        if game_id not in _selected_squares or _selected_squares[game_id].get(user_id) is None:
+        if (
+            game_id not in _selected_squares
+            or _selected_squares[game_id].get(user_id) is None
+        ):
             await callback.answer("ℹ️ Немає активного вибору")
             return
 
@@ -541,7 +553,9 @@ async def checkers_callback(
             try:
                 game = await game_store.get_game(game_id)
             except Exception as e:
-                logger.error(f"Error fetching game {game_id} for cancel: {e}", exc_info=True)
+                logger.error(
+                    f"Error fetching game {game_id} for cancel: {e}", exc_info=True
+                )
                 await callback.answer("❌ Помилка")
                 return
 
@@ -578,7 +592,9 @@ async def checkers_callback(
             try:
                 game = await game_store.get_game(game_id)
             except Exception as e:
-                logger.error(f"Error fetching game {game_id} for rematch: {e}", exc_info=True)
+                logger.error(
+                    f"Error fetching game {game_id} for rematch: {e}", exc_info=True
+                )
                 await callback.answer("❌ Помилка")
                 return
 
@@ -597,7 +613,9 @@ async def checkers_callback(
                 await callback.answer("❌ Це не твоя гра")
                 return
 
-            existing_for_user = await game_store.get_open_game(chat_id, thread_id, user_id)
+            existing_for_user = await game_store.get_open_game(
+                chat_id, thread_id, user_id
+            )
             if existing_for_user:
                 await callback.answer("⚠️ Спершу заверши свій поточний виклик або гру")
                 return
@@ -635,7 +653,9 @@ async def checkers_callback(
                     reply_markup=keyboard,
                     message_thread_id=thread_id,
                 )
-                await game_store.set_challenge_message(new_game_id, challenge_message.message_id)
+                await game_store.set_challenge_message(
+                    new_game_id, challenge_message.message_id
+                )
             except Exception as e:
                 logger.error(f"Error sending rematch challenge: {e}", exc_info=True)
                 await callback.answer("❌ Не вдалося надіслати новий виклик")
@@ -648,7 +668,9 @@ async def checkers_callback(
             try:
                 game = await game_store.get_game(game_id)
             except Exception as e:
-                logger.error(f"Error fetching game {game_id} for join: {e}", exc_info=True)
+                logger.error(
+                    f"Error fetching game {game_id} for join: {e}", exc_info=True
+                )
                 await callback.answer("❌ Помилка")
                 return
 
@@ -666,7 +688,9 @@ async def checkers_callback(
                 await callback.answer("⚠️ Це твій власний виклик")
                 return
 
-            existing_for_user = await game_store.get_open_game(chat_id, thread_id, user_id)
+            existing_for_user = await game_store.get_open_game(
+                chat_id, thread_id, user_id
+            )
             if existing_for_user:
                 await callback.answer("⚠️ Спершу заверши свою поточну гру або виклик")
                 return
@@ -730,7 +754,9 @@ async def checkers_callback(
             try:
                 game_data = await game_store.get_game(game_id)
             except Exception as e:
-                logger.error(f"Error fetching game {game_id} for forfeit: {e}", exc_info=True)
+                logger.error(
+                    f"Error fetching game {game_id} for forfeit: {e}", exc_info=True
+                )
                 await callback.answer("❌ Помилка")
                 return
 
@@ -759,7 +785,9 @@ async def checkers_callback(
                 await callback.answer("❌ Помилка зі станом гри")
                 return
 
-            board_message_id = game_data["board_message_id"] or callback.message.message_id
+            board_message_id = (
+                game_data["board_message_id"] or callback.message.message_id
+            )
 
             try:
                 await game_store.update_game(
@@ -965,7 +993,9 @@ async def checkers_callback(
 
         if is_over:
             winner_id = (
-                challenger_id if winner_player == 1 else opponent_id if winner_player == 2 else None
+                challenger_id
+                if winner_player == 1
+                else opponent_id if winner_player == 2 else None
             )
             try:
                 await game_store.update_game(
@@ -1011,7 +1041,9 @@ async def checkers_callback(
             await callback.answer("🎉 Гра завершена!")
             return
 
-        next_player_id = opponent_id if current_player_id == challenger_id else challenger_id
+        next_player_id = (
+            opponent_id if current_player_id == challenger_id else challenger_id
+        )
         next_player_enum: Player = 1 if next_player_id == challenger_id else 2
 
         try:
@@ -1045,4 +1077,3 @@ async def checkers_callback(
         return
 
     await callback.answer("❌ Невідомий запит")
-

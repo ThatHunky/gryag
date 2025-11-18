@@ -18,11 +18,14 @@ from typing import Any
 # Import telemetry for usage tracking
 try:
     from app.services import telemetry
-    from app.services.tool_logging import log_tool_execution, ToolLogger
+    from app.services.tool_logging import ToolLogger, log_tool_execution
 except ImportError:
     # Fallback if telemetry not available
     telemetry = None
-    log_tool_execution = lambda name: lambda f: f  # No-op decorator
+
+    def log_tool_execution(name):
+        return lambda f: f  # No-op decorator
+
     ToolLogger = None
 
 # Setup logger for calculator tool
@@ -121,10 +124,10 @@ class SafeCalculator:
                     raise ValueError("Division by zero or invalid operation")
 
                 return result
-            except ZeroDivisionError:
-                raise ValueError("Division by zero")
+            except ZeroDivisionError as e:
+                raise ValueError("Division by zero") from e
             except (OverflowError, ValueError) as e:
-                raise ValueError(f"Mathematical error: {e}")
+                raise ValueError(f"Mathematical error: {e}") from e
 
         elif isinstance(node, ast.UnaryOp):
             operand = self._evaluate_node(node.operand)
@@ -152,7 +155,7 @@ class SafeCalculator:
 
                 return result
             except (TypeError, ValueError, OverflowError) as e:
-                raise ValueError(f"Function error: {e}")
+                raise ValueError(f"Function error: {e}") from e
 
         else:
             raise ValueError(f"Unsupported AST node type: {type(node).__name__}")
@@ -224,7 +227,7 @@ class SafeCalculator:
                 "Syntax error in expression",
                 extra={"expression": expression, "syntax_error": str(e)},
             )
-            raise ValueError(f"Invalid syntax: {e}")
+            raise ValueError(f"Invalid syntax: {e}") from e
         except (TypeError, ValueError) as e:
             self.logger.warning(
                 "Evaluation error",
@@ -234,7 +237,7 @@ class SafeCalculator:
                     "error_type": type(e).__name__,
                 },
             )
-            raise ValueError(str(e))
+            raise ValueError(str(e)) from e
         except Exception as e:
             self.logger.error(
                 "Unexpected error during expression evaluation",
@@ -245,7 +248,7 @@ class SafeCalculator:
                 },
                 exc_info=True,
             )
-            raise ValueError(f"Calculation error: {e}")
+            raise ValueError(f"Calculation error: {e}") from e
 
 
 # Global calculator instance

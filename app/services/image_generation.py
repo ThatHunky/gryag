@@ -8,25 +8,27 @@ Includes daily quota management and context image support.
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from io import BytesIO
-from pathlib import Path
 from typing import Any
 
 import asyncpg
-from app.infrastructure.query_converter import convert_query_to_postgres
-from app.infrastructure.db_utils import get_db_connection
 from google import genai
 from google.genai import types
 from PIL import Image
 
+from app.infrastructure.db_utils import get_db_connection
+from app.infrastructure.query_converter import convert_query_to_postgres
+
 try:
-    from app.services.tool_logging import log_tool_execution, ToolLogger
+    from app.services.tool_logging import ToolLogger, log_tool_execution
 except ImportError:
-    log_tool_execution = lambda name: lambda f: f
+
+    def log_tool_execution(name):
+        return lambda f: f
+
     ToolLogger = None
 
 tool_logger = ToolLogger("image_generation") if ToolLogger else None
@@ -81,7 +83,7 @@ class ImageGenerationService:
 
     def _get_today_date(self) -> str:
         """Get today's date in YYYY-MM-DD format (UTC)."""
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return datetime.now(UTC).strftime("%Y-%m-%d")
 
     def _is_admin(self, user_id: int) -> bool:
         """Check if user is an admin (bypasses quotas)."""
@@ -224,11 +226,11 @@ class ImageGenerationService:
                     ),
                     timeout=90.0,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError as e:
                 self.logger.error("Image generation timed out after 90 seconds")
                 raise ImageGenerationError(
                     "Генерація зображення зайняла забагато часу. Спробуй ще раз або спрости запит."
-                )
+                ) from e
 
             # Extract image from response safely
             image_bytes = None
@@ -323,7 +325,7 @@ class ImageGenerationService:
         """
 
         today = self._get_today_date()
-        
+
         query, params = convert_query_to_postgres(
             """
             DELETE FROM image_quotas
@@ -342,9 +344,7 @@ class ImageGenerationService:
                 # (no records = quota already reset)
                 return True
         except Exception as e:
-            self.logger.error(
-                f"Failed to reset image quota for user {user_id}: {e}"
-            )
+            self.logger.error(f"Failed to reset image quota for user {user_id}: {e}")
             return False
 
     async def reset_chat_quotas(self, chat_id: int) -> int:
@@ -359,7 +359,7 @@ class ImageGenerationService:
         """
 
         today = self._get_today_date()
-        
+
         query, params = convert_query_to_postgres(
             """
             DELETE FROM image_quotas
@@ -376,9 +376,7 @@ class ImageGenerationService:
                 )
                 return deleted
         except Exception as e:
-            self.logger.error(
-                f"Failed to reset image quotas for chat {chat_id}: {e}"
-            )
+            self.logger.error(f"Failed to reset image quotas for chat {chat_id}: {e}")
             return 0
 
 

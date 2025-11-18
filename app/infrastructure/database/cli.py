@@ -9,7 +9,6 @@ Usage:
 
 import asyncio
 import sys
-from pathlib import Path
 
 from app.config import Settings
 from app.infrastructure.database.migrator import DatabaseMigrator

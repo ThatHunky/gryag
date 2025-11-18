@@ -3,15 +3,14 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from threading import Lock
-from typing import Any, Tuple
+from typing import Any
 
-
-_METRICS: Counter[tuple[str, Tuple[tuple[str, Any], ...]]] = Counter()
+_METRICS: Counter[tuple[str, tuple[tuple[str, Any], ...]]] = Counter()
 _LOCK = Lock()
 _LOGGER = logging.getLogger("gryag.telemetry")
 
 
-def _normalize_labels(labels: dict[str, Any]) -> Tuple[tuple[str, Any], ...]:
+def _normalize_labels(labels: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
     if not labels:
         return ()
     return tuple(sorted(labels.items()))
@@ -61,7 +60,7 @@ def reset() -> None:
         _METRICS.clear()
 
 
-def _render_key(name: str, labels: Tuple[tuple[str, Any], ...]) -> str:
+def _render_key(name: str, labels: tuple[tuple[str, Any], ...]) -> str:
     if not labels:
         return name
     label_str = ",".join(f"{key}={value}" for key, value in labels)

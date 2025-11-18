@@ -29,7 +29,7 @@ class EpisodeSummarizer:
     ):
         self.settings = settings
         self.gemini = gemini_client
-        
+
         # Rate limiting: track timestamps of recent API calls
         self.rate_limit = getattr(settings, "episode_summarization_rate_limit", 1)
         self._rate_limit_window = 60.0  # 1 minute window
@@ -39,39 +39,47 @@ class EpisodeSummarizer:
     async def _check_rate_limit(self) -> bool:
         """
         Check if we can make a Gemini API call based on rate limit.
-        
+
         Returns:
             True if call is allowed, False if rate limited
         """
         async with self._rate_limit_lock:
             now = time.time()
             # Remove calls outside the window
-            while self._recent_calls and (now - self._recent_calls[0]) > self._rate_limit_window:
+            while (
+                self._recent_calls
+                and (now - self._recent_calls[0]) > self._rate_limit_window
+            ):
                 self._recent_calls.popleft()
-            
+
             # Check if we're at the limit
             if len(self._recent_calls) >= self.rate_limit:
                 return False
-            
+
             # Record this call
             self._recent_calls.append(now)
             return True
-    
+
     async def _wait_for_rate_limit(self) -> None:
         """Wait until rate limit allows another call."""
         async with self._rate_limit_lock:
             if not self._recent_calls:
                 return
-            
+
             now = time.time()
             # Remove old calls
-            while self._recent_calls and (now - self._recent_calls[0]) > self._rate_limit_window:
+            while (
+                self._recent_calls
+                and (now - self._recent_calls[0]) > self._rate_limit_window
+            ):
                 self._recent_calls.popleft()
-            
+
             # If still at limit, wait for oldest call to expire
             if len(self._recent_calls) >= self.rate_limit:
                 oldest_call = self._recent_calls[0]
-                wait_time = self._rate_limit_window - (now - oldest_call) + 0.1  # Small buffer
+                wait_time = (
+                    self._rate_limit_window - (now - oldest_call) + 0.1
+                )  # Small buffer
                 if wait_time > 0:
                     await asyncio.sleep(wait_time)
 

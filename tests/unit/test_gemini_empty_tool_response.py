@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from typing import Any
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
 from app.services.gemini import GeminiClient
 
 
@@ -94,7 +96,7 @@ async def test_empty_tool_response_forces_retry():
         # Call 3: Forced retry without tools (after loop detects empty+function_call)
         mock_invoke.side_effect = [second_response, third_response, fourth_response]
 
-        result = await client._handle_tools(
+        await client._handle_tools(
             initial_contents=[{"role": "user", "parts": [{"text": "Test"}]}],
             response=first_response,
             tools=[{"function_declarations": [{"name": "recall_facts"}]}],

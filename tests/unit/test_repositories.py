@@ -1,10 +1,11 @@
 """Unit tests for repository base class."""
 
-import pytest
-from pathlib import Path
 from dataclasses import dataclass
-from app.repositories.base import Repository
+
+import pytest
+
 from app.core.exceptions import DatabaseError
+from app.repositories.base import Repository
 
 
 @dataclass

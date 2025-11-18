@@ -1,5 +1,3 @@
-import pytest
-
 from app.services.context.token_optimizer import calculate_dynamic_budget
 
 
@@ -21,7 +19,9 @@ def test_calculate_dynamic_budget_respects_base_allocations():
     # Sums to ~1.0
     assert 0.999 <= sum(budgets.values()) <= 1.001
     # Recent should remain dominant in base case (no strong adjustments)
-    assert budgets["recent"] >= max(budgets["immediate"], budgets["relevant"], budgets["background"])
+    assert budgets["recent"] >= max(
+        budgets["immediate"], budgets["relevant"], budgets["background"]
+    )
 
 
 def test_calculate_dynamic_budget_adjusts_for_lookup_queries():
@@ -41,5 +41,3 @@ def test_calculate_dynamic_budget_adjusts_for_lookup_queries():
     )
     # Relevant allocation should increase vs base for lookup queries
     assert budgets["relevant"] > base["relevant"] * 0.9
-
-

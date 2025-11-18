@@ -2,18 +2,16 @@
 Tests for token optimization utilities.
 """
 
-import pytest
-
 from app.services.context.token_optimizer import (
-    format_metadata_compact,
-    summarize_media_compact,
-    estimate_tokens_accurate,
-    estimate_message_tokens,
-    deduplicate_messages,
     calculate_dynamic_budget,
-    summarize_old_messages,
-    prune_low_relevance,
+    deduplicate_messages,
+    estimate_message_tokens,
+    estimate_tokens_accurate,
+    format_metadata_compact,
     limit_consecutive_messages,
+    prune_low_relevance,
+    summarize_media_compact,
+    summarize_old_messages,
 )
 
 

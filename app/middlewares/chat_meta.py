@@ -4,7 +4,7 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 from aiogram import BaseMiddleware, Bot
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import CallbackQuery, Message
 
 from app.config import Settings
 from app.services.context_store import ContextStore
@@ -19,18 +19,18 @@ if TYPE_CHECKING:
     ProfileStoreType = UserProfileStore | UserProfileStoreAdapter
 else:
     ProfileStoreType = Any
+from app.repositories.memory_repository import MemoryRepository
+from app.services.bot_learning import BotLearningEngine
+from app.services.bot_profile import BotProfileStore
 from app.services.context import (
-    HybridSearchEngine,
     EpisodicMemoryStore,
+    HybridSearchEngine,
     MultiLevelContextManager,
 )
 from app.services.context.episode_monitor import EpisodeMonitor
-from app.services.bot_profile import BotProfileStore
-from app.services.bot_learning import BotLearningEngine
-from app.services.system_prompt_manager import SystemPromptManager
-from app.services.rate_limiter import RateLimiter
 from app.services.persona import PersonaLoader
-from app.repositories.memory_repository import MemoryRepository
+from app.services.rate_limiter import RateLimiter
+from app.services.system_prompt_manager import SystemPromptManager
 
 
 class ChatMetaMiddleware(BaseMiddleware):

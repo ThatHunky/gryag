@@ -6,7 +6,7 @@ import io
 import logging
 from datetime import datetime
 
-from aiogram import Bot, Router
+from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import BotCommand, BufferedInputFile, Message
 
@@ -483,7 +483,7 @@ async def prompt_history_command(
             )
             return
 
-        response = f"📜 <b>Історія системних промптів</b>\n\n"
+        response = "📜 <b>Історія системних промптів</b>\n\n"
         response += f"Scope: {scope}\n"
         response += f"Chat ID: {chat_id_filter or 'Global'}\n"
         response += f"Всього версій: {len(history)}\n\n"
@@ -501,8 +501,8 @@ async def prompt_history_command(
             response += f"  Попередній перегляд: {_format_prompt_preview(prompt.prompt_text, 100)}\n\n"
 
         response += (
-            f"💡 Щоб активувати стару версію:\n"
-            f"<code>/gryagactivateprompt VERSION</code>"
+            "💡 Щоб активувати стару версію:\n"
+            "<code>/gryagactivateprompt VERSION</code>"
         )
 
         await message.reply(response)

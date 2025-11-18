@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Tuple
 
 from app.services.redis_types import RedisLike
 
@@ -45,7 +44,7 @@ class RedisRateLimiter:
 
     async def check_and_increment(
         self, user_id: int, now: int | None = None
-    ) -> Tuple[bool, int, int] | None:
+    ) -> tuple[bool, int, int] | None:
         """
         Check if the user is within the allowed rate and increment on success.
 
@@ -88,7 +87,9 @@ class RedisRateLimiter:
             return True, remaining, retry_after
 
         except Exception as exc:
-            logger.warning(f"Redis rate limit check failed: {exc}, falling back to PostgreSQL")
+            logger.warning(
+                f"Redis rate limit check failed: {exc}, falling back to PostgreSQL"
+            )
             return None  # Signal to use PostgreSQL fallback
 
     async def reset_user(self, user_id: int) -> int:
@@ -183,7 +184,7 @@ class RedisFeatureRateLimiter:
         limit_per_hour: int,
         window_seconds: int | None = None,
         now: int | None = None,
-    ) -> Tuple[bool, int] | None:
+    ) -> tuple[bool, int] | None:
         """
         Check if user is within rate limit for a feature and increment.
 
@@ -267,4 +268,3 @@ class RedisFeatureRateLimiter:
         except Exception as exc:
             logger.warning(f"Redis feature reset_user failed: {exc}")
             return 0
-

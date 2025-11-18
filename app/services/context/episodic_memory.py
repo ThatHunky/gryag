@@ -14,8 +14,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import asyncpg
-
 from app.config import Settings
 from app.infrastructure.db_utils import get_db_connection
 
@@ -123,8 +121,8 @@ class EpisodicMemoryStore:
             LOGGER.warning(f"Failed to generate episode embedding: {e}")
 
         query = """
-            INSERT INTO episodes 
-            (chat_id, thread_id, topic, summary, summary_embedding, importance, 
+            INSERT INTO episodes
+            (chat_id, thread_id, topic, summary, summary_embedding, importance,
              emotional_valence, message_ids, participant_ids, tags, created_at, access_count)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 0)
             RETURNING id
@@ -188,8 +186,8 @@ class EpisodicMemoryStore:
         # Fetch candidate episodes
         # PostgreSQL: participant_ids is TEXT (JSON), need to cast to jsonb for array operations
         query = """
-            SELECT * FROM episodes 
-            WHERE chat_id = $1 
+            SELECT * FROM episodes
+            WHERE chat_id = $1
               AND importance >= $2
               AND EXISTS (
                   SELECT 1
@@ -360,8 +358,8 @@ class EpisodicMemoryStore:
             # Batch update episodes
             placeholders = ",".join(f"${i+1}" for i in range(len(episode_ids)))
             query = f"""
-                UPDATE episodes 
-                SET last_accessed = ${len(episode_ids) + 1}, 
+                UPDATE episodes
+                SET last_accessed = ${len(episode_ids) + 1},
                     access_count = access_count + 1
                 WHERE id IN ({placeholders})
             """
@@ -371,13 +369,13 @@ class EpisodicMemoryStore:
             # Batch insert access logs
             access_records = [(ep_id, ts, "retrieval") for ep_id in episode_ids]
             query = """
-                INSERT INTO episode_accesses (episode_id, accessed_at, access_type) 
+                INSERT INTO episode_accesses (episode_id, accessed_at, access_type)
                 VALUES ($1, $2, $3)
             """
             # Execute in chunks to avoid parameter limits
             chunk_size = 100
             for i in range(0, len(access_records), chunk_size):
-                chunk = access_records[i:i + chunk_size]
+                chunk = access_records[i : i + chunk_size]
                 await conn.executemany(query, chunk)
 
     async def get_episode(self, episode_id: int) -> Episode | None:

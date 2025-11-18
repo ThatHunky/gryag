@@ -5,6 +5,7 @@ This directory contains the repository documentation organized into subfolders. 
 
 Structure recommended:
 
+- **API_DOCUMENTATION.md** — Comprehensive API documentation for all public APIs, functions, and components
 - docs/overview/ — high-level project overviews
 - docs/architecture/ — system architecture and data models
 - docs/plans/ — implementation plans and roadmaps
@@ -15,6 +16,8 @@ Structure recommended:
 - docs/fixes/ — bug fix documentation
 
 ## Recent Changes
+
+**January 2025**: **📚 Comprehensive API Documentation** — Added complete API documentation covering all public APIs, functions, and components. Includes detailed documentation for handlers, services, repositories, middlewares, tools, and configuration with usage examples and code snippets. See [API_DOCUMENTATION.md](API_DOCUMENTATION.md).
 
 **November 16, 2025**: P0 Improvements delivered — context budgets (configurable), automated PostgreSQL migrations at startup, persona plain‑text enforcement (Ukrainian, no Markdown/code), secret masking in logs, plus new unit/integration tests. Verification:
 

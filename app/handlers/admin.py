@@ -555,16 +555,6 @@ async def broadcast_command(
         if len(parts) >= 2 and parts[1] in ["confirm", "yes", "так"]:
             is_confirmation = True
 
-    # Check if message is a reply to a confirmation message from the bot
-    if message.reply_to_message and message.reply_to_message.from_user:
-        reply_user = message.reply_to_message.from_user
-        if reply_user.is_bot and bot_id is not None and reply_user.id == bot_id:
-            reply_to_text = (message.reply_to_message.text or "").lower()
-            if "підтвердження трансляції" in reply_to_text:
-                reply_text = (message.text or "").strip().lower()
-                if reply_text in ["yes", "так", "y", "т", "/broadcast confirm"]:
-                    is_confirmation = True
-
     # If not confirmed, show confirmation prompt
     if not is_confirmation:
         # Determine message type for preview
@@ -590,11 +580,8 @@ async def broadcast_command(
             "⚠️ <b>Підтвердження трансляції</b>\n\n"
             f"Ви збираєтеся надіслати {msg_type} "
             "до всіх приватних чатів.\n\n"
-            "Для підтвердження надішліть:\n"
-            "• <code>/broadcast confirm</code> або\n"
-            "• <code>/broadcast yes</code> або\n"
-            "• Надішліть <code>так</code> у відповідь "
-            "на це повідомлення.\n\n"
+            "Для підтвердження <b>відповідайте на оригінальне повідомлення</b> командою:\n"
+            "• <code>/broadcast confirm</code>\n\n"
             "Для скасування просто проігноруйте це повідомлення."
         )
         await message.reply(confirmation_msg, parse_mode="HTML")

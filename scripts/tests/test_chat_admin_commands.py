@@ -6,6 +6,7 @@ Simulates the chat admin command flow without requiring a live Telegram bot.
 """
 
 import asyncio
+
 import pytest
 
 pytestmark = pytest.mark.asyncio
@@ -16,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.config import get_settings
-from app.repositories.chat_profile import ChatProfileRepository, ChatFact
+from app.repositories.chat_profile import ChatProfileRepository
 
 
 async def test_chat_admin_commands():
@@ -100,7 +101,7 @@ async def test_chat_admin_commands():
         chat_id=test_chat_id,
         max_facts=8,
     )
-    print(f"   ✅ Summary generated:")
+    print("   ✅ Summary generated:")
     print(f"   {summary[:200]}..." if len(summary) > 200 else f"   {summary}")
 
     print("\n5️⃣ Testing get_top_chat_facts...")

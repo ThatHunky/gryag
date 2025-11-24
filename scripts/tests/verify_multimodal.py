@@ -4,8 +4,6 @@ Verification script for multimodal implementation.
 Run this to verify all changes are in place.
 """
 
-import ast
-import re
 from pathlib import Path
 
 

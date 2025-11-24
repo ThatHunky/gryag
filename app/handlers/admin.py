@@ -501,3 +501,204 @@ async def broadcast_donate_command(
             f"Exception during broadcast donation command: {e}",
             exc_info=True,
         )
+
+
+@router.message(Command(commands=["broadcast"]))
+async def broadcast_command(
+    message: Message,
+    bot: Bot,
+    settings: Settings,
+    bot_id: int | None = None,
+) -> None:
+    """Broadcast any message to all private chats (admin only, reply-based).
+
+    This command allows admins to broadcast any type of message (text, images,
+    videos, documents, etc.) to all private chats. Usage: reply to any message
+    with /broadcast, then confirm.
+    """
+    # Check if user is authorized (admin check)
+    if not _is_admin(message, settings):
+        # Silently ignore for non-admins (like broadcastdonate)
+        user_id = message.from_user.id if message.from_user else 'unknown'
+        LOGGER.debug(f"Unauthorized broadcast attempt from user {user_id}")
+        return
+
+    # Check if this message is in a private chat
+    if message.chat.id < 0:
+        await message.reply(
+            "❌ Команда /broadcast працює тільки в особистих чатах з ботом."
+        )
+        return
+
+    # Check if this is a reply to a message
+    if not message.reply_to_message:
+        await message.reply(
+            "❌ Для використання /broadcast треба відповісти на повідомлення, "
+            "яке ви хочете транслювати.\n\n"
+            "Приклад:\n"
+            "1. Надішліть або знайдіть повідомлення для трансляції\n"
+            "2. Відповідайте на нього командою /broadcast\n"
+            "3. Підтвердіть трансляцію"
+        )
+        return
+
+    # Get the message to broadcast
+    broadcast_message = message.reply_to_message
+
+    # Check if this is a confirmation
+    command_text = (message.text or "").strip().lower()
+    is_confirmation = False
+
+    # Check for confirmation in command text
+    if command_text.startswith("/broadcast"):
+        parts = command_text.split()
+        if len(parts) >= 2 and parts[1] in ["confirm", "yes", "так"]:
+            is_confirmation = True
+
+    # Check if message is a reply to a confirmation message from the bot
+    if message.reply_to_message and message.reply_to_message.from_user:
+        reply_user = message.reply_to_message.from_user
+        if reply_user.is_bot and bot_id is not None and reply_user.id == bot_id:
+            reply_to_text = (message.reply_to_message.text or "").lower()
+            if "підтвердження трансляції" in reply_to_text:
+                reply_text = (message.text or "").strip().lower()
+                if reply_text in ["yes", "так", "y", "т", "/broadcast confirm"]:
+                    is_confirmation = True
+
+    # If not confirmed, show confirmation prompt
+    if not is_confirmation:
+        # Determine message type for preview
+        msg_type = "текстове повідомлення"
+        if broadcast_message.photo:
+            msg_type = "фото"
+        elif broadcast_message.video:
+            msg_type = "відео"
+        elif broadcast_message.document:
+            msg_type = "документ"
+        elif broadcast_message.voice:
+            msg_type = "голосове повідомлення"
+        elif broadcast_message.video_note:
+            msg_type = "відеоповідомлення"
+        elif broadcast_message.sticker:
+            msg_type = "стікер"
+        elif broadcast_message.animation:
+            msg_type = "GIF анімацію"
+        elif broadcast_message.audio:
+            msg_type = "аудіофайл"
+
+        confirmation_msg = (
+            "⚠️ <b>Підтвердження трансляції</b>\n\n"
+            f"Ви збираєтеся надіслати {msg_type} "
+            "до всіх приватних чатів.\n\n"
+            "Для підтвердження надішліть:\n"
+            "• <code>/broadcast confirm</code> або\n"
+            "• <code>/broadcast yes</code> або\n"
+            "• Надішліть <code>так</code> у відповідь "
+            "на це повідомлення.\n\n"
+            "Для скасування просто проігноруйте це повідомлення."
+        )
+        await message.reply(confirmation_msg, parse_mode="HTML")
+        return
+
+    # Confirmation received - proceed with broadcast
+    try:
+        # Query all distinct private chat IDs (chat_id > 0)
+        query, params = convert_query_to_postgres(
+            "SELECT DISTINCT chat_id FROM messages WHERE chat_id > 0 ORDER BY chat_id",
+            (),
+        )
+
+        private_chat_ids: list[int] = []
+        async with get_db_connection(settings.database_url) as conn:
+            rows = await conn.fetch(query, *params)
+            private_chat_ids = [row["chat_id"] for row in rows]
+
+        total_chats = len(private_chat_ids)
+        if total_chats == 0:
+            await message.reply("❌ Не знайдено жодного приватного чату в базі даних.")
+            return
+
+        await message.reply(
+            "🔄 Починаю трансляцію повідомлення до всіх приватних чатів..."
+        )
+
+        LOGGER.info(
+            f"User {message.from_user.id} starting broadcast to "
+            f"{total_chats} private chats"
+        )
+
+        # Send messages to each private chat with rate limiting
+        success_count = 0
+        failed_count = 0
+        failed_chats: list[int] = []
+
+        for chat_id in private_chat_ids:
+            try:
+                # Use copy_message to handle all message types automatically
+                await bot.copy_message(
+                    chat_id=chat_id,
+                    from_chat_id=broadcast_message.chat.id,
+                    message_id=broadcast_message.message_id,
+                )
+                success_count += 1
+                # Rate limiting: wait 0.2 seconds between sends
+                if success_count < total_chats:
+                    await asyncio.sleep(0.2)
+                # Log progress every 10 chats
+                if success_count % 10 == 0:
+                    LOGGER.debug(
+                        f"Broadcast progress: {success_count}/{total_chats} "
+                        "sent successfully"
+                    )
+            except TelegramBadRequest as e:
+                # Common reasons: bot blocked, chat not found, etc.
+                failed_count += 1
+                failed_chats.append(chat_id)
+                LOGGER.debug(f"Failed to broadcast to chat {chat_id}: {e}")
+                # Still wait to maintain rate limiting even on failures
+                if (success_count + failed_count) < total_chats:
+                    await asyncio.sleep(0.2)
+            except Exception as e:
+                # Other unexpected errors
+                failed_count += 1
+                failed_chats.append(chat_id)
+                LOGGER.warning(
+                    f"Unexpected error broadcasting to chat {chat_id}: {e}",
+                    exc_info=True,
+                )
+                # Still wait to maintain rate limiting even on failures
+                if (success_count + failed_count) < total_chats:
+                    await asyncio.sleep(0.2)
+
+        # Send summary to admin
+        summary = (
+            f"✅ Трансляцію завершено!\n\n"
+            f"📊 Статистика:\n"
+            f"• Всього чатів: {total_chats}\n"
+            f"• Відправлено успішно: {success_count}\n"
+            f"• Помилок: {failed_count}"
+        )
+
+        if failed_count > 0 and failed_count <= 10:
+            # Show failed chat IDs if there are few failures
+            summary += "\n\n❌ Не вдалося відправити до чатів:\n"
+            summary += ", ".join(str(cid) for cid in failed_chats[:10])
+        elif failed_count > 10:
+            summary += (
+                f"\n\n❌ Не вдалося відправити до {failed_count} чатів "
+                "(список занадто великий)"
+            )
+
+        await message.reply(summary)
+        LOGGER.info(
+            f"Broadcast completed: {success_count} successful, {failed_count} failed "
+            f"out of {total_chats} total private chats"
+        )
+
+    except Exception as e:
+        error_msg = f"❌ Помилка під час трансляції: {str(e)}"
+        await message.reply(error_msg)
+        LOGGER.error(
+            f"Exception during broadcast command: {e}",
+            exc_info=True,
+        )

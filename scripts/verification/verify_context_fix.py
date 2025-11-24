@@ -65,7 +65,7 @@ async def main():
     # Test 1: Request 2 turns, should get 4 messages
     print("Test 1: Request 2 turns (max_turns=2)")
     history = await store.recent(chat_id, thread_id, max_turns=2)
-    print(f"  Expected: 4 messages (2 turns × 2 messages/turn)")
+    print("  Expected: 4 messages (2 turns × 2 messages/turn)")
     print(f"  Got: {len(history)} messages")
 
     if len(history) == 4:
@@ -79,7 +79,7 @@ async def main():
     # Test 2: Request 5 turns, should get all 10 messages
     print("Test 2: Request 5 turns (max_turns=5)")
     history = await store.recent(chat_id, thread_id, max_turns=5)
-    print(f"  Expected: 10 messages (5 turns × 2 messages/turn)")
+    print("  Expected: 10 messages (5 turns × 2 messages/turn)")
     print(f"  Got: {len(history)} messages")
 
     if len(history) == 10:
@@ -90,7 +90,7 @@ async def main():
     # Test 3: Request more turns than available
     print("Test 3: Request 10 turns (more than available)")
     history = await store.recent(chat_id, thread_id, max_turns=10)
-    print(f"  Expected: 10 messages (all available)")
+    print("  Expected: 10 messages (all available)")
     print(f"  Got: {len(history)} messages")
 
     if len(history) == 10:

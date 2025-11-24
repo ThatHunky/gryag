@@ -4,7 +4,6 @@ import asyncio
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
-import aiosqlite
 import pytest
 import pytest_asyncio
 
@@ -19,32 +18,71 @@ def event_loop():
 
 
 @pytest_asyncio.fixture
-async def test_db() -> AsyncGenerator[Path, None]:
+async def test_db() -> AsyncGenerator[str, None]:
     """Create temporary test database with schema.
 
     Yields:
-        Path to test database file
-
-    Example:
-        @pytest.mark.asyncio
-        async def test_something(test_db):
-            async with aiosqlite.connect(test_db) as db:
-                # use database
+        Connection string to test database
     """
-    from app.services.context_store import SCHEMA_PATH
+    import uuid
 
-    db_path = Path("/tmp/test_gryag.db")
+    import asyncpg
 
-    # Initialize schema
-    async with aiosqlite.connect(db_path) as db:
-        schema_sql = SCHEMA_PATH.read_text()
-        await db.executescript(schema_sql)
-        await db.commit()
+    from app.config import Settings
+    from app.infrastructure.db_utils import init_database
 
-    yield db_path
+    # Load settings to get DB config
+    settings = Settings()
+    base_url = settings.database_url
 
-    # Cleanup
-    db_path.unlink(missing_ok=True)
+    # Parse URL to get credentials and host
+    # Assuming format: postgresql://user:pass@host:port/dbname
+    # We want to connect to 'postgres' database to create the test db
+    from urllib.parse import urlparse
+    parsed = urlparse(base_url)
+
+    # Construct maintenance URL (connect to 'postgres' db)
+    maintenance_url = parsed._replace(path="/postgres").geturl()
+
+    test_db_name = f"test_gryag_{uuid.uuid4().hex}"
+    test_db_url = parsed._replace(path=f"/{test_db_name}").geturl()
+
+    # Create Test Database
+    try:
+        # Connect to maintenance DB to create test DB
+        sys_conn = await asyncpg.connect(maintenance_url)
+        await sys_conn.execute(f'CREATE DATABASE "{test_db_name}"')
+        await sys_conn.close()
+    except Exception as e:
+        pytest.skip(f"Skipping Postgres tests: Could not connect to {maintenance_url} or create DB. Error: {e}")
+
+    try:
+        # Initialize Schema
+        await init_database(test_db_url)
+
+        yield test_db_url
+
+    finally:
+        # Close app pool to release connections
+        from app.infrastructure.db_utils import close_pg_pool
+        await close_pg_pool()
+
+        # Cleanup: Drop Test Database
+        try:
+            sys_conn = await asyncpg.connect(maintenance_url)
+            # Terminate connections to test DB before dropping
+            await sys_conn.execute(
+                f"""
+                SELECT pg_terminate_backend(pg_stat_activity.pid)
+                FROM pg_stat_activity
+                WHERE pg_stat_activity.datname = '{test_db_name}'
+                AND pid <> pg_backend_pid();
+                """
+            )
+            await sys_conn.execute(f'DROP DATABASE "{test_db_name}"')
+            await sys_conn.close()
+        except Exception as e:
+            print(f"Failed to drop test database {test_db_name}: {e}")
 
 
 @pytest.fixture

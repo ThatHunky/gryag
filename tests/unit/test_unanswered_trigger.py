@@ -10,6 +10,7 @@ PostgreSQL-specific syntax). If running with SQLite, these tests may be skipped.
 """
 
 import time
+from datetime import UTC
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -251,31 +252,28 @@ async def test_unanswered_trigger_allows_after_threshold(context_store):
     old_ts = int(time.time()) - UNANSWERED_TRIGGER_THRESHOLD_SECONDS - 10
 
     # We need to manually insert with old timestamp since add_message uses current time
-    import aiosqlite
+    from app.infrastructure.db_utils import get_db_connection
 
-    async with aiosqlite.connect(context_store._database_url) as conn:
+    async with get_db_connection(context_store._database_url) as conn:
         await conn.execute(
             """
             INSERT INTO messages (
                 chat_id, thread_id, user_id, role, text, ts,
                 sender_role, sender_name, sender_username, sender_is_bot
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             """,
-            (
-                chat_id,
-                thread_id,
-                user_id,
-                "user",
-                "Hello bot",
-                old_ts,
-                "user",
-                "TestUser",
-                "testuser",
-                0,
-            ),
+            chat_id,
+            thread_id,
+            user_id,
+            "user",
+            "Hello bot",
+            old_ts,
+            "user",
+            "TestUser",
+            "testuser",
+            False,
         )
-        await conn.commit()
 
     # Check should return False (don't skip) because message is old
     data = {}
@@ -292,17 +290,18 @@ async def test_unanswered_trigger_allows_after_threshold(context_store):
 @pytest.mark.asyncio
 async def test_check_and_handle_rate_limit_returns_response_message():
     """Test that rate limit check returns response message when sent."""
-    from unittest.mock import AsyncMock
+    from datetime import datetime
+    from unittest.mock import AsyncMock, Mock
 
     from aiogram.types import Chat, Message, User
 
-    message = Message(
-        message_id=1,
-        date=time.time(),
-        chat=Chat(id=123, type="group"),
-        from_user=User(id=456, is_bot=False, first_name="Test"),
-        text="Hello",
-    )
+    # Use Mock(spec=Message) because Message is frozen and we need to mock .reply()
+    message = Mock(spec=Message)
+    message.message_id = 1
+    message.date = datetime.now(UTC)
+    message.chat = Chat(id=123, type="group")
+    message.from_user = User(id=456, is_bot=False, first_name="Test")
+    message.text = "Hello"
 
     rate_limiter = Mock()
     rate_limiter.check_and_increment = AsyncMock(
@@ -311,13 +310,13 @@ async def test_check_and_handle_rate_limit_returns_response_message():
     rate_limiter.should_send_error_message = Mock(return_value=True)
 
     # Mock message.reply to return a message
-    reply_message = Message(
-        message_id=2,
-        date=time.time(),
-        chat=Chat(id=123, type="group"),
-        from_user=User(id=0, is_bot=True, first_name="Bot"),
-        text="Rate limited",
-    )
+    reply_message = Mock(spec=Message)
+    reply_message.message_id = 2
+    reply_message.date = datetime.now(UTC)
+    reply_message.chat = Chat(id=123, type="group")
+    reply_message.from_user = User(id=0, is_bot=True, first_name="Bot")
+    reply_message.text = "Rate limited"
+
     message.reply = AsyncMock(return_value=reply_message)
 
     should_proceed, rate_limit_response = await _check_and_handle_rate_limit(
@@ -337,11 +336,13 @@ async def test_check_and_handle_rate_limit_returns_response_message():
 @pytest.mark.asyncio
 async def test_check_and_handle_rate_limit_returns_none_when_not_sent():
     """Test that rate limit check returns None when error message not sent (cooldown)."""
+    from datetime import datetime
+
     from aiogram.types import Chat, Message, User
 
     message = Message(
         message_id=1,
-        date=time.time(),
+        date=datetime.now(UTC),
         chat=Chat(id=123, type="group"),
         from_user=User(id=456, is_bot=False, first_name="Test"),
         text="Hello",
@@ -575,31 +576,28 @@ async def test_skip_count_resets_after_threshold(context_store):
     # Add user message with old timestamp (beyond threshold)
     old_ts = int(time.time()) - UNANSWERED_TRIGGER_THRESHOLD_SECONDS - 10
 
-    import aiosqlite
+    from app.infrastructure.db_utils import get_db_connection
 
-    async with aiosqlite.connect(context_store._database_url) as conn:
+    async with get_db_connection(context_store._database_url) as conn:
         await conn.execute(
             """
             INSERT INTO messages (
                 chat_id, thread_id, user_id, role, text, ts,
                 sender_role, sender_name, sender_username, sender_is_bot
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             """,
-            (
-                chat_id,
-                thread_id,
-                user_id,
-                "user",
-                "Hello bot",
-                old_ts,
-                "user",
-                "TestUser",
-                "testuser",
-                0,
-            ),
+            chat_id,
+            thread_id,
+            user_id,
+            "user",
+            "Hello bot",
+            old_ts,
+            "user",
+            "TestUser",
+            "testuser",
+            False,
         )
-        await conn.commit()
 
     # Check should reset skip count because message is old
     should_skip = await _check_unanswered_trigger(

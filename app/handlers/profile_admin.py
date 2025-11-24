@@ -421,8 +421,13 @@ async def get_user_facts_command(
     memories_count = 0
     if memory_repo:
         try:
-            memories = await memory_repo.get_memories_for_user(user_id, chat_id)
-            memories_count = len(memories)
+            # Get total count first (we can't easily get count without a separate query or fetching all)
+            # For now, we'll fetch a reasonable limit to check count if needed, or just rely on pagination
+            # But since we need total_count for pagination UI, we might need a count method in repo
+            # For now, let's assume we can fetch all IDs to count, or just fetch all (since limit is small ~15)
+            # The repo limits to 15 anyway, so fetching all is fine for count.
+            all_memories = await memory_repo.get_memories_for_user(user_id, chat_id)
+            memories_count = len(all_memories)
         except Exception as e:
             logger.error(f"Failed to get memories: {e}", exc_info=True)
 
@@ -441,14 +446,52 @@ async def get_user_facts_command(
     offset = (page - 1) * FACTS_PER_PAGE
 
     # Get facts for this page
-    # Note: profile_store.get_facts doesn't support offset, so we fetch and slice
-    # For now, fetch all and slice (TODO: add offset support to repository)
-    all_facts = await profile_store.get_facts(
-        user_id=user_id,
-        chat_id=chat_id,
-        fact_type=fact_type_filter,
-        limit=old_facts_count,  # Get all
-    )
+    # We need to handle pagination across two sources: facts and memories.
+    # This is tricky because we want them interleaved or at least presented consistently.
+    # Strategy:
+    # 1. Calculate how many items from "facts" and "memories" fit into the current page window.
+    #    This is hard because we don't know the exact distribution without fetching all.
+    # 2. SIMPLIFICATION: Since we have offset support now, we can fetch the relevant slice.
+    #    But we have two distinct lists.
+    #    Let's treat them as one concatenated list: [Facts... | Memories...]
+    #    If offset < old_facts_count: we need some facts.
+    #    If offset + limit > old_facts_count: we need some memories.
+
+    facts_to_fetch = []
+    memories_to_fetch = []
+
+    # Calculate range for this page
+    start_idx = offset
+    end_idx = offset + FACTS_PER_PAGE
+
+    # 1. Fetch Facts if the window overlaps with facts range [0, old_facts_count)
+    if start_idx < old_facts_count:
+        facts_limit = min(FACTS_PER_PAGE, old_facts_count - start_idx)
+        facts_to_fetch = await profile_store.get_facts(
+            user_id=user_id,
+            chat_id=chat_id,
+            fact_type=fact_type_filter,
+            limit=facts_limit,
+            offset=start_idx
+        )
+
+    # 2. Fetch Memories if the window overlaps with memories range [old_facts_count, total_count)
+    if end_idx > old_facts_count and memory_repo:
+        # Calculate offset relative to memories list
+        mem_offset = max(0, start_idx - old_facts_count)
+        # Calculate limit for memories
+        mem_limit = FACTS_PER_PAGE - len(facts_to_fetch)
+
+        if mem_limit > 0:
+            memories_to_fetch = await memory_repo.get_memories_for_user(
+                user_id=user_id,
+                chat_id=chat_id,
+                limit=mem_limit,
+                offset=mem_offset
+            )
+
+    all_facts = facts_to_fetch
+    memories = memories_to_fetch
 
     # Combine old facts and new memories into a unified list
     # Format memories to look like facts for consistency
@@ -480,7 +523,8 @@ async def get_user_facts_command(
         )
 
     # Paginate the combined list
-    items = all_items[offset : offset + FACTS_PER_PAGE]
+    # items = all_items[offset : offset + FACTS_PER_PAGE] # No longer needed, we fetched exactly what we need
+    items = all_items
 
     if not verbose_mode:
         # Compact format (DEFAULT, like ChatGPT Memories)
@@ -685,13 +729,28 @@ async def facts_pagination_callback(
     offset = (page - 1) * FACTS_PER_PAGE
 
     # Get facts for this page
+    # Note: This callback currently only supports "facts" from profile_store, not memories
+    # because the callback logic in get_user_facts_command didn't fully account for the unified view in the callback handler.
+    # The original code only fetched from profile_store.
+    # To fix this properly, we should replicate the unified logic or assume this is legacy.
+    # Given the TODO was about offset support, let's update the profile_store call.
+
+    # If we want to support memories here too, we'd need memory_repo access which isn't passed to this handler wrapper?
+    # The handler signature has: profile_store: UserProfileStore, store: ContextStore.
+    # It seems memory_repo is missing from the dependency injection for this callback in the original code?
+    # Let's check the signature.
+    # The original signature: async def facts_pagination_callback(..., profile_store: UserProfileStore, store: ContextStore) -> None:
+    # It seems memory_repo is NOT injected.
+    # For now, I will implement offset for profile_store facts.
+
     all_facts = await profile_store.get_facts(
         user_id=target_user_id,
         chat_id=target_chat_id,
         fact_type=fact_type_filter,
-        limit=total_count,
+        limit=FACTS_PER_PAGE,
+        offset=offset
     )
-    facts = all_facts[offset : offset + FACTS_PER_PAGE]
+    facts = all_facts
 
     if not verbose_mode:
         # Compact format

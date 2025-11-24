@@ -16,15 +16,12 @@ from app.services.context_store import ContextStore
 
 
 @pytest_asyncio.fixture
-async def test_db(tmp_path: Path) -> Path:
-    """Create a temporary test database."""
-    db_path = tmp_path / "test_token_budget.db"
-
+async def test_db(test_db):
+    """Use global test database."""
     # Initialize schema
-    store = ContextStore(db_path)
+    store = ContextStore(test_db)
     await store.init()
-
-    return db_path
+    return test_db
 
 
 @pytest.fixture
@@ -125,13 +122,19 @@ async def test_total_context_respects_budget(test_db: Path, test_settings: Setti
     # Add many messages
     for i in range(50):
         text = f"Test message {i}: " + " ".join([f"content{j}" for j in range(30)])
-        await store.add_turn(
+        user_id = i % 5
+        role = "user" if i % 2 == 0 else "model"
+        name = "User" if role == "user" else "Bot"
+        username = f"user_{user_id}" if role == "user" else "bot"
+
+        await store.add_message(
             chat_id=chat_id,
             thread_id=thread_id,
-            user_id=i % 5,
-            role="user" if i % 2 == 0 else "model",
+            user_id=user_id,
+            role=role,
+            name=name,
+            username=username,
             text=text,
-            media=None,
         )
 
     manager = MultiLevelContextManager(

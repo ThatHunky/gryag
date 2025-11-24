@@ -7,6 +7,7 @@ when processing messages.
 """
 
 import asyncio
+
 import pytest
 
 pytestmark = pytest.mark.asyncio
@@ -16,14 +17,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from app.config import get_settings
-from app.services.gemini import GeminiClient
-from app.services.context_store import ContextStore
-from app.services.user_profile import UserProfileStore
 from app.services.context import (
-    HybridSearchEngine,
     EpisodicMemoryStore,
+    HybridSearchEngine,
     MultiLevelContextManager,
 )
+from app.services.context_store import ContextStore
+from app.services.gemini import GeminiClient
+from app.services.user_profile import UserProfileStore
 
 
 async def test_integration():
@@ -96,9 +97,9 @@ async def test_integration():
             max_tokens=8000,
         )
 
-        print(f"\n✅ Context assembled successfully!")
+        print("\n✅ Context assembled successfully!")
         print(f"   Total tokens: {context.total_tokens}/8000")
-        print(f"\n📊 Level breakdown:")
+        print("\n📊 Level breakdown:")
         print(
             f"   Immediate: {len(context.immediate.messages)} messages, {context.immediate.token_count} tokens"
         )
@@ -108,7 +109,7 @@ async def test_integration():
                 f"   Recent: {len(context.recent.messages)} messages, {context.recent.token_count} tokens"
             )
         else:
-            print(f"   Recent: disabled")
+            print("   Recent: disabled")
 
         if context.relevant:
             print(
@@ -117,7 +118,7 @@ async def test_integration():
             if context.relevant.snippets:
                 print(f"   Average relevance: {context.relevant.average_relevance:.3f}")
         else:
-            print(f"   Relevant: disabled")
+            print("   Relevant: disabled")
 
         if context.background:
             print(f"   Background: {context.background.token_count} tokens")
@@ -125,30 +126,30 @@ async def test_integration():
                 print(f"   Profile: {context.background.profile_summary[:50]}...")
             print(f"   Facts: {len(context.background.key_facts)}")
         else:
-            print(f"   Background: disabled")
+            print("   Background: disabled")
 
         if context.episodes:
             print(
                 f"   Episodes: {len(context.episodes.episodes)} episodes, {context.episodes.token_count} tokens"
             )
         else:
-            print(f"   Episodes: disabled")
+            print("   Episodes: disabled")
 
         # Test Gemini formatting
         print("\n🔄 Formatting for Gemini API...")
         formatted = context_manager.format_for_gemini(context)
 
-        print(f"✅ Formatted successfully!")
+        print("✅ Formatted successfully!")
         print(f"   History length: {len(formatted['history'])} messages")
         if formatted.get("system_context"):
             print(f"   System context: {len(formatted['system_context'])} chars")
         else:
-            print(f"   System context: none")
+            print("   System context: none")
         print(f"   Token count: {formatted.get('token_count', 0)}")
 
         # Show sample if we have context
         if formatted["history"]:
-            print(f"\n📝 Sample history (first message):")
+            print("\n📝 Sample history (first message):")
             first_msg = formatted["history"][0]
             print(f"   Role: {first_msg.get('role', 'unknown')}")
             parts = first_msg.get("parts", [])
@@ -157,7 +158,7 @@ async def test_integration():
                 print(f"   Text: {text}...")
 
         if formatted.get("system_context"):
-            print(f"\n📝 System context preview:")
+            print("\n📝 System context preview:")
             preview = formatted["system_context"][:200]
             print(f"   {preview}...")
 

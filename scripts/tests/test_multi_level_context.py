@@ -17,14 +17,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from app.config import get_settings
-from app.services.gemini import GeminiClient
-from app.services.context_store import ContextStore
-from app.services.user_profile import UserProfileStore
 from app.services.context import (
-    MultiLevelContextManager,
-    HybridSearchEngine,
     EpisodicMemoryStore,
+    HybridSearchEngine,
+    MultiLevelContextManager,
 )
+from app.services.context_store import ContextStore
+from app.services.gemini import GeminiClient
+from app.services.user_profile import UserProfileStore
 
 
 async def test_basic_assembly():
@@ -84,7 +84,7 @@ async def test_basic_assembly():
 
     print(f"\n✅ Context assembled in {context.assembly_time_ms:.1f}ms")
     print(f"   Total tokens: {context.total_tokens}/{settings.context_token_budget}")
-    print(f"\n📊 Level breakdown:")
+    print("\n📊 Level breakdown:")
     print(
         f"   - Immediate: {context.immediate.token_count} tokens, {len(context.immediate.messages)} messages"
     )
@@ -266,13 +266,13 @@ async def test_gemini_formatting():
     # Format for Gemini
     formatted = manager.format_for_gemini(context)
 
-    print(f"\n✅ Formatted context for Gemini:")
+    print("\n✅ Formatted context for Gemini:")
     print(f"   History messages: {len(formatted['history'])}")
     print(f"   System context: {len(formatted.get('system_context') or '')} chars")
     print(f"   Total tokens: {formatted['token_count']}")
 
     if formatted.get("system_context"):
-        print(f"\n📝 System context preview:")
+        print("\n📝 System context preview:")
         preview = formatted["system_context"][:200]
         print(f"   {preview}...")
 

@@ -170,19 +170,20 @@ def estimate_message_tokens(message: dict[str, Any]) -> int:
 
             # Media parts (rough estimate)
             elif "inline_data" in part or "file_data" in part:
-                # Images are typically ~250 tokens in Gemini
-                # Videos can be 500-1000 tokens
-                mime = part.get("inline_data", {}).get("mime_type", "") or part.get(
-                    "file_data", {}
-                ).get("mime_type", "")
-                if "image" in mime:
-                    total += 250
-                elif "video" in mime:
-                    total += 500
-                elif "audio" in mime:
-                    total += 300
+                # Images are typically ~258 tokens in Gemini
+                # File URIs (YouTube etc) are treated as ~100 tokens
+                if "file_data" in part:
+                     total += 100
                 else:
-                    total += 100  # Default
+                    mime = part.get("inline_data", {}).get("mime_type", "")
+                    if "image" in mime:
+                        total += 258
+                    elif "video" in mime:
+                        total += 500  # Inline video (rare)
+                    elif "audio" in mime:
+                        total += 300
+                    else:
+                        total += 100  # Default
 
     return total
 

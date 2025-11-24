@@ -13,10 +13,7 @@ import logging
 import time
 from typing import Any
 
-import asyncpg
-
 from app.infrastructure.db_utils import get_db_connection
-from app.infrastructure.query_converter import convert_query_to_postgres
 from app.repositories.fact_repository import UnifiedFactRepository
 from app.services import telemetry
 from app.services.redis_types import RedisLike
@@ -67,7 +64,7 @@ class UserProfileStoreAdapter:
             database_url: PostgreSQL connection string
             redis_client: Optional Redis client for caching
         """
-        self._database_url = database_url
+        self._database_url = str(database_url)
         self._fact_repo = UnifiedFactRepository(database_url)
         self._init_lock = asyncio.Lock()
         self._initialized = False
@@ -88,20 +85,28 @@ class UserProfileStoreAdapter:
             async with get_db_connection(self._database_url) as conn:
                 try:
                     await conn.execute(
-                        "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS pronouns TEXT"
+                        "ALTER TABLE user_profiles ADD COLUMN pronouns TEXT"
                     )
                     logger.info("Added pronouns column to user_profiles (adapter)")
-                except asyncpg.PostgresError:
-                    pass
+                except Exception as e:
+                    # Ignore if column already exists (Postgres or SQLite)
+                    if "duplicate" in str(e).lower() or "exists" in str(e).lower():
+                        pass
+                    else:
+                        logger.warning(f"Failed to add pronouns column: {e}")
+
                 try:
                     await conn.execute(
-                        "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS membership_status TEXT DEFAULT 'unknown'"
+                        "ALTER TABLE user_profiles ADD COLUMN membership_status TEXT DEFAULT 'unknown'"
                     )
                     logger.info(
                         "Added membership_status column to user_profiles (adapter)"
                     )
-                except asyncpg.PostgresError:
-                    pass
+                except Exception as e:
+                    if "duplicate" in str(e).lower() or "exists" in str(e).lower():
+                        pass
+                    else:
+                        logger.warning(f"Failed to add membership_status column: {e}")
 
             self._initialized = True
 
@@ -233,14 +238,11 @@ class UserProfileStoreAdapter:
         await self.init()
         now = int(time.time())
 
-        from app.infrastructure.db_utils import get_db_connection
-
         async with get_db_connection(self._database_url) as conn:
             # Try to get existing profile
-            query, params = convert_query_to_postgres(
-                "SELECT * FROM user_profiles WHERE user_id = $1 AND chat_id = $2",
-                (user_id, chat_id),
-            )
+            query = "SELECT * FROM user_profiles WHERE user_id = $1 AND chat_id = $2"
+            params = (user_id, chat_id)
+
             row = await conn.fetchrow(query, *params)
 
             if row:
@@ -267,13 +269,14 @@ class UserProfileStoreAdapter:
                 update_params.extend([user_id, chat_id])
                 where_param_idx = param_idx
 
+                # Construct UPDATE query
                 query = f"UPDATE user_profiles SET {', '.join(updates)} WHERE user_id = ${where_param_idx} AND chat_id = ${where_param_idx + 1}"
+
                 await conn.execute(query, *update_params)
 
-                query, params = convert_query_to_postgres(
-                    "SELECT * FROM user_profiles WHERE user_id = $1 AND chat_id = $2",
-                    (user_id, chat_id),
-                )
+                query = "SELECT * FROM user_profiles WHERE user_id = $1 AND chat_id = $2"
+                params = (user_id, chat_id)
+
                 row = await conn.fetchrow(query, *params)
                 if row:
                     profile = _augment_profile(dict(row))
@@ -282,31 +285,30 @@ class UserProfileStoreAdapter:
                     return profile
                 return {}
 
-            query, params = convert_query_to_postgres(
-                """
+            query = """
                 INSERT INTO user_profiles
                 (user_id, chat_id, display_name, username, pronouns, membership_status,
                  first_seen, last_seen, interaction_count, message_count,
                  profile_version, created_at, updated_at)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 RETURNING *
-                """,
-                (
-                    user_id,
-                    chat_id,
-                    display_name,
-                    username,
-                    None,
-                    "member",
-                    now,
-                    now,
-                    0,
-                    0,
-                    1,
-                    now,
-                    now,
-                ),
+                """
+            params = (
+                user_id,
+                chat_id,
+                display_name,
+                username,
+                None,
+                "member",
+                now,
+                now,
+                0,
+                0,
+                1,
+                now,
+                now,
             )
+
             row = await conn.fetchrow(query, *params)
             return _augment_profile(dict(row)) if row else {}
 
@@ -381,25 +383,23 @@ class UserProfileStoreAdapter:
         async with get_db_connection(self._database_url) as conn:
             if chat_id is None:
                 # Get user's most recent profile as base
-                query, params = convert_query_to_postgres(
-                    """
+                query = """
                     SELECT * FROM user_profiles
                     WHERE user_id = $1
                     ORDER BY last_seen DESC
                     LIMIT 1
-                    """,
-                    (user_id,),
-                )
+                """
+                params = (user_id,)
+
                 row = await conn.fetchrow(query, *params)
                 if not row:
                     return None
                 return _augment_profile(dict(row))
             else:
                 # Get specific profile
-                query, params = convert_query_to_postgres(
-                    "SELECT * FROM user_profiles WHERE user_id = $1 AND chat_id = $2",
-                    (user_id, chat_id),
-                )
+                query = "SELECT * FROM user_profiles WHERE user_id = $1 AND chat_id = $2"
+                params = (user_id, chat_id)
+
                 row = await conn.fetchrow(query, *params)
                 if row:
                     profile = _augment_profile(dict(row))
@@ -434,6 +434,7 @@ class UserProfileStoreAdapter:
             where_param_idx = param_idx
 
             query = f"UPDATE user_profiles SET {', '.join(updates)} WHERE user_id = ${where_param_idx} AND chat_id = ${where_param_idx + 1}"
+
             await conn.execute(query, *params)
 
     async def update_profile(self, user_id: int, chat_id: int, **kwargs: Any) -> None:
@@ -459,6 +460,7 @@ class UserProfileStoreAdapter:
 
         async with get_db_connection(self._database_url) as conn:
             query = f"UPDATE user_profiles SET {', '.join(columns)} WHERE user_id = ${where_param_idx} AND chat_id = ${where_param_idx + 1}"
+
             await conn.execute(query, *params)
 
     async def list_chat_users(
@@ -477,7 +479,6 @@ class UserProfileStoreAdapter:
             WHERE chat_id = $1
         """
         params: list[Any] = [chat_id]
-        param_idx = 2
 
         if not include_inactive:
             query += " AND membership_status IN ('member', 'administrator', 'creator')"
@@ -494,7 +495,7 @@ class UserProfileStoreAdapter:
         """
 
         if limit:
-            query = query.replace("$1", "$1").replace("LIMIT ?", f"LIMIT ${param_idx}")
+            query += " LIMIT $2"
             params.append(limit)
 
         async with get_db_connection(self._database_url) as conn:
@@ -505,14 +506,13 @@ class UserProfileStoreAdapter:
         self, user_id: int, chat_id: int, min_strength: float = 0.0
     ) -> list[dict[str, Any]]:
         """Get relationships for a user, sorted by strength."""
-        query, params = convert_query_to_postgres(
-            """
+        query = """
             SELECT * FROM user_relationships
             WHERE user_id = $1 AND chat_id = $2 AND strength >= $3
             ORDER BY strength DESC, interaction_count DESC
-            """,
-            (user_id, chat_id, min_strength),
-        )
+        """
+        params = (user_id, chat_id, min_strength)
+
         async with get_db_connection(self._database_url) as conn:
             rows = await conn.fetch(query, *params)
             return [dict(row) for row in rows]
@@ -521,8 +521,7 @@ class UserProfileStoreAdapter:
         """Return user IDs that require profile summarization."""
         await self.init()
 
-        query, params = convert_query_to_postgres(
-            """
+        query = """
             SELECT DISTINCT p.user_id
             FROM user_profiles p
             WHERE EXISTS (
@@ -537,9 +536,9 @@ class UserProfileStoreAdapter:
             )
             ORDER BY p.message_count DESC
             LIMIT $1
-            """,
-            (limit,),
-        )
+        """
+        params = (limit,)
+
         async with get_db_connection(self._database_url) as conn:
             rows = await conn.fetch(query, *params)
             return [row["user_id"] for row in rows]
@@ -549,14 +548,13 @@ class UserProfileStoreAdapter:
         await self.init()
         now = int(time.time())
 
-        query, params = convert_query_to_postgres(
-            """
+        query = """
             UPDATE user_profiles
             SET summary = $1, updated_at = $2
             WHERE user_id = $3
-            """,
-            (summary, now, user_id),
-        )
+        """
+        params = (summary, now, user_id)
+
         async with get_db_connection(self._database_url) as conn:
             await conn.execute(query, *params)
 
@@ -640,13 +638,12 @@ class UserProfileStoreAdapter:
 
         now = int(time.time())
 
-        query, params = convert_query_to_postgres(
-            """
+        query = """
             UPDATE user_profiles
             SET pronouns = $1, updated_at = $2
             WHERE user_id = $3 AND chat_id = $4
-            """,
-            (normalized, now, user_id, chat_id),
-        )
+        """
+        params = (normalized, now, user_id, chat_id)
+
         async with get_db_connection(self._database_url) as conn:
             await conn.execute(query, *params)

@@ -226,7 +226,7 @@ async def validate_migration(db_path: Path) -> bool:
 
         for table in required_tables:
             async with db.execute(
-                f"SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
                 (table,),
             ) as cursor:
                 if not await cursor.fetchone():
@@ -263,7 +263,7 @@ async def validate_migration(db_path: Path) -> bool:
 
         for index in required_indexes:
             async with db.execute(
-                f"SELECT name FROM sqlite_master WHERE type='index' AND name=?",
+                "SELECT name FROM sqlite_master WHERE type='index' AND name=?",
                 (index,),
             ) as cursor:
                 if not await cursor.fetchone():

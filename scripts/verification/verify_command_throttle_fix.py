@@ -19,7 +19,6 @@ Expected behavior:
 - /gryag@other_bot -> pass through (command for different bot)
 """
 
-import re
 
 
 # All commands registered to gryag

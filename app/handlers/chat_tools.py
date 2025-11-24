@@ -21,7 +21,6 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-import aiohttp
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import BufferedInputFile
 
@@ -43,9 +42,7 @@ from app.services.profile_photo_tool import get_user_profile_photo
 from app.services.search_tool import (
     FETCH_WEB_CONTENT_TOOL_DEFINITION,
     SEARCH_WEB_TOOL_DEFINITION,
-    analyze_image_results,
     analyze_text_results,
-    analyze_video_results,
     fetch_web_content_tool,
     search_web_tool,
 )
@@ -454,22 +451,18 @@ def build_tool_callbacks(
 
     # Web search (if enabled)
     if settings.enable_web_search:
-        # Create wrapper that downloads and sends images for image searches
         async def search_web_callback(params: dict[str, Any]) -> str:
-            """Search web and send images if applicable. Also analyzes results if enabled."""
-            # Log search_type for debugging
-            search_type = params.get("search_type", "text")
+            """Search web using Gemini Grounding with Search. Also analyzes results if enabled."""
             query = params.get("query", "")
             logger.info(
-                f"Web search called: search_type={search_type}, query={query[:100]}",
+                f"Web search called: query={query[:100]}",
                 extra={
                     "chat_id": chat_id,
-                    "search_type": search_type,
                     "query_length": len(query),
                 },
             )
 
-            # Call the original search_web_tool
+            # Call the search_web_tool with Gemini client
             result_json = await search_web_tool(params, gemini_client, api_key=None)
 
             try:
@@ -477,8 +470,6 @@ def build_tool_callbacks(
             except (json.JSONDecodeError, TypeError):
                 return result_json
 
-            # Check if this was an image search and we have bot/chat_id
-            search_type = params.get("search_type", "text")
             results = result.get("results", [])
 
             # Smart search analysis (if enabled)
@@ -489,245 +480,58 @@ def build_tool_callbacks(
                 )
 
                 try:
-                    if search_type in ("text", "news"):
-                        # Fetch content from top results
-                        fetched_content = []
-                        for idx in range(max_to_analyze):
-                            result_item = results[idx]
-                            url = result_item.get("url", "")
-                            if not url:
-                                continue
+                    # Fetch content from top results
+                    fetched_content = []
+                    for idx in range(max_to_analyze):
+                        result_item = results[idx]
+                        url = result_item.get("url", "")
+                        if not url:
+                            continue
 
-                            try:
-                                # Fetch content using fetch_web_content_tool
-                                content_params = {
-                                    "url": url,
-                                    "result_index": idx,
-                                    "search_query": query,
-                                }
-                                content_json = await fetch_web_content_tool(
-                                    content_params
-                                )
-                                content_data = json.loads(content_json)
+                        try:
+                            # Fetch content using fetch_web_content_tool
+                            content_params = {
+                                "url": url,
+                                "result_index": idx,
+                                "search_query": query,
+                            }
+                            content_json = await fetch_web_content_tool(content_params)
+                            content_data = json.loads(content_json)
 
-                                if "error" not in content_data:
-                                    fetched_content.append(
-                                        {
-                                            "url": url,
-                                            "title": content_data.get(
-                                                "title", result_item.get("title", "")
-                                            ),
-                                            "content": content_data.get("content", ""),
-                                        }
-                                    )
-                            except Exception as e:
-                                logger.warning(
-                                    f"Failed to fetch content from {url}: {e}"
-                                )
-                                # Fallback to using description from search result
+                            if "error" not in content_data:
                                 fetched_content.append(
                                     {
                                         "url": url,
-                                        "title": result_item.get("title", ""),
-                                        "content": result_item.get("description", ""),
+                                        "title": content_data.get(
+                                            "title", result_item.get("title", "")
+                                        ),
+                                        "content": content_data.get("content", ""),
                                     }
                                 )
-
-                        if fetched_content:
-                            analysis_result = await analyze_text_results(
-                                query=query,
-                                results=results,
-                                fetched_content=fetched_content,
-                                gemini_client=gemini_client,
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to fetch content from {url}: {e}"
+                            )
+                            # Fallback to using description from search result
+                            fetched_content.append(
+                                {
+                                    "url": url,
+                                    "title": result_item.get("title", ""),
+                                    "content": result_item.get("description", ""),
+                                }
                             )
 
-                    elif search_type == "videos":
-                        # Analyze video metadata
-                        videos_to_analyze = results[:max_to_analyze]
-                        if videos_to_analyze:
-                            analysis_result = await analyze_video_results(
-                                query=query,
-                                results=videos_to_analyze,
-                                gemini_client=gemini_client,
-                            )
-
-                    # Note: Image analysis happens after downloading (see below)
+                    if fetched_content:
+                        analysis_result = await analyze_text_results(
+                            query=query,
+                            results=results,
+                            fetched_content=fetched_content,
+                            gemini_client=gemini_client,
+                        )
 
                 except Exception as e:
                     logger.warning(f"Smart search analysis failed: {e}", exc_info=True)
                     # Continue without analysis - return original results
-
-            if (
-                search_type == "images"
-                and results
-                and bot is not None
-                and chat_id is not None
-            ):
-                # Default to 1 image unless explicitly specified
-                max_images = params.get("max_results", 1)
-                if isinstance(max_images, str):
-                    try:
-                        max_images = int(max_images)
-                    except (ValueError, TypeError):
-                        max_images = 1
-                max_images = max(1, min(max_images, 10))  # Clamp to 1-10
-
-                # Check if this is an NSFW search
-                query = params.get("query", "")
-                is_nsfw = _is_nsfw_query(query)
-
-                # Try to download and send images
-                send_options = {}
-                if thread_id is not None:
-                    send_options["message_thread_id"] = thread_id
-                if is_nsfw:
-                    send_options["has_spoiler"] = True
-
-                downloaded_images = []
-                failed_urls = []
-
-                # Download images first
-                for idx, item in enumerate(results):
-                    if len(downloaded_images) >= max_images:
-                        break
-
-                    image_url = item.get("url")
-                    if not image_url:
-                        continue
-
-                    try:
-                        # Download image with timeout
-                        async with aiohttp.ClientSession() as session:
-                            async with session.get(
-                                image_url, timeout=aiohttp.ClientTimeout(total=10)
-                            ) as resp:
-                                if resp.status == 200:
-                                    image_data = await resp.read()
-                                    if len(image_data) > 0:
-                                        downloaded_images.append(
-                                            (image_data, f"search_result_{idx}.jpg")
-                                        )
-                                        logger.debug(
-                                            f"Downloaded image {len(downloaded_images)}: {image_url[:50]}"
-                                        )
-                    except TimeoutError:
-                        logger.warning(f"Timeout downloading image: {image_url[:50]}")
-                        failed_urls.append(image_url)
-                    except Exception as e:
-                        logger.warning(f"Error downloading image from search: {e}")
-                        failed_urls.append(image_url)
-
-                # Send downloaded images as media group if multiple, or single photo if one
-                sent_count = 0
-                if downloaded_images:
-                    try:
-                        if len(downloaded_images) == 1:
-                            # Send single image without caption
-                            file = BufferedInputFile(
-                                downloaded_images[0][0],
-                                filename=downloaded_images[0][1],
-                            )
-                            await bot.send_photo(
-                                chat_id=chat_id,
-                                photo=file,
-                                caption=None,
-                                **send_options,
-                            )
-                            sent_count = 1
-                        else:
-                            # Send multiple images as media group (album) without captions
-                            from aiogram.types import InputMediaPhoto
-
-                            media_group = [
-                                InputMediaPhoto(
-                                    media=BufferedInputFile(
-                                        img_data, filename=filename
-                                    ),
-                                    caption=None,
-                                    has_spoiler=is_nsfw,
-                                )
-                                for img_data, filename in downloaded_images
-                            ]
-                            await bot.send_media_group(
-                                chat_id=chat_id,
-                                media=media_group,
-                                **send_options,
-                            )
-                            sent_count = len(downloaded_images)
-                    except TelegramBadRequest as e:
-                        logger.warning(f"Failed to send search images: {e}")
-                        if "thread not found" in str(e).lower() and thread_id:
-                            # Retry without thread_id
-                            try:
-                                if len(downloaded_images) == 1:
-                                    file = BufferedInputFile(
-                                        downloaded_images[0][0],
-                                        filename=downloaded_images[0][1],
-                                    )
-                                    await bot.send_photo(
-                                        chat_id=chat_id,
-                                        photo=file,
-                                        caption=None,
-                                        has_spoiler=is_nsfw,
-                                    )
-                                    sent_count = 1
-                                else:
-                                    from aiogram.types import InputMediaPhoto
-
-                                    media_group = [
-                                        InputMediaPhoto(
-                                            media=BufferedInputFile(
-                                                img_data, filename=filename
-                                            ),
-                                            caption=None,
-                                            has_spoiler=is_nsfw,
-                                        )
-                                        for img_data, filename in downloaded_images
-                                    ]
-                                    await bot.send_media_group(
-                                        chat_id=chat_id,
-                                        media=media_group,
-                                    )
-                                    sent_count = len(downloaded_images)
-                            except Exception as e2:
-                                logger.warning(
-                                    f"Failed to send search images on retry: {e2}"
-                                )
-
-                logger.info(
-                    f"Image search: sent {sent_count} images, failed {len(failed_urls)}"
-                )
-
-                # Return updated result with send status
-                result["_images_sent"] = sent_count
-                if failed_urls:
-                    result["_failed_urls"] = failed_urls[
-                        :3
-                    ]  # Keep first 3 for debugging
-
-                # Analyze images if smart search is enabled
-                if (
-                    settings.enable_smart_search_analysis
-                    and gemini_client
-                    and downloaded_images
-                ):
-                    try:
-                        max_to_analyze = min(
-                            settings.smart_search_max_results_to_analyze,
-                            len(downloaded_images),
-                        )
-                        images_to_analyze = downloaded_images[:max_to_analyze]
-                        results_to_analyze = results[:max_to_analyze]
-
-                        analysis_result = await analyze_image_results(
-                            query=query,
-                            results=results_to_analyze,
-                            downloaded_images=images_to_analyze,
-                            gemini_client=gemini_client,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Image analysis failed: {e}", exc_info=True)
-                        analysis_result = None
 
             # Add analysis results to response if available
             if analysis_result:

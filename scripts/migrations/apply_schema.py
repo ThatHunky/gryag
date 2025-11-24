@@ -21,7 +21,7 @@ def apply_schema():
     print()
 
     # Read schema
-    with open(schema_path, "r") as f:
+    with open(schema_path) as f:
         schema_sql = f.read()
 
     # Apply to database
@@ -43,7 +43,7 @@ def apply_schema():
         )
         tables = [row[0] for row in cursor.fetchall()]
 
-        print(f"✓ Schema applied successfully")
+        print("✓ Schema applied successfully")
         print(f"  Found {len(tables)} tables:")
         for table in tables:
             cursor.execute(f"SELECT COUNT(*) FROM {table}")

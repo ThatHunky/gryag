@@ -2,7 +2,6 @@
 """Check for specific messages from the screenshot."""
 
 import sqlite3
-from datetime import datetime
 
 conn = sqlite3.connect("gryag.db")
 cursor = conn.cursor()

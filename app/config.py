@@ -116,6 +116,9 @@ class Settings(BaseSettings):
 
     # Image generation configuration
     enable_image_generation: bool = Field(False, alias="ENABLE_IMAGE_GENERATION")
+    image_generation_provider: str = Field(
+        "gemini", alias="IMAGE_GENERATION_PROVIDER"
+    )  # Provider: "gemini" or "pollinations"
     image_generation_api_key: str | None = Field(
         None, alias="IMAGE_GENERATION_API_KEY"
     )  # Optional separate API key for image generation (defaults to gemini_api_key)
@@ -741,6 +744,18 @@ class Settings(BaseSettings):
         if v not in valid_formats:
             raise ValueError(f"log_format must be one of {valid_formats}, got '{v}'")
         return v
+
+    @field_validator("image_generation_provider")
+    @classmethod
+    def _validate_image_provider(cls, v: str) -> str:
+        """Validate image generation provider is valid."""
+        valid_providers = {"gemini", "pollinations"}
+        v_lower = v.lower()
+        if v_lower not in valid_providers:
+            raise ValueError(
+                f"image_generation_provider must be one of {valid_providers}, got '{v}'"
+            )
+        return v_lower
 
     @field_validator("semantic_weight", "keyword_weight", "temporal_weight")
     @classmethod

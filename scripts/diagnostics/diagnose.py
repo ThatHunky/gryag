@@ -9,11 +9,8 @@ Identifies common problems:
 - Resource optimization needs
 """
 
-import os
-import sys
 import subprocess
-import json
-import time
+import sys
 from pathlib import Path
 
 

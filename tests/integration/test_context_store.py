@@ -19,7 +19,7 @@ async def test_context_store_init(test_db):
 async def test_add_and_retrieve_turn(context_store):
     """Test adding and retrieving conversation turns."""
     # Add user turn
-    await context_store.add_turn(
+    await context_store.add_message(
         chat_id=123,
         thread_id=None,
         user_id=456,
@@ -31,7 +31,7 @@ async def test_add_and_retrieve_turn(context_store):
     )
 
     # Retrieve history
-    history = await context_store.recent(chat_id=123, thread_id=None, max_turns=10)
+    history = await context_store.recent(chat_id=123, thread_id=None, max_messages=10)
 
     assert len(history) == 1
     assert history[0]["role"] == "user"
@@ -55,7 +55,7 @@ async def test_recent_includes_speaker_header(context_store):
         is_bot=True,
     )
 
-    await context_store.add_turn(
+    await context_store.add_message(
         chat_id=555,
         thread_id=None,
         user_id=None,
@@ -71,7 +71,7 @@ async def test_recent_includes_speaker_header(context_store):
         sender=sender,
     )
 
-    history = await context_store.recent(chat_id=555, thread_id=None, max_turns=5)
+    history = await context_store.recent(chat_id=555, thread_id=None, max_messages=5)
     assert history, "Expected at least one history item"
     header_text = history[-1]["parts"][0]["text"]
     assert header_text.startswith("[speaker ")
@@ -126,7 +126,7 @@ async def test_quota_tracking(context_store):
 async def test_semantic_search(context_store, mock_gemini_client):
     """Test semantic search functionality."""
     # Add some turns with embeddings
-    await context_store.add_turn(
+    await context_store.add_message(
         chat_id=123,
         thread_id=None,
         user_id=456,
@@ -136,7 +136,7 @@ async def test_semantic_search(context_store, mock_gemini_client):
         embedding=[0.1, 0.2, 0.3],
     )
 
-    await context_store.add_turn(
+    await context_store.add_message(
         chat_id=123,
         thread_id=None,
         user_id=456,

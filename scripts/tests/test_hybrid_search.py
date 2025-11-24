@@ -9,6 +9,7 @@ Tests:
 """
 
 import asyncio
+
 import pytest
 
 pytestmark = pytest.mark.asyncio
@@ -19,8 +20,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from app.config import get_settings
-from app.services.gemini import GeminiClient
 from app.services.context.hybrid_search import HybridSearchEngine
+from app.services.gemini import GeminiClient
 
 
 async def test_keyword_search():

@@ -116,7 +116,7 @@ class MemoryRepository(Repository[UserMemory]):
             raise DatabaseError(f"Failed to add memory: {e}") from e
 
     async def get_memories_for_user(
-        self, user_id: int, chat_id: int
+        self, user_id: int, chat_id: int, limit: int = 100, offset: int = 0
     ) -> list[UserMemory]:
         """
         Retrieves all memories for a given user in a specific chat.
@@ -124,12 +124,14 @@ class MemoryRepository(Repository[UserMemory]):
         Args:
             user_id: The user's ID.
             chat_id: The chat's ID.
+            limit: Maximum number of memories to return.
+            offset: Number of memories to skip.
 
         Returns:
             A list of UserMemory objects.
         """
-        query = "SELECT * FROM user_memories WHERE user_id = $1 AND chat_id = $2 ORDER BY created_at ASC"
-        rows = await self._fetch_all(query, (user_id, chat_id))
+        query = "SELECT * FROM user_memories WHERE user_id = $1 AND chat_id = $2 ORDER BY created_at ASC LIMIT $3 OFFSET $4"
+        rows = await self._fetch_all(query, (user_id, chat_id, limit, offset))
         return [UserMemory(**row) for row in rows]
 
     async def get_memory_by_id(self, memory_id: int) -> UserMemory | None:

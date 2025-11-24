@@ -21,6 +21,7 @@ def settings():
     settings = MagicMock()
     settings.gemini_model = "gemini-2.0-flash-exp"
     settings.gemini_api_key = "test-key"
+    settings.episode_summarization_rate_limit = 5
     return settings
 
 

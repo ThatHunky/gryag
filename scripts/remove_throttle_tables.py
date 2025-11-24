@@ -1,8 +1,9 @@
 """Remove throttle-related database tables."""
 
 import asyncio
-import aiosqlite
 from pathlib import Path
+
+import aiosqlite
 
 
 async def migrate():

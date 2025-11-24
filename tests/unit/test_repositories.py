@@ -20,21 +20,26 @@ class TestRepository(Repository[TestEntity]):
     """Concrete repository for testing."""
 
     async def find_by_id(self, id: int):
-        row = await self._fetch_one("SELECT * FROM test_table WHERE id = ?", (id,))
+        row = await self._fetch_one("SELECT * FROM test_table WHERE id = $1", (id,))
         if not row:
             return None
         return TestEntity(row["id"], row["name"])
 
     async def save(self, entity: TestEntity):
         await self._execute(
-            "INSERT OR REPLACE INTO test_table (id, name) VALUES (?, ?)",
+            "INSERT INTO test_table (id, name) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET name = $2",
             (entity.id, entity.name),
         )
         return entity
 
     async def delete(self, id: int):
-        cursor = await self._execute("DELETE FROM test_table WHERE id = ?", (id,))
-        return cursor.rowcount > 0
+        status = await self._execute("DELETE FROM test_table WHERE id = $1", (id,))
+        # Parse rowcount from status string (e.g., "DELETE 1")
+        try:
+            rowcount = int(status.split()[-1])
+        except (ValueError, IndexError):
+            rowcount = 0
+        return rowcount > 0
 
 
 @pytest.mark.asyncio
@@ -43,13 +48,11 @@ async def test_repository_connection(test_db):
     repo = TestRepository(str(test_db))
 
     # Create test table
-    conn = await repo._get_connection()
-    await conn.execute("CREATE TABLE test_table (id INTEGER PRIMARY KEY, name TEXT)")
-    await conn.commit()
-    await conn.close()
+    async with repo._get_connection() as conn:
+        await conn.execute("CREATE TABLE test_table (id INTEGER PRIMARY KEY, name TEXT)")
 
     # Should not raise
-    assert repo.db_path == str(test_db)
+    assert repo.database_url == str(test_db)
 
 
 @pytest.mark.asyncio
@@ -58,16 +61,14 @@ async def test_repository_execute(test_db):
     repo = TestRepository(str(test_db))
 
     # Create test table
-    conn = await repo._get_connection()
-    await conn.execute("CREATE TABLE test_table (id INTEGER PRIMARY KEY, name TEXT)")
-    await conn.commit()
-    await conn.close()
+    async with repo._get_connection() as conn:
+        await conn.execute("CREATE TABLE test_table (id INTEGER PRIMARY KEY, name TEXT)")
 
     # Insert data
-    await repo._execute("INSERT INTO test_table (id, name) VALUES (?, ?)", (1, "test"))
+    await repo._execute("INSERT INTO test_table (id, name) VALUES ($1, $2)", (1, "test"))
 
     # Verify
-    row = await repo._fetch_one("SELECT * FROM test_table WHERE id = ?", (1,))
+    row = await repo._fetch_one("SELECT * FROM test_table WHERE id = $1", (1,))
     assert row["name"] == "test"
 
 
@@ -77,13 +78,11 @@ async def test_repository_fetch_one(test_db):
     repo = TestRepository(str(test_db))
 
     # Create and populate test table
-    conn = await repo._get_connection()
-    await conn.execute("CREATE TABLE test_table (id INTEGER PRIMARY KEY, name TEXT)")
-    await conn.execute("INSERT INTO test_table (id, name) VALUES (1, 'first')")
-    await conn.commit()
-    await conn.close()
+    async with repo._get_connection() as conn:
+        await conn.execute("CREATE TABLE test_table (id INTEGER PRIMARY KEY, name TEXT)")
+        await conn.execute("INSERT INTO test_table (id, name) VALUES (1, 'first')")
 
-    row = await repo._fetch_one("SELECT * FROM test_table WHERE id = ?", (1,))
+    row = await repo._fetch_one("SELECT * FROM test_table WHERE id = $1", (1,))
 
     assert row is not None
     assert row["name"] == "first"
@@ -95,12 +94,10 @@ async def test_repository_fetch_all(test_db):
     repo = TestRepository(str(test_db))
 
     # Create and populate test table
-    conn = await repo._get_connection()
-    await conn.execute("CREATE TABLE test_table (id INTEGER PRIMARY KEY, name TEXT)")
-    await conn.execute("INSERT INTO test_table (id, name) VALUES (1, 'first')")
-    await conn.execute("INSERT INTO test_table (id, name) VALUES (2, 'second')")
-    await conn.commit()
-    await conn.close()
+    async with repo._get_connection() as conn:
+        await conn.execute("CREATE TABLE test_table (id INTEGER PRIMARY KEY, name TEXT)")
+        await conn.execute("INSERT INTO test_table (id, name) VALUES (1, 'first')")
+        await conn.execute("INSERT INTO test_table (id, name) VALUES (2, 'second')")
 
     rows = await repo._fetch_all("SELECT * FROM test_table ORDER BY id")
 
@@ -115,10 +112,8 @@ async def test_repository_save_and_find(test_db):
     repo = TestRepository(str(test_db))
 
     # Create test table
-    conn = await repo._get_connection()
-    await conn.execute("CREATE TABLE test_table (id INTEGER PRIMARY KEY, name TEXT)")
-    await conn.commit()
-    await conn.close()
+    async with repo._get_connection() as conn:
+        await conn.execute("CREATE TABLE test_table (id INTEGER PRIMARY KEY, name TEXT)")
 
     # Save entity
     entity = TestEntity(id=42, name="Test Entity")
@@ -138,11 +133,9 @@ async def test_repository_delete(test_db):
     repo = TestRepository(str(test_db))
 
     # Create and populate test table
-    conn = await repo._get_connection()
-    await conn.execute("CREATE TABLE test_table (id INTEGER PRIMARY KEY, name TEXT)")
-    await conn.execute("INSERT INTO test_table (id, name) VALUES (1, 'to_delete')")
-    await conn.commit()
-    await conn.close()
+    async with repo._get_connection() as conn:
+        await conn.execute("CREATE TABLE test_table (id INTEGER PRIMARY KEY, name TEXT)")
+        await conn.execute("INSERT INTO test_table (id, name) VALUES (1, 'to_delete')")
 
     # Delete entity
     deleted = await repo.delete(1)

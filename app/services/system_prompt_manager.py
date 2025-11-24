@@ -9,7 +9,6 @@ from dataclasses import dataclass
 import asyncpg
 
 from app.infrastructure.db_utils import get_db_connection
-from app.infrastructure.query_converter import convert_query_to_postgres
 
 logger = logging.getLogger(__name__)
 
@@ -110,30 +109,26 @@ class SystemPromptManager:
 
         async with get_db_connection(self.database_url) as conn:
             if chat_id is not None:
-                query, params = convert_query_to_postgres(
-                    """
+                query = """
                     SELECT * FROM system_prompts
                     WHERE chat_id = $1 AND is_active = 1 AND scope = 'chat'
                     ORDER BY activated_at DESC
                     LIMIT 1
-                    """,
-                    (chat_id,),
-                )
+                    """
+                params = (chat_id,)
                 row = await conn.fetchrow(query, *params)
                 if row:
                     prompt = self._row_to_prompt(row)
                     self._cache_prompt(chat_id, prompt)
                     return prompt
 
-            query, params = convert_query_to_postgres(
-                """
+            query = """
                 SELECT * FROM system_prompts
                 WHERE chat_id IS NULL AND is_active = 1 AND scope = 'global'
                 ORDER BY activated_at DESC
                 LIMIT 1
-                """,
-                (),
-            )
+                """
+            params = ()
             row = await conn.fetchrow(query, *params)
             if row:
                 prompt = self._row_to_prompt(row)
@@ -180,49 +175,43 @@ class SystemPromptManager:
 
         async with get_db_connection(self.database_url) as conn:
             # Deactivate existing active prompts for this scope/chat
-            query, params = convert_query_to_postgres(
-                """
+            query = """
                 UPDATE system_prompts
                 SET is_active = 0, updated_at = $1
                 WHERE chat_id IS NOT DISTINCT FROM $2 AND scope = $3 AND is_active = 1
-                """,
-                (now, chat_id, scope),
-            )
+                """
+            params = (now, chat_id, scope)
             await conn.execute(query, *params)
 
             # Get next version number
-            query, params = convert_query_to_postgres(
-                """
+            query = """
                 SELECT COALESCE(MAX(version), 0) + 1 as next_version
                 FROM system_prompts
                 WHERE chat_id IS NOT DISTINCT FROM $1 AND scope = $2
-                """,
-                (chat_id, scope),
-            )
+                """
+            params = (chat_id, scope)
             row = await conn.fetchrow(query, *params)
             next_version = row["next_version"] if row else 1
 
             # Insert new active prompt
-            query, params = convert_query_to_postgres(
-                """
+            query = """
                 INSERT INTO system_prompts (
                     admin_id, chat_id, scope, prompt_text,
                     is_active, version, notes,
                     created_at, updated_at, activated_at
                 ) VALUES ($1, $2, $3, $4, 1, $5, $6, $7, $8, $9)
                 RETURNING id
-                """,
-                (
-                    admin_id,
-                    chat_id,
-                    scope,
-                    prompt_text,
-                    next_version,
-                    notes,
-                    now,
-                    now,
-                    now,
-                ),
+                """
+            params = (
+                admin_id,
+                chat_id,
+                scope,
+                prompt_text,
+                next_version,
+                notes,
+                now,
+                now,
+                now,
             )
             row = await conn.fetchrow(query, *params)
             prompt_id = row["id"] if row else 0
@@ -233,9 +222,8 @@ class SystemPromptManager:
             )
 
             # Fetch and return created prompt
-            query, params = convert_query_to_postgres(
-                "SELECT * FROM system_prompts WHERE id = $1", (prompt_id,)
-            )
+            query = "SELECT * FROM system_prompts WHERE id = $1"
+            params = (prompt_id,)
             row = await conn.fetchrow(query, *params)
             if not row:
                 raise RuntimeError(f"Failed to fetch created prompt {prompt_id}")
@@ -267,14 +255,12 @@ class SystemPromptManager:
         now = int(time.time())
 
         async with get_db_connection(self.database_url) as conn:
-            query, params = convert_query_to_postgres(
-                """
+            query = """
                 UPDATE system_prompts
                 SET is_active = 0, updated_at = $1
                 WHERE chat_id IS NOT DISTINCT FROM $2 AND scope = $3 AND is_active = 1
-                """,
-                (now, chat_id, scope),
-            )
+                """
+            params = (now, chat_id, scope)
             result = await conn.execute(query, *params)
             count = int(result.split()[-1]) if result.split()[-1].isdigit() else 0
 
@@ -306,15 +292,13 @@ class SystemPromptManager:
         if scope == "global":
             chat_id = None
 
-        query, params = convert_query_to_postgres(
-            """
+        query = """
             SELECT * FROM system_prompts
             WHERE chat_id IS NOT DISTINCT FROM $1 AND scope = $2
             ORDER BY version DESC
             LIMIT $3
-            """,
-            (chat_id, scope, limit),
-        )
+            """
+        params = (chat_id, scope, limit)
         async with get_db_connection(self.database_url) as conn:
             rows = await conn.fetch(query, *params)
             return [self._row_to_prompt(row) for row in rows]
@@ -344,38 +328,32 @@ class SystemPromptManager:
 
         async with get_db_connection(self.database_url) as conn:
             # Find the target version
-            query, params = convert_query_to_postgres(
-                """
+            query = """
                 SELECT * FROM system_prompts
                 WHERE chat_id IS NOT DISTINCT FROM $1 AND scope = $2 AND version = $3
-                """,
-                (chat_id, scope, version),
-            )
+                """
+            params = (chat_id, scope, version)
             target_row = await conn.fetchrow(query, *params)
 
             if not target_row:
                 return None
 
             # Deactivate current active prompts
-            query, params = convert_query_to_postgres(
-                """
+            query = """
                 UPDATE system_prompts
                 SET is_active = 0, updated_at = $1
                 WHERE chat_id IS NOT DISTINCT FROM $2 AND scope = $3 AND is_active = 1
-                """,
-                (now, chat_id, scope),
-            )
+                """
+            params = (now, chat_id, scope)
             await conn.execute(query, *params)
 
             # Activate target version
-            query, params = convert_query_to_postgres(
-                """
+            query = """
                 UPDATE system_prompts
                 SET is_active = 1, updated_at = $1, activated_at = $2
                 WHERE id = $3
-                """,
-                (now, now, target_row["id"]),
-            )
+                """
+            params = (now, now, target_row["id"])
             await conn.execute(query, *params)
 
             logger.info(
@@ -384,9 +362,8 @@ class SystemPromptManager:
             )
 
             # Return updated prompt
-            query, params = convert_query_to_postgres(
-                "SELECT * FROM system_prompts WHERE id = $1", (target_row["id"],)
-            )
+            query = "SELECT * FROM system_prompts WHERE id = $1"
+            params = (target_row["id"],)
             row = await conn.fetchrow(query, *params)
             if not row:
                 raise RuntimeError(f"Failed to fetch prompt {target_row['id']}")

@@ -1,6 +1,7 @@
 """Test script for Phase 5.1 memory tools implementation."""
 
 import asyncio
+
 import pytest
 
 pytestmark = pytest.mark.asyncio
@@ -12,13 +13,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from app.config import Settings
-from app.services.user_profile import UserProfileStore
 from app.services.tools import (
-    remember_fact_tool,
-    recall_facts_tool,
-    update_fact_tool,
     forget_fact_tool,
+    recall_facts_tool,
+    remember_fact_tool,
+    update_fact_tool,
 )
+from app.services.user_profile import UserProfileStore
 
 
 async def test_memory_tools():
@@ -27,14 +28,14 @@ async def test_memory_tools():
 
     # Initialize settings
     settings = Settings()
-    print(f"✓ Settings loaded")
+    print("✓ Settings loaded")
     print(f"  - enable_tool_based_memory: {settings.enable_tool_based_memory}")
     print(f"  - memory_tool_async: {settings.memory_tool_async}\n")
 
     # Initialize profile store
     profile_store = UserProfileStore(settings.db_path)
     await profile_store.init()
-    print(f"✓ Profile store initialized\n")
+    print("✓ Profile store initialized\n")
 
     # Test user and chat
     test_user_id = 999999
@@ -275,8 +276,8 @@ async def test_memory_tools():
     print("🎉 All tests passed!")
     print("=" * 60)
     print("\nPhase 5.1+ Memory Tools are working correctly!")
-    print(f"  - 4 tools implemented: remember, recall, update, forget")
-    print(f"  - 12 tests passed")
+    print("  - 4 tools implemented: remember, recall, update, forget")
+    print("  - 12 tests passed")
     print("\nNext steps:")
     print("  1. Integration testing with real Gemini calls")
     print("  2. Test in Telegram with real conversations")

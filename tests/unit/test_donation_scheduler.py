@@ -25,11 +25,11 @@ def mock_context_store():
 
 
 @pytest.fixture
-def donation_scheduler(mock_bot, mock_context_store, tmp_path: Path):
+def donation_scheduler(mock_bot, mock_context_store, test_db):
     """Create a donation scheduler instance with test configuration."""
     return DonationScheduler(
         bot=mock_bot,
-        db_path=tmp_path / "test.db",
+        db_path=test_db,
         context_store=mock_context_store,
         target_chat_ids=[-100123456789, -100987654321, -100555555555],
         ignored_chat_ids=[-100987654321],  # Ignore second chat
@@ -46,7 +46,7 @@ def test_ignored_chat_ids_empty_list():
     """Test initialization with no ignored chats."""
     scheduler = DonationScheduler(
         bot=AsyncMock(),
-        db_path=Path("test.db"),
+        db_path="postgresql://user:pass@localhost/db",
         context_store=MagicMock(),
         target_chat_ids=[],
         ignored_chat_ids=None,

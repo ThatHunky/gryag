@@ -1,51 +1,48 @@
 """
-Web search tool using DuckDuckGo Search.
+Web search tool using Gemini's Grounding with Search.
 
-This provides a function tool interface to DuckDuckGo search,
-allowing the bot to search for text, images, videos, and news.
+This provides a function tool interface to Google Search via Gemini's
+native grounding capability, allowing the bot to search for current information.
 Also provides content fetching for detailed page content.
 """
 
-import asyncio
-import base64
 import json
 import logging
 import re
 from html.parser import HTMLParser
-from typing import Any, Literal
+from typing import Any
 from urllib.parse import urlparse
 
 import aiohttp
-from ddgs import DDGS
+from google.genai import types
 
 logger = logging.getLogger(__name__)
-
-SearchType = Literal["text", "images", "videos", "news"]
 
 
 async def search_web_tool(
     params: dict[str, Any],
-    gemini_client: Any = None,  # Not needed for DDG, kept for compatibility
-    api_key: str | None = None,  # Not needed for DDG, kept for compatibility
+    gemini_client: Any,
+    api_key: str | None = None,  # Not used, kept for compatibility
 ) -> str:
     """
-    Search the web using DuckDuckGo.
+    Search the web using Gemini's Grounding with Search.
 
     Args:
-        params: Tool parameters containing 'query' and optional 'search_type'
-        gemini_client: Unused (kept for compatibility)
+        params: Tool parameters containing 'query'
+        gemini_client: GeminiClient instance for making API calls
         api_key: Unused (kept for compatibility)
 
     Returns:
         JSON string with search results or error message
     """
+    if not gemini_client:
+        return json.dumps(
+            {"error": "Gemini client is required for search", "results": []}
+        )
+
     query = (params or {}).get("query", "")
     if not isinstance(query, str) or not query.strip():
         return json.dumps({"error": "Empty query", "results": []})
-
-    search_type: SearchType = params.get("search_type", "text")
-    if search_type not in ("text", "images", "videos", "news"):
-        search_type = "text"
 
     max_results = params.get("max_results", 5)
     try:
@@ -55,127 +52,120 @@ async def search_web_tool(
     max_results = max(1, min(max_results, 10))
 
     try:
-        # Run search in thread pool since DDGS is synchronous
-        results = await asyncio.to_thread(_search_sync, query, search_type, max_results)
+        # Use Gemini's Grounding with Search by making a separate API call
+        # with google_search tool enabled
+        client, _ = await gemini_client._acquire_client()
+
+        # Create config with google_search tool
+        config = types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+            safety_settings=gemini_client._safety_settings,
+        )
+
+        # Make the search request
+        response = await client.aio.models.generate_content(
+            model=gemini_client._model_name,
+            contents=[{"role": "user", "parts": [{"text": query}]}],
+            config=config,
+        )
+
+        # Extract text response
+        text_response = gemini_client._extract_text(response)
+
+        # Extract grounding metadata
+        results = _extract_grounding_results(response, max_results)
 
         return json.dumps(
             {
                 "query": query,
-                "search_type": search_type,
                 "results": results,
                 "count": len(results),
+                "answer": text_response,  # Include the synthesized answer
             }
         )
 
     except Exception as e:
-        logger.exception(f"DuckDuckGo search failed for query: {query}")
+        logger.exception(f"Google Search grounding failed for query: {query}")
         return json.dumps(
             {
                 "error": f"Search failed: {str(e)}",
                 "query": query,
-                "search_type": search_type,
                 "results": [],
             }
         )
 
 
-def _search_sync(query: str, search_type: SearchType, max_results: int) -> list[dict]:
-    """Synchronous search wrapper for all search types."""
-    with DDGS() as ddgs:
-        if search_type == "text":
-            return _search_text(ddgs, query, max_results)
-        elif search_type == "images":
-            return _search_images(ddgs, query, max_results)
-        elif search_type == "videos":
-            return _search_videos(ddgs, query, max_results)
-        elif search_type == "news":
-            return _search_news(ddgs, query, max_results)
-        else:
-            return []
+def _extract_grounding_results(response: Any, max_results: int) -> list[dict]:
+    """
+    Extract search results from Gemini's grounding metadata.
 
+    Args:
+        response: Gemini API response object
+        max_results: Maximum number of results to return
 
-def _search_text(ddgs: DDGS, query: str, max_results: int) -> list[dict]:
-    """Search for text results."""
+    Returns:
+        List of result dictionaries with title, url, description
+    """
     results = []
+
     try:
-        raw_results = ddgs.text(query, max_results=max_results, safesearch="moderate")
-        for idx, result in enumerate(raw_results[:max_results]):
-            url = result.get("href", "")
-            results.append(
-                {
-                    "index": idx,
-                    "title": result.get("title", ""),
-                    "url": url,
-                    "description": result.get("body", ""),
-                }
-            )
+        # Access grounding metadata from response
+        candidates = getattr(response, "candidates", None) or []
+        for candidate in candidates:
+            # Check for grounding metadata
+            grounding_metadata = getattr(candidate, "grounding_metadata", None)
+            if not grounding_metadata:
+                continue
+
+            # Extract web search queries
+            web_search_queries = getattr(
+                grounding_metadata, "web_search_queries", None
+            ) or []
+
+            # Extract grounding chunks (search results)
+            grounding_chunks = getattr(
+                grounding_metadata, "grounding_chunks", None
+            ) or []
+
+            # Process grounding chunks to extract URLs and titles
+            seen_urls = set()
+            for chunk in grounding_chunks[:max_results]:
+                # Try to get web URI
+                web = getattr(chunk, "web", None)
+                if not web:
+                    continue
+
+                uri = getattr(web, "uri", None)
+                if not uri or uri in seen_urls:
+                    continue
+                seen_urls.add(uri)
+
+                # Try to get title from chunk
+                title = getattr(chunk, "title", None) or ""
+
+                # Try to get text/snippet
+                text = getattr(chunk, "text", None) or ""
+                if not text:
+                    # Try alternative field names
+                    text = getattr(chunk, "content", None) or ""
+
+                results.append(
+                    {
+                        "index": len(results),
+                        "title": title or uri,
+                        "url": uri,
+                        "description": text[:500] if text else "",  # Limit description length
+                    }
+                )
+
+                if len(results) >= max_results:
+                    break
+
     except Exception as e:
-        logger.warning(f"Text search error: {e}")
-    return results
+        logger.warning(f"Failed to extract grounding metadata: {e}")
 
-
-def _search_images(ddgs: DDGS, query: str, max_results: int) -> list[dict]:
-    """Search for image results."""
-    results = []
-    try:
-        raw_results = ddgs.images(query, max_results=max_results, safesearch="moderate")
-        for idx, result in enumerate(raw_results[:max_results]):
-            results.append(
-                {
-                    "index": idx,
-                    "title": result.get("title", ""),
-                    "url": result.get("image", ""),
-                    "thumbnail": result.get("thumbnail", ""),
-                    "source": result.get("source", ""),
-                    "width": result.get("width"),
-                    "height": result.get("height"),
-                }
-            )
-    except Exception as e:
-        logger.warning(f"Image search error: {e}")
-    return results
-
-
-def _search_videos(ddgs: DDGS, query: str, max_results: int) -> list[dict]:
-    """Search for video results."""
-    results = []
-    try:
-        raw_results = ddgs.videos(query, max_results=max_results, safesearch="moderate")
-        for idx, result in enumerate(raw_results[:max_results]):
-            results.append(
-                {
-                    "index": idx,
-                    "title": result.get("title", ""),
-                    "url": result.get("content", ""),
-                    "description": result.get("description", ""),
-                    "publisher": result.get("publisher", ""),
-                    "duration": result.get("duration", ""),
-                    "published": result.get("published", ""),
-                }
-            )
-    except Exception as e:
-        logger.warning(f"Video search error: {e}")
-    return results
-
-
-def _search_news(ddgs: DDGS, query: str, max_results: int) -> list[dict]:
-    """Search for news results."""
-    results = []
-    try:
-        raw_results = ddgs.news(query, max_results=max_results, safesearch="moderate")
-        for idx, result in enumerate(raw_results[:max_results]):
-            results.append(
-                {
-                    "index": idx,
-                    "title": result.get("title", ""),
-                    "url": result.get("url", ""),
-                    "description": result.get("body", ""),
-                    "source": result.get("source", ""),
-                    "date": result.get("date", ""),
-                }
-            )
-    except Exception as e:
-        logger.warning(f"News search error: {e}")
+    # If no results from grounding metadata, return empty list
+    # The answer text will still be available in the response
     return results
 
 
@@ -377,7 +367,7 @@ async def analyze_text_results(
     gemini_client: Any,
 ) -> dict[str, Any]:
     """
-    Analyze text/news search results using LLM.
+    Analyze text search results using LLM.
 
     Args:
         query: Original search query
@@ -481,242 +471,19 @@ Format your response as JSON:
         }
 
 
-async def analyze_image_results(
-    query: str,
-    results: list[dict],
-    downloaded_images: list[tuple[bytes, str]],
-    gemini_client: Any,
-) -> dict[str, Any]:
-    """
-    Analyze image search results using vision model.
-
-    Args:
-        query: Original search query
-        results: Original search results
-        downloaded_images: List of (image_data, filename) tuples
-        gemini_client: Gemini client with vision support
-
-    Returns:
-        Dict with summary, descriptions, and selected indices
-    """
-    if not downloaded_images:
-        return {
-            "summary": "",
-            "descriptions": [],
-            "selected_indices": [],
-        }
-
-    # Analyze each image
-    descriptions = []
-    selected_indices = []
-
-    for idx, (image_data, filename) in enumerate(downloaded_images):
-        try:
-            # Convert image to base64
-            image_b64 = base64.b64encode(image_data).decode("utf-8")
-
-            # Determine MIME type from filename or default to jpeg
-            mime_type = "image/jpeg"
-            if filename.lower().endswith(".png"):
-                mime_type = "image/png"
-            elif filename.lower().endswith(".gif"):
-                mime_type = "image/gif"
-            elif filename.lower().endswith(".webp"):
-                mime_type = "image/webp"
-
-            # Build analysis prompt
-            prompt = f"""Analyze this image in the context of the search query: "{query}"
-
-Describe what you see and how relevant it is to the query. Be concise (1-2 sentences)."""
-
-            # Use Gemini to analyze image
-            response = await gemini_client.generate(
-                system_prompt="You are a helpful assistant that analyzes images and describes their relevance to search queries.",
-                history=None,
-                user_parts=[
-                    {
-                        "inline_data": {
-                            "mime_type": mime_type,
-                            "data": image_b64,
-                        }
-                    },
-                    {"text": prompt},
-                ],
-            )
-
-            description = response.get("text", "").strip()
-            descriptions.append(
-                {
-                    "index": idx,
-                    "description": description,
-                    "url": results[idx].get("url", "") if idx < len(results) else "",
-                }
-            )
-
-            # Consider image relevant if description is not empty
-            if description:
-                selected_indices.append(idx)
-
-        except Exception as e:
-            logger.warning(f"Failed to analyze image {idx}: {e}")
-            descriptions.append(
-                {
-                    "index": idx,
-                    "description": "",
-                    "url": results[idx].get("url", "") if idx < len(results) else "",
-                }
-            )
-
-    # Generate overall summary
-    if descriptions:
-        summary_prompt = f"""Based on the analyzed images for query "{query}", provide a brief summary (1-2 sentences) of what was found."""
-
-        try:
-            desc_text = "\n".join(
-                [
-                    f"Image {d['index']}: {d['description']}"
-                    for d in descriptions
-                    if d["description"]
-                ]
-            )
-            response = await gemini_client.generate(
-                system_prompt="You are a helpful assistant that summarizes image search results.",
-                history=None,
-                user_parts=[
-                    {"text": f"{summary_prompt}\n\nImage descriptions:\n{desc_text}"}
-                ],
-            )
-            summary = response.get("text", "").strip()
-        except Exception as e:
-            logger.warning(f"Failed to generate image summary: {e}")
-            summary = f"Found {len(selected_indices)} relevant images for '{query}'."
-    else:
-        summary = ""
-
-    return {
-        "summary": summary,
-        "descriptions": descriptions,
-        "selected_indices": selected_indices,
-    }
-
-
-async def analyze_video_results(
-    query: str,
-    results: list[dict],
-    gemini_client: Any,
-) -> dict[str, Any]:
-    """
-    Analyze video search results using LLM.
-
-    Args:
-        query: Original search query
-        results: Video search results with metadata
-        gemini_client: Gemini client for analysis
-
-    Returns:
-        Dict with summary, key_points, and selected indices
-    """
-    if not results:
-        return {
-            "summary": "",
-            "key_points": [],
-            "selected_indices": [],
-        }
-
-    # Build analysis prompt from video metadata
-    video_info = []
-    for idx, result in enumerate(results):
-        title = result.get("title", "")
-        description = result.get("description", "")
-        publisher = result.get("publisher", "")
-        duration = result.get("duration", "")
-        url = result.get("url", "")
-
-        info = f"Video {idx + 1}:\n"
-        if title:
-            info += f"Title: {title}\n"
-        if description:
-            info += f"Description: {description[:300]}\n"
-        if publisher:
-            info += f"Publisher: {publisher}\n"
-        if duration:
-            info += f"Duration: {duration}\n"
-        if url:
-            info += f"URL: {url}\n"
-        video_info.append(info)
-
-    prompt = f"""Analyze the following video search results for the query: "{query}"
-
-{chr(10).join(video_info)}
-
-Provide:
-1. A concise summary (2-3 sentences) of the most relevant videos
-2. 3-5 key points about what these videos cover
-3. Which videos (indices) are most relevant to the query
-
-Format your response as JSON:
-{{
-    "summary": "brief summary here",
-    "key_points": ["point 1", "point 2", ...],
-    "relevant_indices": [0, 1, ...]  // indices of most relevant videos
-}}"""
-
-    try:
-        response = await gemini_client.generate(
-            system_prompt="You are a helpful assistant that analyzes video search results and extracts relevant information.",
-            history=None,
-            user_parts=[{"text": prompt}],
-        )
-
-        text_response = response.get("text", "").strip()
-
-        # Try to parse JSON from response
-        try:
-            json_match = re.search(r"\{[^{}]*\}", text_response, re.DOTALL)
-            if json_match:
-                analysis = json.loads(json_match.group(0))
-            else:
-                analysis = json.loads(text_response)
-        except (json.JSONDecodeError, ValueError):
-            # Fallback: treat entire response as summary
-            analysis = {
-                "summary": text_response[:500],
-                "key_points": [],
-                "relevant_indices": list(range(len(results))),
-            }
-
-        return {
-            "summary": analysis.get("summary", ""),
-            "key_points": analysis.get("key_points", []),
-            "selected_indices": analysis.get(
-                "relevant_indices", list(range(len(results)))
-            ),
-        }
-    except Exception as e:
-        logger.warning(f"Failed to analyze video results: {e}")
-        return {
-            "summary": "",
-            "key_points": [],
-            "selected_indices": list(range(len(results))),
-        }
-
-
 SEARCH_WEB_TOOL_DEFINITION = {
     "function_declarations": [
         {
             "name": "search_web",
             "description": (
-                "Шукати інформацію в інтернеті через DuckDuckGo — ОСНОВНИЙ інструмент для пошуку зображень, відео і новин. "
-                "ЗАВЖДИ використовуй search_type='images' для пошуку зображень. Це ПЕРШОЧЕРГОВО перед generate_image. "
-                "Генеруй зображення ЛИШЕ якщо користувач явно просить створити нове. "
-                "КРИТИЧНО: Коли користувач питає про НОВИНИ (новини, атака, події, сьогодні, сьогоднішня, останні події) — ЗАВЖДИ використовуй search_type='news'. "
-                "Приклади: 'знайди новини про атаку', 'що сталося сьогодні', 'останні події' → search_type='news'. "
-                "Підтримує пошук тексту, зображень, відео та новин. "
-                "Повертає результати з індексами (0, 1, 2...). Використовуй fetch_web_content для отримання детального контенту з конкретних результатів. "
-                "Primary tool for finding images/videos/news via DuckDuckGo. Use search_type='images' for image search. ALWAYS try this BEFORE generating new images. "
-                "CRITICAL: When user asks about NEWS (новини, атака, події, сьогодні, today, recent events, latest news) — ALWAYS use search_type='news'. "
-                "Examples: 'find news about attack', 'what happened today', 'latest events' → search_type='news'. "
-                "Only generate when user explicitly asks to create new image. Returns results with indices (0, 1, 2...). Use fetch_web_content to get detailed content from specific results."
+                "Шукати актуальну інформацію в інтернеті через Google Search (Gemini Grounding). "
+                "Використовуй для пошуку поточної інформації, новин, фактів та даних після середини 2024 року. "
+                "Повертає синтезовану відповідь на основі результатів пошуку та список джерел з індексами (0, 1, 2...). "
+                "Використовуй fetch_web_content для отримання детального контенту з конкретних результатів. "
+                "Search the web for current information via Google Search (Gemini Grounding). "
+                "Use for finding up-to-date information, news, facts, and data after mid-2024. "
+                "Returns a synthesized answer based on search results and a list of sources with indices (0, 1, 2...). "
+                "Use fetch_web_content to get detailed content from specific results."
             ),
             "parameters": {
                 "type": "object",
@@ -724,16 +491,6 @@ SEARCH_WEB_TOOL_DEFINITION = {
                     "query": {
                         "type": "string",
                         "description": "Пошуковий запит / Search query",
-                    },
-                    "search_type": {
-                        "type": "string",
-                        "description": (
-                            "Тип пошуку: 'text' (за замовчуванням), 'images', 'videos', 'news' / "
-                            "Search type: 'text' (default), 'images', 'videos', 'news'. "
-                            "КРИТИЧНО: Використовуй 'news' для новин, атак, подій, сьогоднішніх подій / "
-                            "CRITICAL: Use 'news' for news, attacks, events, today's events"
-                        ),
-                        "enum": ["text", "images", "videos", "news"],
                     },
                     "max_results": {
                         "type": "integer",

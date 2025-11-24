@@ -366,7 +366,12 @@ class FactQualityManager:
             fact2_id=best_match.get("id"),
             similarity=best_similarity,
             are_duplicates=best_similarity >= self.DUPLICATE_THRESHOLD,
-            are_conflicting=False,  # TODO: Implement conflict detection
+            are_conflicting=(
+                best_similarity >= self.CONFLICT_THRESHOLD
+                and best_similarity < self.DUPLICATE_THRESHOLD
+                and new_fact["fact_key"] == best_match["fact_key"]
+                and new_fact["fact_value"] != best_match["fact_value"]
+            ),
         )
 
         return (comparison, best_match)
@@ -462,10 +467,41 @@ class FactQualityManager:
             return
 
         try:
-            # TODO: Insert into fact_quality_metrics table
-            # This requires database integration which we'll implement when
-            # connecting to the actual ContextStore
-            pass
+            # Insert into fact_quality_metrics table
+            # We use the context_store (passed as db_connection) to execute the query
+            if hasattr(self.db_connection, "execute"):
+                # It's likely a ContextStore or similar wrapper
+                # We need to check if it exposes a way to execute raw queries or if we need to use get_db_connection
+                # Based on ContextStore implementation, it has _database_url but no direct execute method exposed publicly
+                # However, FactQualityManager init says: db_connection=context_store
+
+                # Let's try to use the db_utils directly if we have the URL, or use the store's connection context
+                # The ContextStore has _database_url.
+
+                db_url = getattr(self.db_connection, "_database_url", None)
+                if db_url:
+                    from app.infrastructure.db_utils import get_db_connection
+
+                    async with get_db_connection(db_url) as conn:
+                        await conn.execute(
+                            """
+                            INSERT INTO fact_quality_metrics
+                            (user_id, chat_id, metric_type, fact_key, similarity_score, 
+                             details, created_at)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                            """,
+                            user_id,
+                            chat_id,
+                            "duplicate_detected",
+                            new_fact["fact_key"],
+                            similarity,
+                            json.dumps({
+                                "new_value": new_fact["fact_value"],
+                                "existing_id": existing_fact.get("id"),
+                                "existing_value": existing_fact.get("fact_value")
+                            }),
+                            int(time.time())
+                        )
         except Exception as e:
             LOGGER.error(f"Failed to log duplicate: {e}")
 

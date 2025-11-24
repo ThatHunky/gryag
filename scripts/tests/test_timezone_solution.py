@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Test the complete timezone solution including fallback."""
 
-from datetime import datetime
 import datetime as dt
+from datetime import datetime
 
 
 def test_timezone_primary():

@@ -307,22 +307,39 @@ async def main() -> None:
     if settings.enable_image_generation:
         from app.services.image_generation import ImageGenerationService
 
-        # Use separate API key if provided, otherwise fall back to main Gemini key
-        image_api_key = settings.image_generation_api_key or settings.gemini_api_key
+        provider = settings.image_generation_provider
+        image_api_key = None
+
+        if provider == "gemini":
+            # Use separate API key if provided, otherwise fall back to main Gemini key
+            image_api_key = settings.image_generation_api_key or settings.gemini_api_key
+        elif provider == "pollinations":
+            # Pollinations.ai doesn't require an API key
+            image_api_key = None
+        else:
+            logging.error(
+                f"Unknown image generation provider: {provider}. "
+                "Must be 'gemini' or 'pollinations'"
+            )
+            raise ValueError(f"Invalid image generation provider: {provider}")
 
         image_gen_service = ImageGenerationService(
+            provider=provider,
             api_key=image_api_key,
             database_url=settings.database_url,
             daily_limit=settings.image_generation_daily_limit,
             admin_user_ids=settings.admin_user_ids_list,
         )
 
-        using_separate_key = settings.image_generation_api_key is not None
+        using_separate_key = (
+            provider == "gemini" and settings.image_generation_api_key is not None
+        )
         logging.info(
             "Image generation service initialized",
             extra={
+                "provider": provider,
                 "daily_limit": settings.image_generation_daily_limit,
-                "model": "gemini-2.5-flash-image",
+                "model": "gemini-2.5-flash-image" if provider == "gemini" else "pollinations.ai",
                 "separate_api_key": using_separate_key,
             },
         )
@@ -332,9 +349,9 @@ async def main() -> None:
     # Log web search configuration
     if settings.enable_web_search:
         logging.info(
-            "Web search enabled (using DuckDuckGo)",
+            "Web search enabled (using Gemini Grounding with Google Search)",
             extra={
-                "search_provider": "DuckDuckGo",
+                "search_provider": "Google Search (Gemini Grounding)",
             },
         )
     else:

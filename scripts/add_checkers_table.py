@@ -8,14 +8,14 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.infrastructure.db_utils import get_db_connection
 from app.config import get_settings
+from app.infrastructure.db_utils import get_db_connection
 
 
 async def add_checkers_table():
     """Add checkers_games table if it doesn't exist."""
     settings = get_settings()
-    
+
     checkers_table_sql = """
 -- Checkers Game - User vs. user challenge-based gameplay
 CREATE TABLE IF NOT EXISTS checkers_games (
@@ -43,7 +43,7 @@ CREATE INDEX IF NOT EXISTS idx_checkers_games_opponent
 CREATE INDEX IF NOT EXISTS idx_checkers_games_status
     ON checkers_games(game_status);
 """
-    
+
     try:
         async with get_db_connection(settings.database_url) as conn:
             await conn.execute(checkers_table_sql)

@@ -1,7 +1,7 @@
 """
 Image generation service for GRYAG bot.
 
-Provides image generation using Gemini 2.5 Flash Image model.
+Provides image generation using Gemini 2.5 Flash Image model or Pollinations.ai.
 Includes daily quota management and context image support.
 """
 
@@ -13,7 +13,9 @@ import time
 from datetime import UTC, datetime
 from io import BytesIO
 from typing import Any
+from urllib.parse import quote
 
+import aiohttp
 import asyncpg
 from google import genai
 from google.genai import types
@@ -42,13 +44,103 @@ class QuotaExceededError(ImageGenerationError):
     """Raised when user exceeds daily image generation quota."""
 
 
+class PollinationsImageGenerator:
+    """Client for generating images using Pollinations.ai API."""
+
+    BASE_URL = "https://pollinations.ai/p"
+
+    def __init__(self):
+        """Initialize Pollinations.ai image generator."""
+        self.logger = logging.getLogger(f"{__name__}.PollinationsImageGenerator")
+        self.timeout = aiohttp.ClientTimeout(total=90.0)
+
+    async def generate(
+        self,
+        prompt: str,
+        aspect_ratio: str = "1:1",
+        context_images: list[bytes] | None = None,
+    ) -> bytes:
+        """
+        Generate an image using Pollinations.ai.
+
+        Args:
+            prompt: Text description of the image to generate
+            aspect_ratio: Image aspect ratio (ignored by Pollinations.ai, kept for API compatibility)
+            context_images: Optional context images (ignored by Pollinations.ai, kept for API compatibility)
+
+        Returns:
+            Generated image as bytes (JPEG/PNG format)
+
+        Raises:
+            ImageGenerationError: If generation fails
+        """
+        if context_images:
+            self.logger.warning(
+                "Pollinations.ai does not support context images, ignoring them"
+            )
+        if aspect_ratio != "1:1":
+            self.logger.warning(
+                f"Pollinations.ai does not support aspect ratio {aspect_ratio}, using default"
+            )
+
+        # URL-encode the prompt
+        encoded_prompt = quote(prompt)
+        url = f"{self.BASE_URL}/{encoded_prompt}"
+
+        self.logger.info(f"Generating image with Pollinations.ai: prompt_len={len(prompt)}")
+
+        try:
+            async with aiohttp.ClientSession(timeout=self.timeout) as session:
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        self.logger.error(
+                            f"Pollinations.ai API error: status={response.status}, "
+                            f"response={error_text[:200]}"
+                        )
+                        raise ImageGenerationError(
+                            f"Pollinations.ai повернув помилку (статус {response.status})"
+                        )
+
+                    image_bytes = await response.read()
+                    if not image_bytes:
+                        raise ImageGenerationError("Pollinations.ai не повернув зображення")
+
+                    # Verify it's actually an image
+                    try:
+                        Image.open(BytesIO(image_bytes))
+                    except Exception as e:
+                        self.logger.error(f"Invalid image data from Pollinations.ai: {e}")
+                        raise ImageGenerationError(
+                            "Pollinations.ai повернув некоректні дані зображення"
+                        ) from e
+
+                    self.logger.info(
+                        f"Image generated successfully with Pollinations.ai: {len(image_bytes)} bytes"
+                    )
+                    return image_bytes
+
+        except asyncio.TimeoutError as e:
+            self.logger.error("Pollinations.ai request timed out after 90 seconds")
+            raise ImageGenerationError(
+                "Генерація зображення зайняла забагато часу. Спробуй ще раз або спрости запит."
+            ) from e
+        except aiohttp.ClientError as e:
+            self.logger.error(f"Pollinations.ai request failed: {e}", exc_info=True)
+            raise ImageGenerationError("Не вдалося згенерувати зображення через помилку мережі") from e
+        except Exception as e:
+            self.logger.error(f"Unexpected error in Pollinations.ai generation: {e}", exc_info=True)
+            raise ImageGenerationError("Не вдалося згенерувати зображення") from e
+
+
 class ImageGenerationService:
-    """Service for generating images using Gemini."""
+    """Service for generating images using Gemini or Pollinations.ai."""
 
     def __init__(
         self,
-        api_key: str,
-        database_url: str,
+        provider: str = "gemini",
+        api_key: str | None = None,
+        database_url: str = "",
         daily_limit: int = 3,
         admin_user_ids: list[int] | None = None,
     ):
@@ -56,17 +148,32 @@ class ImageGenerationService:
         Initialize image generation service.
 
         Args:
-            api_key: Google Gemini API key
+            provider: Image generation provider ("gemini" or "pollinations")
+            api_key: Google Gemini API key (required for "gemini" provider)
             database_url: PostgreSQL connection string
             daily_limit: Maximum images per user per day (default: 3)
             admin_user_ids: List of admin user IDs who bypass limits
         """
-        self.client = genai.Client(api_key=api_key)
-        self.model = "gemini-2.5-flash-image"
+        self.provider = provider.lower()
         self.database_url = str(database_url)
         self.daily_limit = daily_limit
         self.admin_user_ids = set(admin_user_ids or [])
         self.logger = logging.getLogger(f"{__name__}.ImageGenerationService")
+
+        if self.provider == "gemini":
+            if not api_key:
+                raise ValueError("api_key is required for Gemini provider")
+            self.client = genai.Client(api_key=api_key)
+            self.model = "gemini-2.5-flash-image"
+            self.pollinations_generator = None
+        elif self.provider == "pollinations":
+            self.pollinations_generator = PollinationsImageGenerator()
+            self.client = None
+            self.model = None
+        else:
+            raise ValueError(f"Unknown provider: {provider}. Must be 'gemini' or 'pollinations'")
+
+        self.logger.info(f"Image generation service initialized with provider: {self.provider}")
 
     async def _init_db(self) -> None:
         """Initialize database connection and ensure schema exists."""
@@ -193,62 +300,17 @@ class ImageGenerationService:
                 )
 
         try:
-            # Build content list (prompt + optional context images)
-            contents: list[str | Image.Image] = [prompt]
-
-            if context_images:
-                for img_bytes in context_images[:3]:  # Max 3 context images
-                    try:
-                        img = Image.open(BytesIO(img_bytes))
-                        contents.append(img)
-                    except Exception as e:
-                        self.logger.warning(f"Failed to load context image: {e}")
-
-            # Configure generation
-            config = types.GenerateContentConfig(
-                response_modalities=["Image"],  # Only return images, no text
-                image_config=types.ImageConfig(aspect_ratio=aspect_ratio),
-            )
-
-            self.logger.info(
-                f"Generating image: prompt_len={len(prompt)}, "
-                f"context_images={len(context_images) if context_images else 0}, "
-                f"aspect_ratio={aspect_ratio}"
-            )
-
-            # Generate image with timeout (90 seconds max)
-            try:
-                response = await asyncio.wait_for(
-                    self.client.aio.models.generate_content(
-                        model=self.model,
-                        contents=contents,
-                        config=config,
-                    ),
-                    timeout=90.0,
+            # Route to appropriate provider
+            if self.provider == "gemini":
+                image_bytes = await self._generate_with_gemini(
+                    prompt, context_images, aspect_ratio
                 )
-            except TimeoutError as e:
-                self.logger.error("Image generation timed out after 90 seconds")
-                raise ImageGenerationError(
-                    "Генерація зображення зайняла забагато часу. Спробуй ще раз або спрости запит."
-                ) from e
-
-            # Extract image from response safely
-            image_bytes = None
-            try:
-                candidates = getattr(response, "candidates", None) or []
-                if candidates:
-                    content = getattr(candidates[0], "content", None)
-                    parts = getattr(content, "parts", None) or []
-                    for part in parts:
-                        if getattr(part, "inline_data", None) is not None:
-                            image_bytes = part.inline_data.data
-                            break
-            except Exception as parse_exc:  # pragma: no cover - defensive
-                self.logger.warning(f"Failed to parse image from response: {parse_exc}")
-
-            if not image_bytes:
-                self.logger.error("No image returned in response")
-                raise ImageGenerationError("Gemini не повернув зображення")
+            elif self.provider == "pollinations":
+                image_bytes = await self._generate_with_pollinations(
+                    prompt, context_images, aspect_ratio
+                )
+            else:
+                raise ImageGenerationError(f"Unknown provider: {self.provider}")
 
             # Increment quota if user/chat provided
             if user_id is not None and chat_id is not None:
@@ -280,6 +342,92 @@ class ImageGenerationService:
                 error_msg = "Тайм-аут генерації. Спробуй ще раз"
 
             raise ImageGenerationError(error_msg) from e
+
+    async def _generate_with_gemini(
+        self,
+        prompt: str,
+        context_images: list[bytes] | None,
+        aspect_ratio: str,
+    ) -> bytes:
+        """Generate image using Gemini API."""
+        # Build content list (prompt + optional context images)
+        contents: list[str | Image.Image] = [prompt]
+
+        if context_images:
+            for img_bytes in context_images[:3]:  # Max 3 context images
+                try:
+                    img = Image.open(BytesIO(img_bytes))
+                    contents.append(img)
+                except Exception as e:
+                    self.logger.warning(f"Failed to load context image: {e}")
+
+        # Configure generation
+        config = types.GenerateContentConfig(
+            response_modalities=["Image"],  # Only return images, no text
+            image_config=types.ImageConfig(aspect_ratio=aspect_ratio),
+        )
+
+        self.logger.info(
+            f"Generating image with Gemini: prompt_len={len(prompt)}, "
+            f"context_images={len(context_images) if context_images else 0}, "
+            f"aspect_ratio={aspect_ratio}"
+        )
+
+        # Generate image with timeout (90 seconds max)
+        try:
+            response = await asyncio.wait_for(
+                self.client.aio.models.generate_content(
+                    model=self.model,
+                    contents=contents,
+                    config=config,
+                ),
+                timeout=90.0,
+            )
+        except TimeoutError as e:
+            self.logger.error("Image generation timed out after 90 seconds")
+            raise ImageGenerationError(
+                "Генерація зображення зайняла забагато часу. Спробуй ще раз або спрости запит."
+            ) from e
+
+        # Extract image from response safely
+        image_bytes = None
+        try:
+            candidates = getattr(response, "candidates", None) or []
+            if candidates:
+                content = getattr(candidates[0], "content", None)
+                parts = getattr(content, "parts", None) or []
+                for part in parts:
+                    if getattr(part, "inline_data", None) is not None:
+                        image_bytes = part.inline_data.data
+                        break
+        except Exception as parse_exc:  # pragma: no cover - defensive
+            self.logger.warning(f"Failed to parse image from response: {parse_exc}")
+
+        if not image_bytes:
+            self.logger.error("No image returned in response")
+            raise ImageGenerationError("Gemini не повернув зображення")
+
+        return image_bytes
+
+    async def _generate_with_pollinations(
+        self,
+        prompt: str,
+        context_images: list[bytes] | None,
+        aspect_ratio: str,
+    ) -> bytes:
+        """Generate image using Pollinations.ai API."""
+        if not self.pollinations_generator:
+            raise ImageGenerationError("Pollinations generator not initialized")
+
+        self.logger.info(
+            f"Generating image with Pollinations.ai: prompt_len={len(prompt)}"
+        )
+
+        return await self.pollinations_generator.generate(
+            prompt=prompt,
+            aspect_ratio=aspect_ratio,
+            context_images=context_images,
+        )
 
     async def get_usage_stats(self, user_id: int, chat_id: int) -> dict[str, Any]:
         """
@@ -388,7 +536,7 @@ GENERATE_IMAGE_TOOL_DEFINITION = {
             "description": (
                 "Генерує НОВЕ ФОТОРЕАЛІСТИЧНЕ зображення (фото) з текстового опису. "
                 "Викликай ЛИШЕ коли користувач ЯВНО просить СТВОРИТИ/ЗГЕНЕРУВАТИ/НАМАЛЮВАТИ нове зображення. "
-                "Якщо користувач хоче ЗНАЙТИ/ПОКАЗАТИ існуюче зображення (мальовник, фото, картинку) — використовуй search_web з search_type='images'. "
+                "Якщо користувач хоче ЗНАЙТИ/ПОКАЗАТИ існуюче зображення (мальовник, фото, картинку) — використовуй search_web. "
                 "Не відмовляй текстом і не посилайся на ліміти — сервер сам перевіряє ліміти і поверне відповідь. "
                 "ВАЖЛИВО: Завжди пиши prompt АНГЛІЙСЬКОЮ мовою для кращого результату."
             ),

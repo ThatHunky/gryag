@@ -3,7 +3,7 @@
 import json
 import time
 
-import aiosqlite
+import asyncpg
 import pytest
 
 from app.services.context_store import ContextStore
@@ -30,7 +30,7 @@ async def test_add_turn_stores_external_ids(test_db):
     }
 
     # Add a turn with metadata
-    await store.add_turn(
+    await store.add_message(
         chat_id=chat_id,
         thread_id=None,
         user_id=user_id,
@@ -41,16 +41,18 @@ async def test_add_turn_stores_external_ids(test_db):
     )
 
     # Verify external IDs are stored in dedicated columns
-    async with aiosqlite.connect(test_db) as db:
-        cursor = await db.execute(
+    conn = await asyncpg.connect(test_db)
+    try:
+        row = await conn.fetchrow(
             """SELECT external_message_id, external_user_id,
                       reply_to_external_message_id, reply_to_external_user_id,
                       media
                FROM messages
-               WHERE chat_id = ?""",
-            (chat_id,),
+               WHERE chat_id = $1""",
+            chat_id,
         )
-        row = await cursor.fetchone()
+    finally:
+        await conn.close()
 
     assert row is not None, "Message should be stored"
     ext_msg_id, ext_user_id, ext_reply_msg, ext_reply_user, media_json = row
@@ -83,7 +85,7 @@ async def test_delete_by_external_id_uses_new_columns(test_db):
 
     # Add a message with external ID
     metadata = {"message_id": str(message_id), "user_id": str(user_id)}
-    await store.add_turn(
+    await store.add_message(
         chat_id=chat_id,
         thread_id=None,
         user_id=user_id,
@@ -98,12 +100,14 @@ async def test_delete_by_external_id_uses_new_columns(test_db):
     assert result is True, "Deletion should succeed"
 
     # Verify message is gone
-    async with aiosqlite.connect(test_db) as db:
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM messages WHERE chat_id = ? AND external_message_id = ?",
-            (chat_id, str(message_id)),
+    conn = await asyncpg.connect(test_db)
+    try:
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM messages WHERE chat_id = $1 AND external_message_id = $2",
+            chat_id, str(message_id),
         )
-        count = (await cursor.fetchone())[0]
+    finally:
+        await conn.close()
 
     assert count == 0, "Message should be deleted"
 
@@ -124,7 +128,7 @@ async def test_large_telegram_ids_preserved_as_strings(test_db):
         "user_id": str(large_user_id),
     }
 
-    await store.add_turn(
+    await store.add_message(
         chat_id=chat_id,
         thread_id=None,
         user_id=123,  # Internal user_id is different from external
@@ -135,12 +139,14 @@ async def test_large_telegram_ids_preserved_as_strings(test_db):
     )
 
     # Retrieve and verify no precision loss
-    async with aiosqlite.connect(test_db) as db:
-        cursor = await db.execute(
-            "SELECT external_message_id, external_user_id FROM messages WHERE chat_id = ?",
-            (chat_id,),
+    conn = await asyncpg.connect(test_db)
+    try:
+        row = await conn.fetchrow(
+            "SELECT external_message_id, external_user_id FROM messages WHERE chat_id = $1",
+            chat_id,
         )
-        row = await cursor.fetchone()
+    finally:
+        await conn.close()
 
     ext_msg_id, ext_user_id = row
 
@@ -167,37 +173,39 @@ async def test_backward_compatibility_json_fallback(test_db):
     message_id = 9876543210
 
     # Simulate legacy data: insert directly without populating external_* columns
-    async with aiosqlite.connect(test_db) as db:
-        await db.execute(
+    conn = await asyncpg.connect(test_db)
+    try:
+        await conn.execute(
             """INSERT INTO messages
                (chat_id, thread_id, user_id, role, text, media, ts)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                chat_id,
-                None,
-                123,
-                "user",
-                "Legacy message",
-                json.dumps(
-                    {
-                        "media": [],
-                        "meta": {"message_id": str(message_id), "user_id": "123"},
-                    }
-                ),
-                int(time.time()),
+               VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+            chat_id,
+            None,
+            123,
+            "user",
+            "Legacy message",
+            json.dumps(
+                {
+                    "media": [],
+                    "meta": {"message_id": str(message_id), "user_id": "123"},
+                }
             ),
+            int(time.time()),
         )
-        await db.commit()
+    finally:
+        await conn.close()
 
     # Verify fallback deletion works
     result = await store.delete_message_by_external_id(chat_id, message_id)
     assert result is True, "Deletion should succeed via JSON fallback"
 
     # Verify message is deleted
-    async with aiosqlite.connect(test_db) as db:
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM messages WHERE chat_id = ?", (chat_id,)
+    conn = await asyncpg.connect(test_db)
+    try:
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM messages WHERE chat_id = $1", chat_id
         )
-        count = (await cursor.fetchone())[0]
+    finally:
+        await conn.close()
 
     assert count == 0, "Legacy message should be deleted via JSON fallback"

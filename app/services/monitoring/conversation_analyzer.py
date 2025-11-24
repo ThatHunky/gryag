@@ -95,6 +95,7 @@ class ConversationWindow:
     has_high_value: bool = False
     closed: bool = False
     closure_reason: str = ""
+    window_id: int = field(default_factory=lambda: int(time.time() * 1000))
 
     def add_message(
         self, msg_ctx: MessageContext, raw_message: Message | None = None

@@ -415,7 +415,7 @@ Response:"""
             # This should be updated when conversation_windows table is used
             await self.proactive_trigger.record_proactive_response(
                 chat_id=window.chat_id,
-                window_id=0,  # TODO: Use actual window_id when available
+                window_id=window.window_id,
                 intent=decision.intent,
                 response_text=response_text,
                 response_message_id=sent_message.message_id,

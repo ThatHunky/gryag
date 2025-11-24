@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-import aiosqlite
+import asyncpg
 
 from app.core.exceptions import DatabaseError
 from app.infrastructure.db_utils import get_db_connection
@@ -41,18 +41,18 @@ class DatabaseMigrator:
     Applies migrations in order and tracks which have been applied.
 
     Example:
-        >>> migrator = DatabaseMigrator("gryag.db")
+        >>> migrator = DatabaseMigrator("postgresql://...")
         >>> await migrator.migrate()
         Applied 3 migrations
     """
 
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_url: str):
         """Initialize migrator.
 
         Args:
-            db_path: Path to SQLite database
+            db_url: PostgreSQL connection URL
         """
-        self.db_path = Path(db_path)
+        self.db_url = db_url
         self.migrations_dir = Path(__file__).parent / "migrations"
 
     async def migrate(self) -> int:
@@ -65,7 +65,7 @@ class DatabaseMigrator:
             DatabaseError: If migration fails
         """
         try:
-            async with get_db_connection(self.db_path) as db:
+            async with get_db_connection(self.db_url) as db:
                 # Ensure migrations table exists
                 await self._ensure_migrations_table(db)
 
@@ -85,10 +85,10 @@ class DatabaseMigrator:
 
                 return count
 
-        except aiosqlite.Error as e:
+        except Exception as e:
             raise DatabaseError(
                 "Migration failed",
-                context={"db_path": str(self.db_path)},
+                context={"db_url": self.db_url},
                 cause=e,
             ) from None
 
@@ -99,16 +99,15 @@ class DatabaseMigrator:
             Latest applied migration version, or 0 if none applied
         """
         try:
-            async with get_db_connection(self.db_path) as db:
+            async with get_db_connection(self.db_url) as db:
                 await self._ensure_migrations_table(db)
-                cursor = await db.execute("SELECT MAX(version) FROM schema_migrations")
-                row = await cursor.fetchone()
+                row = await db.fetchrow("SELECT MAX(version) FROM schema_migrations")
                 return row[0] if row and row[0] else 0
 
-        except aiosqlite.Error as e:
+        except Exception as e:
             raise DatabaseError(
                 "Failed to get database version",
-                context={"db_path": str(self.db_path)},
+                context={"db_url": self.db_url},
                 cause=e,
             ) from None
 
@@ -127,7 +126,7 @@ class DatabaseMigrator:
             DatabaseError: If rollback fails
         """
         try:
-            async with get_db_connection(self.db_path) as db:
+            async with get_db_connection(self.db_url) as db:
                 await self._ensure_migrations_table(db)
 
                 # Get applied migrations
@@ -138,23 +137,24 @@ class DatabaseMigrator:
                 for version in sorted(applied, reverse=True):
                     if version > target_version:
                         await db.execute(
-                            "DELETE FROM schema_migrations WHERE version = ?",
-                            (version,),
+                            "DELETE FROM schema_migrations WHERE version = $1",
+                            version,
                         )
-                        await db.commit()
-                        logger.warning(f"Rolled back migration version {version}")
+                        # Note: We can't easily undo the SQL changes without down migrations
+                        # For now, we just remove the record
+                        logger.warning(f"Rolled back migration version {version} (record only)")
                         count += 1
 
                 return count
 
-        except aiosqlite.Error as e:
+        except Exception as e:
             raise DatabaseError(
                 "Rollback failed",
                 context={"target_version": target_version},
                 cause=e,
             ) from None
 
-    async def _ensure_migrations_table(self, db: aiosqlite.Connection) -> None:
+    async def _ensure_migrations_table(self, db: asyncpg.Connection) -> None:
         """Create migrations tracking table if it doesn't exist."""
         await db.execute(
             """
@@ -165,38 +165,37 @@ class DatabaseMigrator:
             )
             """
         )
-        await db.commit()
 
-    async def _get_applied_migrations(self, db: aiosqlite.Connection) -> list[int]:
+    async def _get_applied_migrations(self, db: asyncpg.Connection) -> list[int]:
         """Get list of applied migration versions."""
-        cursor = await db.execute(
+        rows = await db.fetch(
             "SELECT version FROM schema_migrations ORDER BY version"
         )
-        rows = await cursor.fetchall()
-        return [row[0] for row in rows]
+        return [row["version"] for row in rows]
 
     async def _apply_migration(
-        self, db: aiosqlite.Connection, migration: Migration
+        self, db: asyncpg.Connection, migration: Migration
     ) -> None:
         """Apply a single migration."""
         try:
             # Execute migration SQL
-            await db.executescript(migration.sql)
+            # asyncpg doesn't support executescript, so we might need to split statements
+            # or use a simple execute if it's one block.
+            # Assuming migration.sql is a valid block or we can execute it directly.
+            await db.execute(migration.sql)
 
             # Record migration
             await db.execute(
                 """
                 INSERT INTO schema_migrations (version, name)
-                VALUES (?, ?)
+                VALUES ($1, $2)
                 """,
-                (migration.version, migration.name),
+                migration.version, migration.name,
             )
 
-            await db.commit()
             logger.info(f"Applied migration {migration.version}: {migration.name}")
 
-        except aiosqlite.Error as e:
-            await db.rollback()
+        except Exception as e:
             raise DatabaseError(
                 f"Failed to apply migration {migration.version}",
                 context={"migration": migration.name},

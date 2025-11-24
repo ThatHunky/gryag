@@ -146,7 +146,7 @@ async def test_chat_fact_visibility():
             break
 
     if target_fact:
-        print(f"   ✅ FOUND IT!")
+        print("   ✅ FOUND IT!")
         print(f"   Entity type: {target_fact['entity_type']}")
         print(f"   Entity ID: {target_fact['entity_id']}")
         print(f"   Category: {target_fact['fact_category']}")

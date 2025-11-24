@@ -26,21 +26,11 @@ LOGGER = logging.getLogger(__name__)
 
 
 @pytest_asyncio.fixture
-async def test_db(tmp_path):
-    """Create a temporary test database."""
-    db_path = tmp_path / "test_episode_integration.db"
-    yield db_path
-    # Cleanup
-    if db_path.exists():
-        db_path.unlink()
-
-
-@pytest_asyncio.fixture
 async def settings(test_db):
     """Get settings with test database."""
     settings = get_settings()
     # Override settings for testing (use object.__setattr__ for frozen Pydantic models)
-    object.__setattr__(settings, "db_path", str(test_db))
+    object.__setattr__(settings, "database_url", test_db)
     object.__setattr__(settings, "auto_create_episodes", True)
     object.__setattr__(settings, "episode_min_messages", 3)
     object.__setattr__(settings, "episode_window_timeout", 5)
@@ -66,7 +56,7 @@ async def gemini_client():
 async def episodic_memory(test_db, gemini_client, settings):
     """Create episodic memory store."""
     memory = EpisodicMemoryStore(
-        db_path=test_db,
+        database_url=test_db,
         gemini_client=gemini_client,
         settings=settings,
     )
@@ -78,7 +68,7 @@ async def episodic_memory(test_db, gemini_client, settings):
 async def boundary_detector(test_db, settings, gemini_client):
     """Create boundary detector."""
     detector = EpisodeBoundaryDetector(
-        db_path=test_db,
+        database_url=test_db,
         settings=settings,
         gemini_client=gemini_client,
     )
@@ -91,7 +81,7 @@ async def episode_monitor(
 ):
     """Create and start episode monitor."""
     monitor = EpisodeMonitor(
-        db_path=test_db,
+        database_url=test_db,
         settings=settings,
         gemini_client=gemini_client,
         episodic_memory=episodic_memory,

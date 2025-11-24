@@ -21,13 +21,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from app.config import get_settings
-from app.services.bot_profile import BotProfileStore
-from app.services.bot_learning import BotLearningEngine
-from app.services.gemini import GeminiClient
 from app.handlers.bot_learning_integration import (
     estimate_token_count,
     get_context_tags,
 )
+from app.services.bot_learning import BotLearningEngine
+from app.services.bot_profile import BotProfileStore
+from app.services.gemini import GeminiClient
 
 
 async def test_bot_learning_integration():

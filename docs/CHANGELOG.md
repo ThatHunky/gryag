@@ -10,6 +10,23 @@ All notable changes to gryag's memory, context, and learning systems.
 
 ## [Unreleased]
 
+### 2025-11-18 — Replaced DuckDuckGo with Gemini Grounding with Search
+
+**Summary**: Deprecated DuckDuckGo search and replaced it with Gemini's native "Grounding with Search" function using Google Search.
+
+**Changes**:
+- Replaced DuckDuckGo implementation in `app/services/search_tool.py` with Gemini Grounding with Search
+- Removed support for image/video/news search types (Gemini Grounding is text-only)
+- Updated tool definition to reflect Google Search grounding instead of DuckDuckGo
+- Removed `ddgs` dependency from `requirements.txt`
+- Deleted entire `cpp/` folder and C++ implementation
+- Updated documentation and persona files to reference Google Search instead of DuckDuckGo
+- Updated logging in `app/main.py` to reflect new search provider
+
+**Verification**:
+- Search functionality now uses Gemini's Grounding with Search API
+- All DuckDuckGo references removed from codebase
+
 ### 2025-11-16 — P0 Improvements (Context, Migrations, Persona, Tests, Security)
 
 - Context budgets configurable via `CONTEXT_BUDGET_*_PCT`; dynamic allocator now respects base budgets.
@@ -57,7 +74,7 @@ cmake --build cpp/build -j
 **Summary**: Implemented the first functional slice of the C++ bot: real tool integrations (weather, currency, polls, web/search, image + memories/search in chat), admin/profile commands, and a custom Telegram long-poll worker with in-process locks/rate limits to mirror the Python behaviour.
 
 **Changes**:
-- Added production-grade tool implementations under `cpp/include/gryag/services/tools/` (OpenWeather, ExchangeRate, DuckDuckGo, Gemini image generation, search_messages, memory tools) with proper Gemini function definitions and registry plumbing.
+- Added production-grade tool implementations under `cpp/include/gryag/services/tools/` (OpenWeather, ExchangeRate, Gemini image generation, search_messages, memory tools) with proper Gemini function definitions and registry plumbing. (Note: C++ implementation removed in 2025-11-18)
 - Wired tool definitions into the Gemini client, added basic function-call handling, and persisted tool results through the existing context store.
 - Ported admin and profile command handlers with ban management, rate-limit resets, chat info, donation prompts, profile lookups, user lists, and memory fact dumps.
 - Introduced processing locks and rate limiting with SQLite/in-memory fallbacks (no external Redis dependency) alongside a custom Telegram HTTP long-poll loop.

@@ -4,8 +4,6 @@ import asyncio
 import logging
 from pathlib import Path
 
-import aiosqlite
-
 from app.infrastructure.db_utils import get_db_connection
 
 logger = logging.getLogger(__name__)
@@ -21,7 +19,7 @@ async def create_schema(db_path: Path | str):
         raise FileNotFoundError(f"Schema file not found at {schema_path}")
 
     async with get_db_connection(db_path) as db:
-        with open(schema_path, "r") as f:
+        with open(schema_path) as f:
             await db.executescript(f.read())
         await db.commit()
         logger.info(f"Database schema created at {db_path}")

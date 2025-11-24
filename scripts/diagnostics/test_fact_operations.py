@@ -94,7 +94,7 @@ async def main():
             f"   ✅ Test fact found: {test_fact['fact_key']} = {test_fact['fact_value']}"
         )
     else:
-        print(f"   ❌ Test fact NOT found!")
+        print("   ❌ Test fact NOT found!")
 
     # Test 7: Delete the test fact
     print("\n7️⃣ Deleting test fact...")
@@ -114,7 +114,7 @@ async def main():
             f"   ❌ Test fact still exists! is_active={test_fact_after.get('is_active')}"
         )
     else:
-        print(f"   ✅ Test fact successfully deleted")
+        print("   ✅ Test fact successfully deleted")
 
     print("\n✅ All tests complete!")
 

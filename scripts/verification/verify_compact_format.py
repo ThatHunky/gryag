@@ -12,9 +12,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.services.conversation_formatter import (
+    estimate_tokens,
     format_history_compact,
     format_message_compact,
-    estimate_tokens,
     parse_user_id_short,
 )
 
@@ -31,7 +31,7 @@ def main():
     message = format_message_compact(
         user_id=987654321, username="Alice", text="Як справи, гряг?"
     )
-    print(f"Input: user_id=987654321, username='Alice', text='Як справи, гряг?'")
+    print("Input: user_id=987654321, username='Alice', text='Як справи, гряг?'")
     print(f"Output: {message}")
     print(f"✅ Format correct: {message == 'Alice#654321: Як справи, гряг?'}")
 
@@ -41,7 +41,7 @@ def main():
     print("-" * 70)
 
     short_id = parse_user_id_short(987654321)
-    print(f"Full ID: 987654321")
+    print("Full ID: 987654321")
     print(f"Short ID: {short_id}")
     print(f"✅ Correct: {short_id == '654321'}")
 

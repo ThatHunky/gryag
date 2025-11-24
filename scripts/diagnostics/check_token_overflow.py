@@ -12,7 +12,6 @@ Checks:
 Run with: python scripts/diagnostics/check_token_overflow.py
 """
 
-import asyncio
 import json
 import sqlite3
 import sys
@@ -134,12 +133,12 @@ def check_database_messages():
     )
 
     row = cursor.fetchone()
-    print(f"\n🧬 Embedding statistics:")
+    print("\n🧬 Embedding statistics:")
     print("-" * 70)
     print(f"  Messages with embeddings: {row['count']:,}")
     print(f"  Average embedding JSON size: {int(row['avg_length'] or 0):,} chars")
     print(f"  Maximum embedding JSON size: {int(row['max_length'] or 0):,} chars")
-    print(f"  ⚠️  NOTE: Embeddings should NEVER be sent to Gemini API!")
+    print("  ⚠️  NOTE: Embeddings should NEVER be sent to Gemini API!")
 
     # Check recent messages per chat
     cursor.execute(
@@ -155,7 +154,7 @@ def check_database_messages():
     """
     )
 
-    print(f"\n💬 Top 5 most active chats:")
+    print("\n💬 Top 5 most active chats:")
     print("-" * 70)
     for row in cursor.fetchall():
         print(
@@ -173,7 +172,7 @@ def check_context_settings():
     print("CONTEXT CONFIGURATION")
     print("=" * 70)
 
-    print(f"\n📐 Token budgets:")
+    print("\n📐 Token budgets:")
     print(f"  context_token_budget: {settings.context_token_budget:,} tokens")
     print(f"  max_turns: {settings.max_turns}")
     print(f"  enable_multi_level_context: {settings.enable_multi_level_context}")
@@ -188,20 +187,20 @@ def check_context_settings():
         print(f"    - Background (15%): {int(total * 0.15):,} tokens")
         print(f"    - Episodic (10%): {int(total * 0.10):,} tokens")
 
-    print(f"\n🖼️  Media settings:")
+    print("\n🖼️  Media settings:")
     print(
         f"  gemini_max_media_items: {getattr(settings, 'gemini_max_media_items', 28)}"
     )
 
-    print(f"\n🔍 Hybrid search:")
+    print("\n🔍 Hybrid search:")
     print(f"  enable_hybrid_search: {settings.enable_hybrid_search}")
     print(f"  hybrid_search_limit: {settings.hybrid_search_limit}")
 
-    print(f"\n📚 Profile settings:")
+    print("\n📚 Profile settings:")
     print(f"  enable_user_profiles: {settings.enable_user_profiles}")
     print(f"  max_facts_per_user: {settings.max_facts_per_user}")
 
-    print(f"\n💾 Episodic memory:")
+    print("\n💾 Episodic memory:")
     print(f"  enable_episodic_memory: {settings.enable_episodic_memory}")
 
 
@@ -213,7 +212,7 @@ def simulate_context_assembly():
     print("CONTEXT ASSEMBLY SIMULATION")
     print("=" * 70)
 
-    print(f"\n🔬 Simulating typical message context assembly...")
+    print("\n🔬 Simulating typical message context assembly...")
 
     # Simulate typical message sizes
     avg_user_msg = "Can you help me with this problem? I'm trying to understand how to fix this issue."

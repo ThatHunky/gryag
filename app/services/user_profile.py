@@ -6,10 +6,9 @@ import asyncio
 import json
 import logging
 import time
-from pathlib import Path
 from typing import Any
 
-import aiosqlite
+import asyncpg
 
 from app.infrastructure.db_utils import get_db_connection
 from app.services import telemetry
@@ -241,8 +240,8 @@ class FactExtractor:
 class UserProfileStore:
     """Manages user profiles, facts, and relationships."""
 
-    def __init__(self, db_path: Path | str) -> None:
-        self._db_path = Path(db_path)
+    def __init__(self, database_url: str) -> None:
+        self._database_url = database_url
         self._init_lock = asyncio.Lock()
         self._initialized = False
 
@@ -254,33 +253,45 @@ class UserProfileStore:
             # Schema is applied by ContextStore.init()
 
             # Add summary_updated_at column if missing (for Phase 2 summarization)
-            async with get_db_connection(self._db_path) as db:
+            async with get_db_connection(self._database_url) as conn:
                 try:
-                    await db.execute(
+                    await conn.execute(
                         "ALTER TABLE user_profiles ADD COLUMN summary_updated_at INTEGER"
                     )
-                    await db.commit()
                     LOGGER.info("Added summary_updated_at column to user_profiles")
-                except aiosqlite.OperationalError:
-                    # Column already exists
+                except (asyncpg.DuplicateColumnError, asyncpg.UndefinedColumnError):
                     pass
+                except asyncpg.PostgresError as e:
+                    if "duplicate" in str(e).lower() or "exists" in str(e).lower():
+                        pass
+                    else:
+                        raise
 
                 try:
-                    await db.execute(
+                    await conn.execute(
                         "ALTER TABLE user_profiles ADD COLUMN pronouns TEXT"
                     )
-                    await db.commit()
                     LOGGER.info("Added pronouns column to user_profiles")
-                except aiosqlite.OperationalError:
+                except (asyncpg.DuplicateColumnError, asyncpg.UndefinedColumnError):
                     pass
+                except asyncpg.PostgresError as e:
+                    if "duplicate" in str(e).lower() or "exists" in str(e).lower():
+                        pass
+                    else:
+                        raise
+
                 try:
-                    await db.execute(
+                    await conn.execute(
                         "ALTER TABLE user_profiles ADD COLUMN membership_status TEXT DEFAULT 'unknown'"
                     )
-                    await db.commit()
                     LOGGER.info("Added membership_status column to user_profiles")
-                except aiosqlite.OperationalError:
+                except (asyncpg.DuplicateColumnError, asyncpg.UndefinedColumnError):
                     pass
+                except asyncpg.PostgresError as e:
+                    if "duplicate" in str(e).lower() or "exists" in str(e).lower():
+                        pass
+                    else:
+                        raise
 
             self._initialized = True
 
@@ -299,70 +310,69 @@ class UserProfileStore:
         await self.init()
         now = int(time.time())
 
-        async with get_db_connection(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
-
+        async with get_db_connection(self._database_url) as conn:
             # Try to get existing profile
-            async with db.execute(
-                "SELECT * FROM user_profiles WHERE user_id = ? AND chat_id = ?",
-                (user_id, chat_id),
-            ) as cursor:
-                row = await cursor.fetchone()
+            row = await conn.fetchrow(
+                "SELECT * FROM user_profiles WHERE user_id = $1 AND chat_id = $2",
+                user_id,
+                chat_id,
+            )
 
             if row:
                 # Update last_seen, membership, and optional names
                 updates = [
-                    "last_seen = ?",
-                    "updated_at = ?",
-                    "membership_status = ?",
+                    "last_seen = $1",
+                    "updated_at = $2",
+                    "membership_status = $3",
                 ]
                 params: list[Any] = [now, now, "member"]
 
+                param_idx = 4
                 if display_name:
-                    updates.append("display_name = ?")
+                    updates.append(f"display_name = ${param_idx}")
                     params.append(display_name)
+                    param_idx += 1
                 if username:
-                    updates.append("username = ?")
+                    updates.append(f"username = ${param_idx}")
                     params.append(username)
+                    param_idx += 1
 
                 params.extend([user_id, chat_id])
+                where_param_idx = param_idx
 
-                await db.execute(
-                    f"UPDATE user_profiles SET {', '.join(updates)} WHERE user_id = ? AND chat_id = ?",
-                    params,
+                await conn.execute(
+                    f"UPDATE user_profiles SET {', '.join(updates)} WHERE user_id = ${where_param_idx} AND chat_id = ${where_param_idx + 1}",
+                    *params,
                 )
-                await db.commit()
 
                 # Fetch updated row
-                async with db.execute(
-                    "SELECT * FROM user_profiles WHERE user_id = ? AND chat_id = ?",
-                    (user_id, chat_id),
-                ) as cursor:
-                    row = await cursor.fetchone()
-                    return _augment_profile(dict(row)) if row else {}
+                row = await conn.fetchrow(
+                    "SELECT * FROM user_profiles WHERE user_id = $1 AND chat_id = $2",
+                    user_id,
+                    chat_id,
+                )
+                return _augment_profile(dict(row)) if row else {}
 
             # Create new profile
-            await db.execute(
+            row = await conn.fetchrow(
                 """
                 INSERT INTO user_profiles
                 (user_id, chat_id, display_name, username, pronouns, membership_status, first_seen, last_seen,
                  interaction_count, message_count, profile_version, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 1, ?, ?)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, 1, $9, $10)
+                RETURNING *
                 """,
-                (
-                    user_id,
-                    chat_id,
-                    display_name,
-                    username,
-                    None,
-                    "member",
-                    now,
-                    now,
-                    now,
-                    now,
-                ),
+                user_id,
+                chat_id,
+                display_name,
+                username,
+                None,
+                "member",
+                now,
+                now,
+                now,
+                now,
             )
-            await db.commit()
 
             telemetry.increment_counter("profiles_created")
             LOGGER.info(
@@ -370,13 +380,7 @@ class UserProfileStore:
                 extra={"user_id": user_id, "chat_id": chat_id},
             )
 
-            # Return the newly created profile
-            async with db.execute(
-                "SELECT * FROM user_profiles WHERE user_id = ? AND chat_id = ?",
-                (user_id, chat_id),
-            ) as cursor:
-                row = await cursor.fetchone()
-                return _augment_profile(dict(row)) if row else {}
+            return _augment_profile(dict(row)) if row else {}
 
     async def get_profile(
         self, user_id: int, chat_id: int | None = None, limit: int | None = None
@@ -393,50 +397,47 @@ class UserProfileStore:
         """
         await self.init()
 
-        async with get_db_connection(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
-
+        async with get_db_connection(self._database_url) as conn:
             # If chat_id is None, aggregate across all chats for this user
             if chat_id is None:
                 # Get user's most recent profile as base
-                async with db.execute(
+                row = await conn.fetchrow(
                     """
                     SELECT * FROM user_profiles
-                    WHERE user_id = ?
+                    WHERE user_id = $1
                     ORDER BY last_seen DESC
                     LIMIT 1
                     """,
-                    (user_id,),
-                ) as cursor:
-                    row = await cursor.fetchone()
-                    if not row:
-                        return None
-                    profile = _augment_profile(dict(row))
+                    user_id,
+                )
+                if not row:
+                    return None
+                profile = _augment_profile(dict(row))
 
                 # Get facts across all chats
                 query = """
                     SELECT * FROM user_facts
-                    WHERE user_id = ? AND is_active = 1
+                    WHERE user_id = $1 AND is_active = 1
                     ORDER BY confidence DESC, created_at DESC
                 """
                 params: list[Any] = [user_id]
                 if limit:
-                    query += " LIMIT ?"
+                    query += " LIMIT $2"
                     params.append(limit)
 
-                async with db.execute(query, params) as cursor:
-                    facts = [dict(row) for row in await cursor.fetchall()]
+                rows = await conn.fetch(query, *params)
+                facts = [dict(row) for row in rows]
 
                 profile["facts"] = facts
                 return profile
 
             # Original behavior: get profile for specific chat
-            async with db.execute(
-                "SELECT * FROM user_profiles WHERE user_id = ? AND chat_id = ?",
-                (user_id, chat_id),
-            ) as cursor:
-                row = await cursor.fetchone()
-                return _augment_profile(dict(row)) if row else None
+            row = await conn.fetchrow(
+                "SELECT * FROM user_profiles WHERE user_id = $1 AND chat_id = $2",
+                user_id,
+                chat_id,
+            )
+            return _augment_profile(dict(row)) if row else None
 
     async def update_profile(self, user_id: int, chat_id: int, **kwargs: Any) -> None:
         """
@@ -453,16 +454,20 @@ class UserProfileStore:
         now = int(time.time())
         kwargs["updated_at"] = now
 
-        updates = [f"{key} = ?" for key in kwargs.keys()]
-        params = list(kwargs.values())
-        params.extend([user_id, chat_id])
+        updates = []
+        params = []
+        for idx, (key, value) in enumerate(kwargs.items(), start=1):
+            updates.append(f"{key} = ${idx}")
+            params.append(value)
 
-        async with get_db_connection(self._db_path) as db:
-            await db.execute(
-                f"UPDATE user_profiles SET {', '.join(updates)} WHERE user_id = ? AND chat_id = ?",
-                params,
+        params.extend([user_id, chat_id])
+        where_param_idx = len(kwargs) + 1
+
+        async with get_db_connection(self._database_url) as conn:
+            await conn.execute(
+                f"UPDATE user_profiles SET {', '.join(updates)} WHERE user_id = ${where_param_idx} AND chat_id = ${where_param_idx + 1}",
+                *params,
             )
-            await db.commit()
 
         telemetry.increment_counter("profiles_updated")
 
@@ -473,27 +478,29 @@ class UserProfileStore:
         await self.init()
         now = int(time.time())
 
-        async with get_db_connection(self._db_path) as db:
+        async with get_db_connection(self._database_url) as conn:
             updates = [
                 "interaction_count = interaction_count + 1",
                 "message_count = message_count + 1",
-                "last_seen = ?",
-                "updated_at = ?",
+                "last_seen = $1",
+                "updated_at = $2",
                 "membership_status = 'member'",
             ]
             params: list[Any] = [now, now]
+            param_idx = 3
 
             if thread_id is not None:
-                updates.append("last_active_thread = ?")
+                updates.append(f"last_active_thread = ${param_idx}")
                 params.append(thread_id)
+                param_idx += 1
 
             params.extend([user_id, chat_id])
+            where_param_idx = param_idx
 
-            await db.execute(
-                f"UPDATE user_profiles SET {', '.join(updates)} WHERE user_id = ? AND chat_id = ?",
-                params,
+            await conn.execute(
+                f"UPDATE user_profiles SET {', '.join(updates)} WHERE user_id = ${where_param_idx} AND chat_id = ${where_param_idx + 1}",
+                *params,
             )
-            await db.commit()
 
     async def list_chat_users(
         self,
@@ -504,13 +511,12 @@ class UserProfileStore:
         """Return users known in a chat ordered by activity."""
         await self.init()
 
-        async with get_db_connection(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
+        async with get_db_connection(self._database_url) as conn:
             query = """
                 SELECT user_id, display_name, username, pronouns, membership_status,
                        interaction_count, message_count, last_seen, created_at, updated_at
                 FROM user_profiles
-                WHERE chat_id = ?
+                WHERE chat_id = $1
             """
             params: list[Any] = [chat_id]
 
@@ -531,12 +537,11 @@ class UserProfileStore:
             """
 
             if limit:
-                query += " LIMIT ?"
+                query += " LIMIT $2"
                 params.append(limit)
 
-            async with db.execute(query, params) as cursor:
-                rows = await cursor.fetchall()
-                return [_augment_profile(dict(row)) for row in rows]
+            rows = await conn.fetch(query, *params)
+            return [_augment_profile(dict(row)) for row in rows]
 
     async def add_fact(
         self,
@@ -559,21 +564,23 @@ class UserProfileStore:
         await self.init()
         now = int(time.time())
 
-        async with get_db_connection(self._db_path) as db:
+        async with get_db_connection(self._database_url) as conn:
             # Check if similar fact exists (same type and key)
-            async with db.execute(
+            existing = await conn.fetchrow(
                 """
                 SELECT id, confidence, is_active, fact_value
                 FROM user_facts
-                WHERE user_id = ? AND chat_id = ? AND fact_type = ? AND fact_key = ?
+                WHERE user_id = $1 AND chat_id = $2 AND fact_type = $3 AND fact_key = $4
                 ORDER BY created_at DESC LIMIT 1
                 """,
-                (user_id, chat_id, fact_type, fact_key),
-            ) as cursor:
-                existing = await cursor.fetchone()
+                user_id, chat_id, fact_type, fact_key,
+            )
 
             if existing:
-                existing_id, existing_confidence, is_active, existing_value = existing
+                existing_id = existing["id"]
+                existing_confidence = existing["confidence"]
+                is_active = existing["is_active"]
+                existing_value = existing["fact_value"]
 
                 # Determine change type and whether to update
                 value_changed = existing_value != fact_value
@@ -582,12 +589,11 @@ class UserProfileStore:
                 # If new confidence is higher or fact was inactive, update it
                 if confidence > existing_confidence or not is_active:
                     # Get current version count
-                    async with db.execute(
-                        "SELECT COALESCE(MAX(version_number), 0) FROM fact_versions WHERE fact_id = ?",
-                        (existing_id,),
-                    ) as cursor:
-                        row = await cursor.fetchone()
-                        current_version = row[0] if row else 0
+                    row = await conn.fetchrow(
+                        "SELECT COALESCE(MAX(version_number), 0) as ver FROM fact_versions WHERE fact_id = $1",
+                        existing_id,
+                    )
+                    current_version = row["ver"] if row else 0
 
                     # Determine change type
                     if not is_active:
@@ -604,34 +610,31 @@ class UserProfileStore:
                         change_type = "reinforcement"
 
                     # Update fact
-                    await db.execute(
+                    await conn.execute(
                         """
                         UPDATE user_facts
-                        SET fact_value = ?, confidence = ?, is_active = 1,
-                            updated_at = ?, last_mentioned = ?,
-                            evidence_text = COALESCE(?, evidence_text)
-                        WHERE id = ?
+                        SET fact_value = $1, confidence = $2, is_active = 1,
+                            updated_at = $3, last_mentioned = $4,
+                            evidence_text = COALESCE($5, evidence_text)
+                        WHERE id = $6
                         """,
-                        (fact_value, confidence, now, now, evidence_text, existing_id),
+                        fact_value, confidence, now, now, evidence_text, existing_id,
                     )
 
                     # Record version
-                    await db.execute(
+                    await conn.execute(
                         """
                         INSERT INTO fact_versions
                         (fact_id, version_number, change_type, confidence_delta, created_at)
-                        VALUES (?, ?, ?, ?, ?)
+                        VALUES ($1, $2, $3, $4, $5)
                         """,
-                        (
-                            existing_id,
-                            current_version + 1,
-                            change_type,
-                            confidence - existing_confidence,
-                            now,
-                        ),
+                        existing_id,
+                        current_version + 1,
+                        change_type,
+                        confidence - existing_confidence,
+                        now,
                     )
 
-                    await db.commit()
                     LOGGER.debug(
                         f"Updated fact {existing_id} for user {user_id}: {fact_key}={fact_value} ({change_type})",
                         extra={
@@ -644,67 +647,61 @@ class UserProfileStore:
                     return existing_id
                 else:
                     # Just update last_mentioned and record reinforcement
-                    await db.execute(
-                        "UPDATE user_facts SET last_mentioned = ? WHERE id = ?",
-                        (now, existing_id),
+                    await conn.execute(
+                        "UPDATE user_facts SET last_mentioned = $1 WHERE id = $2",
+                        now, existing_id,
                     )
 
                     # Get current version count for reinforcement record
-                    async with db.execute(
-                        "SELECT COALESCE(MAX(version_number), 0) FROM fact_versions WHERE fact_id = ?",
-                        (existing_id,),
-                    ) as cursor:
-                        row = await cursor.fetchone()
-                        current_version = row[0] if row else 0
+                    row = await conn.fetchrow(
+                        "SELECT COALESCE(MAX(version_number), 0) as ver FROM fact_versions WHERE fact_id = $1",
+                        existing_id,
+                    )
+                    current_version = row["ver"] if row else 0
 
                     # Record reinforcement
-                    await db.execute(
+                    await conn.execute(
                         """
                         INSERT INTO fact_versions
                         (fact_id, version_number, change_type, confidence_delta, created_at)
-                        VALUES (?, ?, ?, ?, ?)
+                        VALUES ($1, $2, $3, $4, $5)
                         """,
-                        (existing_id, current_version + 1, "reinforcement", 0.0, now),
+                        existing_id, current_version + 1, "reinforcement", 0.0, now,
                     )
 
-                    await db.commit()
                     return existing_id
 
             # Insert new fact
-            cursor = await db.execute(
+            fact_id = await conn.fetchval(
                 """
                 INSERT INTO user_facts
                 (user_id, chat_id, fact_type, fact_key, fact_value, confidence,
                  source_message_id, evidence_text, is_active, created_at, updated_at, last_mentioned)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, $9, $10, $11)
+                RETURNING id
                 """,
-                (
-                    user_id,
-                    chat_id,
-                    fact_type,
-                    fact_key,
-                    fact_value,
-                    confidence,
-                    source_message_id,
-                    evidence_text,
-                    now,
-                    now,
-                    now,
-                ),
+                user_id,
+                chat_id,
+                fact_type,
+                fact_key,
+                fact_value,
+                confidence,
+                source_message_id,
+                evidence_text,
+                now,
+                now,
+                now,
             )
-            fact_id = cursor.lastrowid
 
             # Record initial version
-            await db.execute(
+            await conn.execute(
                 """
                 INSERT INTO fact_versions
                 (fact_id, version_number, change_type, confidence_delta, created_at)
-                VALUES (?, 1, 'creation', ?, ?)
+                VALUES ($1, 1, 'creation', $2, $3)
                 """,
-                (fact_id, confidence, now),
+                fact_id, confidence, now,
             )
-
-            await db.commit()
 
             telemetry.increment_counter("facts_extracted")
             LOGGER.debug(
@@ -727,6 +724,7 @@ class UserProfileStore:
         min_confidence: float = 0.0,
         active_only: bool = True,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         """
         Get facts for a user.
@@ -738,44 +736,39 @@ class UserProfileStore:
         await self.init()
 
         # Check if user_facts table exists (for backward compatibility)
-        async with get_db_connection(self._db_path) as db:
+        async with get_db_connection(self._database_url) as conn:
             try:
-                async with db.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name='user_facts'"
-                ) as cursor:
-                    table_exists = await cursor.fetchone()
-
-                if not table_exists:
-                    # Table doesn't exist, return empty list
+                # Check table existence in Postgres
+                row = await conn.fetchrow(
+                    "SELECT to_regclass('public.user_facts')"
+                )
+                if not row or not row[0]:
                     return []
 
                 # Table exists, proceed with original query
-                query = "SELECT * FROM user_facts WHERE user_id = ? AND chat_id = ?"
+                query = "SELECT * FROM user_facts WHERE user_id = $1 AND chat_id = $2"
                 params: list[Any] = [user_id, chat_id]
+                param_idx = 3
 
                 if fact_type:
-                    query += " AND fact_type = ?"
+                    query += f" AND fact_type = ${param_idx}"
                     params.append(fact_type)
+                    param_idx += 1
 
                 if active_only:
                     query += " AND is_active = 1"
 
                 if min_confidence > 0:
-                    query += " AND confidence >= ?"
+                    query += f" AND confidence >= ${param_idx}"
                     params.append(min_confidence)
+                    param_idx += 1
 
-                query += " ORDER BY confidence DESC, updated_at DESC LIMIT ?"
+                query += f" ORDER BY confidence DESC, updated_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
                 params.append(limit)
+                params.append(offset)
 
-                db.row_factory = aiosqlite.Row
-                async with db.execute(query, params) as cursor:
-                    rows = await cursor.fetchall()
-                    return [dict(row) for row in rows]
-            except aiosqlite.OperationalError as e:
-                LOGGER.warning(
-                    f"Error fetching facts from database: {e}", exc_info=True
-                )
-                return []
+                rows = await conn.fetch(query, *params)
+                return [dict(row) for row in rows]
             except Exception as e:
                 LOGGER.error(
                     f"Unexpected error fetching facts (deprecated): {e}", exc_info=True
@@ -789,33 +782,15 @@ class UserProfileStore:
         """
         await self.init()
 
-        async with get_db_connection(self._db_path) as db:
+        async with get_db_connection(self._database_url) as conn:
             try:
-                # Check if table exists
-                async with db.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name='user_facts'"
-                ) as cursor:
-                    table_exists = await cursor.fetchone()
-
-                if not table_exists:
-                    LOGGER.warning(
-                        f"Cannot deactivate fact {fact_id}: user_facts table doesn't exist (deprecated)"
-                    )
-                    return
-
-                await db.execute(
-                    "UPDATE user_facts SET is_active = 0, updated_at = ? WHERE id = ?",
-                    (int(time.time()), fact_id),
-                )
-                await db.commit()
-                LOGGER.info(f"Deactivated fact {fact_id}")
-            except aiosqlite.OperationalError as e:
-                LOGGER.warning(
-                    f"Database error deactivating fact {fact_id}: {e}", exc_info=True
+                await conn.execute(
+                    "UPDATE user_facts SET is_active = 0, updated_at = $1 WHERE id = $2",
+                    int(time.time()), fact_id
                 )
             except Exception as e:
-                LOGGER.error(
-                    f"Unexpected error deactivating fact {fact_id}: {e}", exc_info=True
+                LOGGER.warning(
+                    f"Database error deactivating fact {fact_id}: {e}", exc_info=True
                 )
 
     async def delete_fact(self, fact_id: int) -> bool:
@@ -828,39 +803,17 @@ class UserProfileStore:
         """
         await self.init()
 
-        async with get_db_connection(self._db_path) as db:
+        async with get_db_connection(self._database_url) as conn:
             try:
-                # Check if table exists
-                async with db.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name='user_facts'"
-                ) as cursor:
-                    table_exists = await cursor.fetchone()
-
-                if not table_exists:
-                    LOGGER.warning(
-                        f"Cannot delete fact {fact_id}: user_facts table doesn't exist (deprecated)"
-                    )
-                    return False
-
-                cursor = await db.execute(
-                    "DELETE FROM user_facts WHERE id = ?", (fact_id,)
+                status = await conn.execute(
+                    "DELETE FROM user_facts WHERE id = $1",
+                    fact_id
                 )
-                deleted = cursor.rowcount or 0
-                await db.commit()
-
-                if deleted > 0:
-                    LOGGER.info(f"Deleted fact {fact_id}")
-                    return True
-
-                return False
-            except aiosqlite.OperationalError as e:
-                LOGGER.warning(
-                    f"Database error deleting fact {fact_id}: {e}", exc_info=True
-                )
-                return False
+                # status is like "DELETE 1"
+                return status != "DELETE 0"
             except Exception as e:
                 LOGGER.error(
-                    f"Unexpected error deleting fact {fact_id}: {e}", exc_info=True
+                    f"Error deleting fact {fact_id}: {e}", exc_info=True
                 )
                 return False
 
@@ -871,91 +824,66 @@ class UserProfileStore:
         related_user_id: int,
         relationship_type: str = "unknown",
         relationship_label: str | None = None,
-        strength: float = 0.5,
-        sentiment: str = "neutral",
     ) -> None:
-        """
-        Record or update a relationship between users.
-
-        Automatically increments interaction_count and updates last_interaction.
-        """
+        """Record a relationship between two users."""
         await self.init()
         now = int(time.time())
 
-        async with get_db_connection(self._db_path) as db:
+        async with get_db_connection(self._database_url) as conn:
             # Check if relationship exists
-            async with db.execute(
+            row = await conn.fetchrow(
                 """
-                SELECT id, interaction_count FROM user_relationships
-                WHERE user_id = ? AND chat_id = ? AND related_user_id = ?
+                SELECT id FROM user_relationships
+                WHERE user_id = $1 AND related_user_id = $2 AND chat_id = $3
                 """,
-                (user_id, chat_id, related_user_id),
-            ) as cursor:
-                existing = await cursor.fetchone()
+                user_id, related_user_id, chat_id,
+            )
 
-            if existing:
-                rel_id, current_count = existing
-                await db.execute(
+            if row:
+                # Update existing
+                await conn.execute(
                     """
                     UPDATE user_relationships
-                    SET relationship_type = ?, relationship_label = COALESCE(?, relationship_label),
-                        strength = ?, sentiment = ?, interaction_count = ?,
-                        last_interaction = ?, updated_at = ?
-                    WHERE id = ?
+                    SET relationship_type = $1, relationship_label = $2,
+                        updated_at = $3, interaction_count = interaction_count + 1
+                    WHERE id = $4
                     """,
-                    (
-                        relationship_type,
-                        relationship_label,
-                        strength,
-                        sentiment,
-                        current_count + 1,
-                        now,
-                        now,
-                        rel_id,
-                    ),
+                    relationship_type, relationship_label, now, row["id"],
                 )
             else:
-                await db.execute(
+                # Create new
+                await conn.execute(
                     """
                     INSERT INTO user_relationships
-                    (user_id, chat_id, related_user_id, relationship_type, relationship_label,
-                     strength, interaction_count, last_interaction, sentiment, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+                    (user_id, related_user_id, chat_id, relationship_type, relationship_label,
+                     interaction_count, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, 1, $6, $7)
                     """,
-                    (
-                        user_id,
-                        chat_id,
-                        related_user_id,
-                        relationship_type,
-                        relationship_label,
-                        strength,
-                        now,
-                        sentiment,
-                        now,
-                        now,
-                    ),
+                    user_id,
+                    related_user_id,
+                    chat_id,
+                    relationship_type,
+                    relationship_label,
+                    now,
+                    now,
                 )
-
-            await db.commit()
 
     async def get_relationships(
         self, user_id: int, chat_id: int, min_strength: float = 0.0
     ) -> list[dict[str, Any]]:
-        """Get relationships for a user, sorted by strength."""
+        """Get relationships for a user."""
         await self.init()
 
-        async with get_db_connection(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
+        async with get_db_connection(self._database_url) as conn:
+            rows = await conn.fetch(
                 """
                 SELECT * FROM user_relationships
-                WHERE user_id = ? AND chat_id = ? AND strength >= ?
+                WHERE user_id = $1 AND chat_id = $2 AND strength >= $3
                 ORDER BY strength DESC, interaction_count DESC
                 """,
-                (user_id, chat_id, min_strength),
-            ) as cursor:
-                rows = await cursor.fetchall()
-                return [dict(row) for row in rows]
+                user_id, chat_id, min_strength,
+            )
+            return [dict(row) for row in rows]
 
     async def get_user_summary(
         self,
@@ -1041,16 +969,15 @@ class UserProfileStore:
 
         now = int(time.time())
 
-        async with get_db_connection(self._db_path) as db:
-            await db.execute(
+        async with get_db_connection(self._database_url) as conn:
+            await conn.execute(
                 """
                 UPDATE user_profiles
-                SET pronouns = ?, updated_at = ?
-                WHERE user_id = ? AND chat_id = ?
+                SET pronouns = $1, updated_at = $2
+                WHERE user_id = $3 AND chat_id = $4
                 """,
-                (normalized, now, user_id, chat_id),
+                normalized, now, user_id, chat_id,
             )
-            await db.commit()
 
         telemetry.increment_counter("profiles_updated")
 
@@ -1062,12 +989,11 @@ class UserProfileStore:
         """
         await self.init()
 
-        async with get_db_connection(self._db_path) as db:
-            await db.execute(
-                "DELETE FROM user_profiles WHERE user_id = ? AND chat_id = ?",
-                (user_id, chat_id),
+        async with get_db_connection(self._database_url) as conn:
+            await conn.execute(
+                "DELETE FROM user_profiles WHERE user_id = $1 AND chat_id = $2",
+                user_id, chat_id,
             )
-            await db.commit()
 
         LOGGER.info(
             f"Deleted profile for user {user_id} in chat {chat_id}",
@@ -1079,13 +1005,16 @@ class UserProfileStore:
         await self.init()
         cutoff = int(time.time()) - (retention_days * 86400)
 
-        async with get_db_connection(self._db_path) as db:
-            cursor = await db.execute(
-                "DELETE FROM user_facts WHERE created_at < ? AND is_active = 0",
-                (cutoff,),
+        async with get_db_connection(self._database_url) as conn:
+            status = await conn.execute(
+                "DELETE FROM user_facts WHERE created_at < $1 AND is_active = 0",
+                cutoff,
             )
-            deleted = cursor.rowcount or 0
-            await db.commit()
+            # status is like "DELETE 5"
+            try:
+                deleted = int(status.split()[1])
+            except (IndexError, ValueError):
+                deleted = 0
 
         if deleted > 0:
             LOGGER.info(
@@ -1098,13 +1027,12 @@ class UserProfileStore:
         """Get count of active facts for a user."""
         await self.init()
 
-        async with get_db_connection(self._db_path) as db:
-            async with db.execute(
-                "SELECT COUNT(*) FROM user_facts WHERE user_id = ? AND chat_id = ? AND is_active = 1",
-                (user_id, chat_id),
-            ) as cursor:
-                row = await cursor.fetchone()
-                return row[0] if row else 0
+        async with get_db_connection(self._database_url) as conn:
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM user_facts WHERE user_id = $1 AND chat_id = $2 AND is_active = 1",
+                user_id, chat_id,
+            )
+            return count or 0
 
     async def clear_user_facts(self, user_id: int, chat_id: int) -> int:
         """
@@ -1115,17 +1043,20 @@ class UserProfileStore:
         await self.init()
         now = int(time.time())
 
-        async with get_db_connection(self._db_path) as db:
-            cursor = await db.execute(
+        async with get_db_connection(self._database_url) as conn:
+            status = await conn.execute(
                 """
                 UPDATE user_facts
-                SET is_active = 0, updated_at = ?
-                WHERE user_id = ? AND chat_id = ? AND is_active = 1
+                SET is_active = 0, updated_at = $1
+                WHERE user_id = $2 AND chat_id = $3 AND is_active = 1
                 """,
-                (now, user_id, chat_id),
+                now, user_id, chat_id,
             )
-            count = cursor.rowcount or 0
-            await db.commit()
+            # status is like "UPDATE 5"
+            try:
+                count = int(status.split()[1])
+            except (IndexError, ValueError):
+                count = 0
 
         if count > 0:
             LOGGER.info(
@@ -1151,8 +1082,8 @@ class UserProfileStore:
         """
         await self.init()
 
-        async with get_db_connection(self._db_path) as db:
-            async with db.execute(
+        async with get_db_connection(self._database_url) as conn:
+            rows = await conn.fetch(
                 """
                 SELECT DISTINCT p.user_id
                 FROM user_profiles p
@@ -1165,12 +1096,11 @@ class UserProfileStore:
                     OR p.last_seen > COALESCE(p.summary_updated_at, 0)
                 )
                 ORDER BY p.message_count DESC
-                LIMIT ?
+                LIMIT $1
                 """,
-                (limit,),
-            ) as cursor:
-                rows = await cursor.fetchall()
-                return [row[0] for row in rows]
+                limit,
+            )
+            return [row["user_id"] for row in rows]
 
     async def update_summary(self, user_id: int, summary: str) -> None:
         """Update the summary for a user's profile.
@@ -1185,16 +1115,15 @@ class UserProfileStore:
         await self.init()
         now = int(time.time())
 
-        async with get_db_connection(self._db_path) as db:
-            await db.execute(
+        async with get_db_connection(self._database_url) as conn:
+            await conn.execute(
                 """
                 UPDATE user_profiles
-                SET summary = ?, summary_updated_at = ?
-                WHERE user_id = ?
+                SET summary = $1, summary_updated_at = $2
+                WHERE user_id = $3
                 """,
-                (summary, now, user_id),
+                summary, now, user_id,
             )
-            await db.commit()
 
         LOGGER.info(
             f"Updated summary for user {user_id}",

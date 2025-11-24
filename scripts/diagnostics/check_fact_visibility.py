@@ -11,8 +11,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from app.services.user_profile_adapter import UserProfileStoreAdapter
 import aiosqlite
+
+from app.services.user_profile_adapter import UserProfileStoreAdapter
 
 
 async def main():
@@ -102,7 +103,7 @@ async def main():
         print(f"\n✅ Active Facts Only: {active_count} facts")
 
         # Test 4: Simulate /gryagfacts command
-        print(f"\n🔍 Simulating /gryagfacts command...")
+        print("\n🔍 Simulating /gryagfacts command...")
         facts_for_command = await adapter.get_facts(
             user_id=user_id,
             chat_id=chat_context,
@@ -111,17 +112,17 @@ async def main():
         )
 
         if not facts_for_command:
-            print(f"   ❌ PROBLEM: /gryagfacts would show NO FACTS!")
+            print("   ❌ PROBLEM: /gryagfacts would show NO FACTS!")
             print(f"   But direct query found {len(direct_facts)} facts")
             print(f"   Active facts: {active_count}")
 
             # Diagnose why
             if active_count == 0:
-                print(f"   💡 CAUSE: All facts are INACTIVE (is_active=0)")
-                print(f"   💡 SOLUTION: Reactivate facts or check why they're inactive")
+                print("   💡 CAUSE: All facts are INACTIVE (is_active=0)")
+                print("   💡 SOLUTION: Reactivate facts or check why they're inactive")
             else:
                 print(
-                    f"   💡 CAUSE: Unknown - adapter query returning empty despite active facts"
+                    "   💡 CAUSE: Unknown - adapter query returning empty despite active facts"
                 )
         else:
             print(f"   ✅ /gryagfacts would show {len(facts_for_command)} facts")
@@ -154,10 +155,10 @@ async def main():
 
     if inactive > total * 0.3:  # More than 30% inactive
         print(f"\n⚠️  WARNING: {inactive/total*100:.1f}% of facts are inactive!")
-        print(f"   This may indicate a data migration or deletion issue.")
-        print(f"   Consider investigating why so many facts are marked inactive.")
+        print("   This may indicate a data migration or deletion issue.")
+        print("   Consider investigating why so many facts are marked inactive.")
 
-    print(f"\n✅ Diagnostic complete!")
+    print("\n✅ Diagnostic complete!")
 
 
 if __name__ == "__main__":

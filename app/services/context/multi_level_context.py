@@ -694,17 +694,22 @@ class MultiLevelContextManager:
             if keyword in query_lower:
                 return "news"
 
+        # Check for commands (imperative verbs) - prioritize over factual
+        # Check if first word is a command
+        if query_words and query_words[0] in command_indicators:
+            return "command"
+        
+        # Check if any command indicator is present as a whole word
+        if any(indicator in query_words for indicator in command_indicators):
+            return "command"
+
         # Check for factual questions (question words at start)
         if query_words and query_words[0] in factual_indicators:
             return "factual"
 
-        # Check for any factual indicators in query
-        if any(indicator in query_lower for indicator in factual_indicators):
+        # Check for any factual indicators in query (as whole words)
+        if any(indicator in query_words for indicator in factual_indicators):
             return "factual"
-
-        # Check for commands (imperative verbs)
-        if any(indicator in query_lower for indicator in command_indicators):
-            return "command"
 
         # Check for conversational patterns
         if any(indicator in query_lower for indicator in conversational_indicators):

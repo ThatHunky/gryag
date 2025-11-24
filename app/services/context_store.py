@@ -221,9 +221,7 @@ def _chunked(seq: list[int], size: int) -> Iterable[list[int]]:
 class ContextStore:
     """PostgreSQL-backed storage for chat history and per-user quotas."""
 
-    def __init__(
-        self, database_url: str, redis_client: RedisLike | None = None
-    ) -> None:
+    def __init__(self, database_url: str, redis_client: RedisLike | None = None) -> None:
         """
         Initialize context store.
 
@@ -231,7 +229,7 @@ class ContextStore:
             database_url: PostgreSQL connection string
             redis_client: Optional Redis client for caching
         """
-        self._database_url = database_url
+        self._database_url = str(database_url)
         self._init_lock = asyncio.Lock()
         self._initialized = False
         self._prune_lock = asyncio.Lock()
@@ -242,15 +240,18 @@ class ContextStore:
         )
         self._redis = redis_client  # Store for ban caching
 
+
+
     async def init(self) -> None:
-        """Initialize PostgreSQL connection (schema already applied by init_database)."""
+        """Initialize database connection."""
         async with self._init_lock:
             if self._initialized:
                 return
-            # For PostgreSQL, schema is applied via init_database() in main.py
-            # Just verify connection works
+
+            # Verify connection works
             async with get_db_connection(self._database_url) as conn:
                 await conn.execute("SELECT 1")
+
             self._initialized = True
             logger.info("ContextStore initialized with PostgreSQL")
 
@@ -335,6 +336,9 @@ class ContextStore:
                     sender_username,
                     sender_is_bot,
                 )
+
+                row = await conn.fetchrow(query, *params)
+
                 row = await conn.fetchrow(query, *params)
                 message_id = row["id"] if row else 0
 
@@ -359,10 +363,9 @@ class ContextStore:
             message_id: Primary key of the message in `messages` table
             embedding: Vector to store (JSON) or None to clear
         """
-        query, params = convert_query_to_postgres(
-            "UPDATE messages SET embedding = $1 WHERE id = $2",
-            (json.dumps(embedding) if embedding else None, message_id),
-        )
+        query = "UPDATE messages SET embedding = $1 WHERE id = $2"
+        params = (json.dumps(embedding) if embedding else None, message_id)
+
         async with get_db_connection(self._database_url) as conn:
             await conn.execute(query, *params)
 
@@ -382,14 +385,13 @@ class ContextStore:
     async def ban_user(self, chat_id: int, user_id: int) -> None:
         await self.init()
         ts = int(time.time())
-        query, params = convert_query_to_postgres(
-            """
+        query = """
             INSERT INTO bans (chat_id, user_id, ts, last_notice_time)
             VALUES ($1, $2, $3, NULL)
-            ON CONFLICT (chat_id, user_id) DO UPDATE SET ts = $3
-            """,
-            (chat_id, user_id, ts),
-        )
+            ON CONFLICT (chat_id, user_id) DO UPDATE SET ts = $4
+        """
+        params = (chat_id, user_id, ts, ts)
+
         async with get_db_connection(self._database_url) as conn:
             await conn.execute(query, *params)
 
@@ -405,36 +407,33 @@ class ContextStore:
         """Remove all stored messages for a user within a chat."""
         await self.init()
         async with get_db_connection(self._database_url) as conn:
-            query, params = convert_query_to_postgres(
-                "SELECT id FROM messages WHERE chat_id = $1 AND user_id = $2",
-                (chat_id, user_id),
-            )
+            query = "SELECT id FROM messages WHERE chat_id = $1 AND user_id = $2"
+            params = (chat_id, user_id)
+
             rows = await conn.fetch(query, *params)
             message_ids = [row["id"] for row in rows]
 
             if not message_ids:
                 return 0
 
-            for chunk in _chunked(message_ids, 500):
-                placeholders = ",".join(f"${i+1}" for i in range(len(chunk)))
-                await conn.execute(
-                    f"DELETE FROM message_metadata WHERE message_id IN ({placeholders})",
-                    *chunk,
-                )
-                await conn.execute(
-                    f"DELETE FROM messages WHERE id IN ({placeholders})",
-                    *chunk,
-                )
+            # Delete metadata first (foreign key constraint)
+            # Use ANY($1) for array parameter in Postgres
+            q1 = "DELETE FROM message_metadata WHERE message_id = ANY($1::bigint[])"
+            p1 = (message_ids,)
+            await conn.execute(q1, *p1)
+
+            q2 = "DELETE FROM messages WHERE id = ANY($1::bigint[])"
+            p2 = (message_ids,)
+            await conn.execute(q2, *p2)
 
             # Clear derived aggregates that may still reference removed messages
-            query, params = convert_query_to_postgres(
-                "DELETE FROM conversation_windows WHERE chat_id = $1", (chat_id,)
-            )
-            await conn.execute(query, *params)
-            query, params = convert_query_to_postgres(
-                "DELETE FROM proactive_events WHERE chat_id = $1", (chat_id,)
-            )
-            await conn.execute(query, *params)
+            q3 = "DELETE FROM conversation_windows WHERE chat_id = $1"
+            p3 = (chat_id,)
+            await conn.execute(q3, *p3)
+
+            q4 = "DELETE FROM proactive_events WHERE chat_id = $1"
+            p4 = (chat_id,)
+            await conn.execute(q4, *p4)
 
         return len(message_ids)
 
@@ -445,49 +444,42 @@ class ContextStore:
         await self.init()
         async with get_db_connection(self._database_url) as conn:
             # Try matching dedicated external column first (stringified)
-            query, params = convert_query_to_postgres(
-                "SELECT id FROM messages WHERE chat_id = $1 AND external_message_id = $2 LIMIT 1",
-                (chat_id, str(external_message_id)),
-            )
+            query = "SELECT id FROM messages WHERE chat_id = $1 AND external_message_id = $2 LIMIT 1"
+            params = (chat_id, str(external_message_id))
+
             row = await conn.fetchrow(query, *params)
             if not row:
-                # Fallback to legacy JSON meta lookup (PostgreSQL JSONB)
-                # Note: media is TEXT, so we need to cast it to jsonb for JSON operations
-                # We check for NULL/empty media first to avoid casting errors
-                query, params = convert_query_to_postgres(
-                    """
+                # Fallback to legacy JSON meta lookup
+                query = """
                     SELECT id FROM messages
                     WHERE chat_id = $1
                       AND media IS NOT NULL
                       AND media != ''
                       AND (media::jsonb->'meta'->>'message_id') = $2
                     LIMIT 1
-                    """,
-                    (chat_id, str(external_message_id)),
-                )
+                """
+                params = (chat_id, str(external_message_id))
+
                 row = await conn.fetchrow(query, *params)
             if not row:
                 return False
 
             internal_id = row["id"]
-            query, params = convert_query_to_postgres(
-                "DELETE FROM message_metadata WHERE message_id = $1",
-                (internal_id,),
-            )
-            await conn.execute(query, *params)
-            query, params = convert_query_to_postgres(
-                "DELETE FROM messages WHERE id = $1",
-                (internal_id,),
-            )
-            await conn.execute(query, *params)
+
+            q1 = "DELETE FROM message_metadata WHERE message_id = $1"
+            p1 = (internal_id,)
+            await conn.execute(q1, *p1)
+
+            q2 = "DELETE FROM messages WHERE id = $1"
+            p2 = (internal_id,)
+            await conn.execute(q2, *p2)
             return True
 
     async def unban_user(self, chat_id: int, user_id: int) -> None:
         await self.init()
-        query, params = convert_query_to_postgres(
-            "DELETE FROM bans WHERE chat_id = $1 AND user_id = $2",
-            (chat_id, user_id),
-        )
+        query = "DELETE FROM bans WHERE chat_id = $1 AND user_id = $2"
+        params = (chat_id, user_id)
+
         async with get_db_connection(self._database_url) as conn:
             await conn.execute(query, *params)
 
@@ -514,10 +506,9 @@ class ContextStore:
                 logger.warning(f"Redis ban cache get failed: {exc}")
 
         # Query database
-        query, params = convert_query_to_postgres(
-            "SELECT 1 FROM bans WHERE chat_id = $1 AND user_id = $2 LIMIT 1",
-            (chat_id, user_id),
-        )
+        query = "SELECT 1 FROM bans WHERE chat_id = $1 AND user_id = $2 LIMIT 1"
+        params = (chat_id, user_id)
+
         async with get_db_connection(self._database_url) as conn:
             row = await conn.fetchrow(query, *params)
             is_banned = row is not None
@@ -545,10 +536,9 @@ class ContextStore:
 
         async with get_db_connection(self._database_url) as conn:
             # Check last ban notice time
-            query, params = convert_query_to_postgres(
-                "SELECT last_notice_time FROM bans WHERE chat_id = $1 AND user_id = $2",
-                (chat_id, user_id),
-            )
+            query = "SELECT last_notice_time FROM bans WHERE chat_id = $1 AND user_id = $2"
+            params = (chat_id, user_id)
+
             row = await conn.fetchrow(query, *params)
 
             if row is None:
@@ -558,21 +548,17 @@ class ContextStore:
             last_notice = row["last_notice_time"]
             if last_notice is None:
                 # First time - send notice and update timestamp
-                query, params = convert_query_to_postgres(
-                    "UPDATE bans SET last_notice_time = $1 WHERE chat_id = $2 AND user_id = $3",
-                    (current_time, chat_id, user_id),
-                )
-                await conn.execute(query, *params)
+                q2 = "UPDATE bans SET last_notice_time = $1 WHERE chat_id = $2 AND user_id = $3"
+                p2 = (current_time, chat_id, user_id)
+                await conn.execute(q2, *p2)
                 return True
 
             # Check if cooldown has passed
             if current_time - last_notice >= cooldown_seconds:
                 # Update timestamp
-                query, params = convert_query_to_postgres(
-                    "UPDATE bans SET last_notice_time = $1 WHERE chat_id = $2 AND user_id = $3",
-                    (current_time, chat_id, user_id),
-                )
-                await conn.execute(query, *params)
+                q3 = "UPDATE bans SET last_notice_time = $1 WHERE chat_id = $2 AND user_id = $3"
+                p3 = (current_time, chat_id, user_id)
+                await conn.execute(q3, *p3)
                 return True
 
             return False
@@ -763,21 +749,20 @@ class ContextStore:
         if thread_id is None:
             query = (
                 "SELECT id, role, text, media, embedding FROM messages "
-                "WHERE chat_id = ? AND embedding IS NOT NULL "
-                "ORDER BY id DESC LIMIT ?"
+                "WHERE chat_id = $1 AND embedding IS NOT NULL "
+                "ORDER BY id DESC LIMIT $2"
             )
             params: tuple[Any, ...] = (chat_id, candidate_cap)
         else:
             query = (
                 "SELECT id, role, text, media, embedding FROM messages "
-                "WHERE chat_id = ? AND thread_id = ? AND embedding IS NOT NULL "
-                "ORDER BY id DESC LIMIT ?"
+                "WHERE chat_id = $1 AND thread_id = $2 AND embedding IS NOT NULL "
+                "ORDER BY id DESC LIMIT $3"
             )
             params = (chat_id, thread_id, candidate_cap)
 
-        query_pg, params_pg = convert_query_to_postgres(query, params)
         async with get_db_connection(self._database_url) as conn:
-            rows = await conn.fetch(query_pg, *params_pg)
+            rows = await conn.fetch(query, *params)
 
         scored: list[tuple[float, asyncpg.Record]] = []
         for row in rows:
@@ -839,7 +824,6 @@ class ContextStore:
         async with get_db_connection(self._database_url) as conn:
             # Build list of candidate message ids that are older than cutoff
             # and are NOT referenced by episodes or protected by message_importance
-            # PostgreSQL uses jsonb_array_elements instead of json_each
             query = """
             SELECT id FROM messages m
             WHERE m.ts < $1
@@ -853,8 +837,9 @@ class ContextStore:
               )
             ORDER BY id ASC
             """
+            params = (cutoff,)
 
-            rows = await conn.fetch(query, cutoff)
+            rows = await conn.fetch(query, *params)
             candidate_ids = [row["id"] for row in rows]
 
             if not candidate_ids:
@@ -867,21 +852,16 @@ class ContextStore:
             for chunk_idx, chunk in enumerate(_chunked(candidate_ids, chunk_size)):
                 try:
                     placeholders = ",".join(f"${i+1}" for i in range(len(chunk)))
-                    # Remove metadata first
-                    await conn.execute(
+
+                    queries = [
                         f"DELETE FROM message_metadata WHERE message_id IN ({placeholders})",
-                        *chunk,
-                    )
-                    # Remove any message_importance records referencing these messages
-                    await conn.execute(
                         f"DELETE FROM message_importance WHERE message_id IN ({placeholders})",
-                        *chunk,
-                    )
-                    # Finally remove messages
-                    await conn.execute(
-                        f"DELETE FROM messages WHERE id IN ({placeholders})",
-                        *chunk,
-                    )
+                        f"DELETE FROM messages WHERE id IN ({placeholders})"
+                    ]
+
+                    for q in queries:
+                        await conn.execute(q, *chunk)
+
                     deleted_total += len(chunk)
 
                     # Add small delay between chunks to allow other operations to proceed
@@ -891,9 +871,9 @@ class ContextStore:
                         < (len(candidate_ids) + chunk_size - 1) // chunk_size - 1
                     ):
                         await asyncio.sleep(0.05)  # 50ms delay between chunks
-                except asyncpg.PostgresError as e:
+                except Exception as e:
                     logger.warning(
-                        f"Pruning operation hit database lock, continuing with remaining chunks: {e}",
+                        f"Pruning operation hit database lock or error, continuing with remaining chunks: {e}",
                         extra={"deleted_so_far": deleted_total},
                     )
                     # Continue with next chunk rather than failing completely
@@ -983,14 +963,12 @@ class ContextStore:
         cutoff = current_ts - window_seconds
 
         async with get_db_connection(self._database_url) as conn:
-            query, params = convert_query_to_postgres(
-                """
+            query = """
                 SELECT COALESCE(SUM(request_count), 0) as total
                 FROM rate_limits
                 WHERE user_id = $1 AND window_start >= $2
-                """,
-                (user_id, cutoff - (cutoff % window_seconds)),
-            )
+                """
+            params = (user_id, cutoff - (cutoff % window_seconds))
             row = await conn.fetchrow(query, *params)
             if not row or row["total"] is None:
                 return 0

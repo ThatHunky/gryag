@@ -13,7 +13,6 @@ This performs the following transformations:
 """
 
 import re
-import sys
 
 
 def migrate_imports(content: str) -> str:
@@ -184,7 +183,7 @@ def main():
     input_file = "app/services/gemini.py"
     output_file = "app/services/gemini_migrated.py"
 
-    with open(input_file, "r") as f:
+    with open(input_file) as f:
         content = f.read()
 
     print("Step 1: Migrating imports...")

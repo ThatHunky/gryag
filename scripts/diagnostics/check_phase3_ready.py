@@ -72,7 +72,7 @@ def check_readiness():
     window_facts = cursor.fetchone()[0]
 
     if window_facts > 0:
-        print(f"✓ Phase 3 is ACTIVE:")
+        print("✓ Phase 3 is ACTIVE:")
         print(f"    • {window_facts} facts extracted from conversation windows")
 
         # Show recent window activity

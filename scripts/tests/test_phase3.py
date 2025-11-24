@@ -12,11 +12,9 @@ Tests continuous learning implementation:
 Run: python test_phase3.py
 """
 
-import asyncio
 import sqlite3
-from datetime import datetime, timedelta
-from pathlib import Path
 import sys
+from pathlib import Path
 
 # Add app to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -203,7 +201,7 @@ class Phase3Validator:
                         )
                         windows = cursor.fetchall()
                         if windows:
-                            print(f"    Recent windows:")
+                            print("    Recent windows:")
                             for w in windows:
                                 print(
                                     f"      ID {w[0]}: {w[2]} messages, closed by {w[3]}"
@@ -223,7 +221,7 @@ class Phase3Validator:
                         )
                         stats = cursor.fetchone()
                         if stats[0] > 0:
-                            print(f"    Quality processing:")
+                            print("    Quality processing:")
                             print(f"      Avg duplicates removed: {stats[1]:.1f}")
                             print(f"      Avg conflicts resolved: {stats[2]:.1f}")
                             print(f"      Avg processing time: {stats[3]:.0f}ms")
@@ -248,7 +246,7 @@ class Phase3Validator:
                                 "No window-extracted facts found (Phase 3 may not be running)"
                             )
 
-                except sqlite3.OperationalError as e:
+                except sqlite3.OperationalError:
                     print(f"  {table:30} Table doesn't exist")
                     self.results["warnings"].append(f"Table {table} doesn't exist")
 

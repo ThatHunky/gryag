@@ -1,6 +1,5 @@
 """Manual log cleanup utility."""
 
-from pathlib import Path
 
 from app.config import get_settings
 from app.core.logging_config import cleanup_old_logs

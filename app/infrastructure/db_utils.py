@@ -6,6 +6,8 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
 
 import asyncpg
 
@@ -68,30 +70,59 @@ async def execute_with_retry(
     raise RuntimeError("Database operation failed")
 
 
+_pg_pool = None
+
+
+async def close_pg_pool():
+    """Close the global PostgreSQL connection pool."""
+    global _pg_pool
+    if _pg_pool:
+        await _pg_pool.close()
+        _pg_pool = None
+
+
+@asynccontextmanager
+async def get_pg_connection(database_url: str) -> AsyncIterator[asyncpg.Connection]:
+    """
+    Get a PostgreSQL connection from the pool.
+    Creates the pool if it doesn't exist.
+    """
+    global _pg_pool
+    if _pg_pool is None:
+        try:
+            _pg_pool = await asyncpg.create_pool(database_url)
+        except Exception as e:
+            # If pool creation fails, we might be in a new loop with an old pool object?
+            # No, _pg_pool is None here.
+            raise e
+
+    async with _pg_pool.acquire() as conn:
+        yield conn
+
+
 @asynccontextmanager
 async def get_db_connection(
     database_url: str,
     timeout: float = 30.0,
     max_retries: int = 3,
-) -> AsyncIterator[asyncpg.Connection]:
+) -> AsyncIterator[Any]:
     """
-    Get a database connection from PostgreSQL connection pool.
+    Get a database connection (PostgreSQL pool).
 
     Args:
-        database_url: PostgreSQL connection string (postgresql://user:pass@host:port/dbname)
-        timeout: Connection timeout in seconds (default: 30.0) - unused for pool
-        max_retries: Maximum number of retries for connection setup errors (default: 3) - unused for pool
+        database_url: Connection string (postgresql://...)
+        timeout: Connection timeout in seconds
+        max_retries: Maximum number of retries
 
     Yields:
-        asyncpg.Connection from connection pool
-
-    This context manager:
-    - Uses connection pooling for efficient connection reuse
-    - Automatically handles connection acquisition and release
-    - No manual connection management needed
+        Connection object (asyncpg.Connection)
     """
-    async with get_pg_connection(database_url) as conn:
+    # The original code had `async with get_pg_connection(str(database_url)) as conn:`.
+    # Assuming `get_pg_connection` is now the function defined above,
+    # and this `get_db_connection` is an alias or wrapper for it.
+    async with get_pg_connection(str(database_url)) as conn:
         yield conn
+
 
 
 async def init_database(database_url: str) -> None:
@@ -101,7 +132,6 @@ async def init_database(database_url: str) -> None:
     Args:
         database_url: PostgreSQL connection string
     """
-    from pathlib import Path
 
     # Read PostgreSQL schema
     schema_path = Path(__file__).resolve().parents[2] / "db" / "schema_postgresql.sql"
@@ -146,7 +176,6 @@ async def apply_migrations(database_url: str) -> None:
     - Runs each migration in its own transaction
     """
     import time
-    from pathlib import Path
 
     migrations_dir_candidates = [
         Path(__file__).resolve().parents[2] / "db" / "migrations",

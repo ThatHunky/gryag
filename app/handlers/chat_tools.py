@@ -646,7 +646,7 @@ def build_tool_callbacks(
                 remaining = stats.get("remaining", 0)
                 limit = stats.get("daily_limit", 1)
                 result_msg = "Зображення згенеровано! "
-                if not stats.get("is_admin"):
+                if not stats.get("is_admin") and not stats.get("unlimited"):
                     result_msg += f"Залишилось сьогодні: {remaining}/{limit}"
                 return json.dumps({"success": True, "message": result_msg})
             except QuotaExceededError as e:
@@ -805,7 +805,7 @@ def build_tool_callbacks(
                 remaining = stats.get("remaining", 0)
                 limit = stats.get("daily_limit", 1)
                 result_msg = "Зображення відредаговано! "
-                if not stats.get("is_admin"):
+                if not stats.get("is_admin") and not stats.get("unlimited"):
                     result_msg += f"Залишилось сьогодні: {remaining}/{limit}"
                 return json.dumps({"success": True, "message": result_msg})
             except QuotaExceededError as e:

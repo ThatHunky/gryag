@@ -226,9 +226,8 @@ class ImageGenerationService:
         async with get_db_connection(self.database_url) as conn:
             row = await conn.fetchrow(query, *params)
             used = row["images_generated"] if row else 0
-            limit = self.daily_limit
-            has_quota = used < limit
-            return has_quota, used, limit
+            # Always return true and -1 for limit to disable quotas
+            return True, used, -1
 
     async def increment_quota(self, user_id: int, chat_id: int) -> None:
         """
@@ -450,14 +449,20 @@ class ImageGenerationService:
             }
 
         has_quota, used, limit = await self.check_quota(user_id, chat_id)
-        remaining = max(0, limit - used)
+
+        if limit == -1:
+            remaining = -1
+            unlimited = True
+        else:
+            remaining = max(0, limit - used)
+            unlimited = False
 
         return {
             "is_admin": False,
             "used_today": used,
             "daily_limit": limit,
             "remaining": remaining,
-            "unlimited": False,
+            "unlimited": unlimited,
         }
 
     async def reset_user_quota(self, user_id: int, chat_id: int) -> bool:

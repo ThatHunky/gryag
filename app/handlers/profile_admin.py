@@ -671,6 +671,7 @@ async def facts_pagination_callback(
     settings: Settings,
     profile_store: UserProfileStore,
     store: ContextStore,
+    memory_repo: MemoryRepository | None = None,
 ) -> None:
     """
     Handle pagination button clicks for facts display.
@@ -715,11 +716,25 @@ async def facts_pagination_callback(
             or f"User {target_user_id}"
         )
 
-    # Get total count first for pagination
-    total_count = await profile_store.get_fact_count(target_user_id, target_chat_id)
+    # Get facts from OLD system (user_facts table)
+    old_facts_count = await profile_store.get_fact_count(target_user_id, target_chat_id)
+
+    # Get memories from NEW system (user_memories table)
+    memories_count = 0
+    if memory_repo:
+        try:
+            # Get total count by fetching all memories (repo limits to 15 anyway)
+            all_memories = await memory_repo.get_memories_for_user(target_user_id, target_chat_id)
+            memories_count = len(all_memories)
+        except Exception as e:
+            logger.error(f"Failed to get memories: {e}", exc_info=True)
+
+    # Calculate total count (old facts + new memories)
+    total_count = old_facts_count + memories_count
 
     if total_count == 0:
-        await callback.answer("📭 Фактів не знайдено")
+        filter_msg = f" типу '{fact_type_filter}'" if fact_type_filter else ""
+        await callback.answer(f"📭 Фактів{filter_msg} не знайдено")
         return
 
     # Pagination settings
@@ -728,29 +743,72 @@ async def facts_pagination_callback(
     page = min(page, total_pages)  # Clamp to valid range
     offset = (page - 1) * FACTS_PER_PAGE
 
-    # Get facts for this page
-    # Note: This callback currently only supports "facts" from profile_store, not memories
-    # because the callback logic in get_user_facts_command didn't fully account for the unified view in the callback handler.
-    # The original code only fetched from profile_store.
-    # To fix this properly, we should replicate the unified logic or assume this is legacy.
-    # Given the TODO was about offset support, let's update the profile_store call.
+    # Get facts and memories for this page
+    # We need to handle pagination across two sources: facts and memories.
+    # Strategy: Treat them as one concatenated list: [Facts... | Memories...]
+    facts_to_fetch = []
+    memories_to_fetch = []
 
-    # If we want to support memories here too, we'd need memory_repo access which isn't passed to this handler wrapper?
-    # The handler signature has: profile_store: UserProfileStore, store: ContextStore.
-    # It seems memory_repo is missing from the dependency injection for this callback in the original code?
-    # Let's check the signature.
-    # The original signature: async def facts_pagination_callback(..., profile_store: UserProfileStore, store: ContextStore) -> None:
-    # It seems memory_repo is NOT injected.
-    # For now, I will implement offset for profile_store facts.
+    # Calculate range for this page
+    start_idx = offset
+    end_idx = offset + FACTS_PER_PAGE
 
-    all_facts = await profile_store.get_facts(
-        user_id=target_user_id,
-        chat_id=target_chat_id,
-        fact_type=fact_type_filter,
-        limit=FACTS_PER_PAGE,
-        offset=offset
-    )
-    facts = all_facts
+    # 1. Fetch Facts if the window overlaps with facts range [0, old_facts_count)
+    if start_idx < old_facts_count:
+        facts_limit = min(FACTS_PER_PAGE, old_facts_count - start_idx)
+        facts_to_fetch = await profile_store.get_facts(
+            user_id=target_user_id,
+            chat_id=target_chat_id,
+            fact_type=fact_type_filter,
+            limit=facts_limit,
+            offset=start_idx
+        )
+
+    # 2. Fetch Memories if the window overlaps with memories range [old_facts_count, total_count)
+    if end_idx > old_facts_count and memory_repo:
+        # Calculate offset relative to memories list
+        mem_offset = max(0, start_idx - old_facts_count)
+        # Calculate limit for memories
+        mem_limit = FACTS_PER_PAGE - len(facts_to_fetch)
+
+        if mem_limit > 0:
+            memories_to_fetch = await memory_repo.get_memories_for_user(
+                user_id=target_user_id,
+                chat_id=target_chat_id,
+                limit=mem_limit,
+                offset=mem_offset
+            )
+
+    # Combine old facts and new memories into a unified list
+    # Format memories to look like facts for consistency
+    all_items = []
+
+    # Add old facts first
+    for fact in facts_to_fetch:
+        all_items.append(
+            {
+                "type": "fact",
+                "id": fact.get("id", "?"),
+                "fact_key": fact.get("fact_key", ""),
+                "fact_value": fact.get("fact_value", ""),
+                "confidence": fact.get("confidence", 0.0),
+                "fact_type": fact.get("fact_type", "unknown"),
+                "evidence_text": fact.get("evidence_text", ""),
+            }
+        )
+
+    # Add new memories
+    for memory in memories_to_fetch:
+        all_items.append(
+            {
+                "type": "memory",
+                "id": f"M{memory.id}",
+                "text": memory.memory_text,
+                "created_at": memory.created_at,
+            }
+        )
+
+    items = all_items
 
     if not verbose_mode:
         # Compact format
@@ -762,17 +820,22 @@ async def facts_pagination_callback(
         header += f"\n<i>Сторінка {page}/{total_pages} • Всього: {total_count}</i>\n\n"
 
         lines = [header]
-        for fact in facts:
-            fact_id = fact.get("id", "?")
-            fact_key = fact.get("fact_key", "")
-            fact_value = fact.get("fact_value", "")
-            confidence = fact.get("confidence", 0.0)
+        for item in items:
+            if item["type"] == "fact":
+                fact_id = item.get("id", "?")
+                fact_key = item.get("fact_key", "")
+                fact_value = item.get("fact_value", "")
+                confidence = item.get("confidence", 0.0)
 
-            # One-liner format: [ID] key: value (confidence%) - all in monospace to prevent mentions
-            line = (
-                f"<code>[{fact_id}] {fact_key}: {fact_value} ({confidence:.0%})</code>"
-            )
-            lines.append(line)
+                # One-liner format: [ID] key: value (confidence%) - all in monospace to prevent mentions
+                line = f"<code>[{fact_id}] {fact_key}: {fact_value} ({confidence:.0%})</code>"
+                lines.append(line)
+            elif item["type"] == "memory":
+                # New memory format: [MID] 💭 memory text - in monospace to prevent mentions
+                memory_id = item.get("id", "?")
+                memory_text = item.get("text", "")
+                line = f"<code>[{memory_id}] 💭 {memory_text}</code>"
+                lines.append(line)
 
         response = "\n".join(lines)
 
@@ -803,23 +866,44 @@ async def facts_pagination_callback(
         header += f"\n<i>Сторінка {page}/{total_pages} • Всього: {total_count}</i>\n\n"
 
         lines = [header]
-        for fact in facts:
-            fact_id = fact.get("id", "?")
-            fact_type = fact.get("fact_type", "unknown")
-            fact_key = fact.get("fact_key", "")
-            fact_value = fact.get("fact_value", "")
-            confidence = fact.get("confidence", 0.0)
-            evidence = fact.get("evidence_text", "")
+        for item in items:
+            line = ""
+            if item["type"] == "fact":
+                fact_id = item.get("id", "?")
+                fact_type = item.get("fact_type", "unknown")
+                fact_key = item.get("fact_key", "")
+                fact_value = item.get("fact_value", "")
+                confidence = item.get("confidence", 0.0)
+                evidence = item.get("evidence_text", "")
 
-            line = f"{_format_fact_type(fact_type)} <code>[{fact_id}]</code> <b>{fact_key}</b>: {fact_value}\n"
-            line += f"   ├ Впевненість: {confidence:.0%}\n"
+                line = f"{_format_fact_type(fact_type)} <code>[{fact_id}]</code> <b>{fact_key}</b>: {fact_value}\n"
+                line += f"   ├ Впевненість: {confidence:.0%}\n"
 
-            if evidence and len(evidence) > 50:
-                line += f"   └ «{evidence[:50]}...»\n"
-            elif evidence:
-                line += f"   └ «{evidence}»\n"
+                if evidence and len(evidence) > 50:
+                    line += f"   └ «{evidence[:50]}...»\n"
+                elif evidence:
+                    line += f"   └ «{evidence}»\n"
+            elif item["type"] == "memory":
+                # Memory format in verbose mode
+                memory_id = item.get("id", "?")
+                memory_text = item.get("text", "")
+                created_at = item.get("created_at", 0)
 
-            lines.append(line)
+                # Format timestamp
+                try:
+                    dt = datetime.fromtimestamp(created_at)
+                    time_str = dt.strftime("%Y-%m-%d %H:%M")
+                except (ValueError, TypeError, OSError) as e:
+                    logger.warning(
+                        f"Failed to format memory timestamp {created_at}: {e}"
+                    )
+                    time_str = "?"
+
+                line = f"💭 <code>[{memory_id}]</code> {memory_text}\n"
+                line += f"   └ Створено: {time_str}\n"
+
+            if line:
+                lines.append(line)
 
         response = "\n".join(lines)
 

@@ -38,7 +38,9 @@ from app.services.context.episode_boundary_detector import EpisodeBoundaryDetect
 from app.services.context.episode_monitor import EpisodeMonitor
 from app.services.context.episode_summarizer import EpisodeSummarizer
 from app.services.context_store import ContextStore, run_retention_pruning_task
+from app.repositories.chat_summary_repository import ChatSummaryRepository
 from app.services.donation_scheduler import DonationScheduler
+from app.services.instruction.summary_jobs import SummaryJobs
 from app.services.feature_rate_limiter import FeatureRateLimiter
 from app.services.gemini import GeminiClient
 from app.services.profile_summarization import ProfileSummarizer
@@ -251,6 +253,24 @@ async def main() -> None:
             "Donation scheduler disabled (ENABLE_DONATION_SCHEDULER=false), but table initialized for on-demand sends"
         )
 
+    # Initialize summary generation jobs
+    summary_repository = ChatSummaryRepository(database_url=settings.database_url)
+    # Reuse donation scheduler's scheduler if available, otherwise create new one
+    summary_scheduler = (
+        donation_scheduler._scheduler
+        if hasattr(donation_scheduler, "_scheduler") and donation_scheduler._scheduler
+        else None
+    )
+    summary_jobs = SummaryJobs(
+        settings=settings,
+        gemini_client=gemini_client,
+        summary_repository=summary_repository,
+        context_store=store,
+        scheduler=summary_scheduler,
+    )
+    summary_jobs.start()
+    logging.info("Summary generation jobs initialized")
+
     # Phase 3: Initialize hybrid search and episodic memory
     hybrid_search = HybridSearchEngine(
         db_path=settings.database_url,
@@ -345,6 +365,38 @@ async def main() -> None:
         )
     else:
         logging.info("Image generation disabled (ENABLE_IMAGE_GENERATION=false)")
+
+    # Initialize TTS service
+    tts_service = None
+    if settings.enable_voice_responses:
+        from app.services.tts import TTSService
+
+        tts_api_key = settings.gemini_api_key or (
+            settings.gemini_api_keys_list[0] if settings.gemini_api_keys_list else None
+        )
+        if not tts_api_key:
+            logging.warning(
+                "Voice responses enabled but no Gemini API key available. "
+                "TTS service will not be initialized."
+            )
+        else:
+            tts_service = TTSService(
+                api_key=tts_api_key,
+                model=settings.gemini_tts_model,
+                voice=settings.voice_response_voice,
+                language=settings.voice_response_language,
+            )
+            logging.info(
+                "TTS service initialized",
+                extra={
+                    "model": settings.gemini_tts_model,
+                    "voice": settings.voice_response_voice,
+                    "language": settings.voice_response_language,
+                    "enabled_chats": len(settings.voice_response_chat_ids_list),
+                },
+            )
+    else:
+        logging.info("Voice responses disabled (ENABLE_VOICE_RESPONSES=false)")
 
     # Log web search configuration
     if settings.enable_web_search:
@@ -442,10 +494,12 @@ async def main() -> None:
         redis_client=redis_client,
         rate_limiter=rate_limiter,
         image_gen_service=image_gen_service,
+        tts_service=tts_service,
         feature_limiter=feature_limiter,
         donation_scheduler=donation_scheduler,
         memory_repo=memory_repo,
         telegram_service=telegram_service,
+        summary_repository=summary_repository,
     )
 
     dispatcher.message.middleware(chat_meta_middleware)
@@ -506,6 +560,10 @@ async def main() -> None:
 
         # Cleanup profile summarizer
         await profile_summarizer.stop()
+
+        # Cleanup summary jobs
+        await summary_jobs.stop()
+        logging.info("Summary generation jobs stopped")
 
         # Cleanup donation scheduler
         await donation_scheduler.stop()

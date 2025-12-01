@@ -715,3 +715,48 @@ CREATE INDEX IF NOT EXISTS idx_checkers_games_opponent
 CREATE INDEX IF NOT EXISTS idx_checkers_games_status
     ON checkers_games(game_status);
 
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- Chat Summaries Table
+-- Added: 2025-01-XX
+-- Purpose: Store 30-day and 7-day chat history summaries for dynamic system instructions
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS chat_summaries (
+    id BIGSERIAL PRIMARY KEY,
+    chat_id BIGINT NOT NULL,
+    summary_type TEXT NOT NULL CHECK(summary_type IN ('30days', '7days')),
+    period_start BIGINT NOT NULL,
+    period_end BIGINT NOT NULL,
+    summary_text TEXT NOT NULL,
+    token_count INTEGER,
+    generated_at BIGINT NOT NULL,
+    model_version TEXT,
+    UNIQUE(chat_id, summary_type, period_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_summaries_chat_type
+    ON chat_summaries(chat_id, summary_type, period_end DESC);
+
+CREATE INDEX IF NOT EXISTS idx_chat_summaries_period
+    ON chat_summaries(period_start, period_end);
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- User Profile Embeddings
+-- Added: 2025-01-XX
+-- Purpose: Add profile_embedding column to user_profiles for semantic user search
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+-- Add profile_embedding column to user_profiles if it doesn't exist
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'user_profiles' AND column_name = 'profile_embedding'
+    ) THEN
+        ALTER TABLE user_profiles ADD COLUMN profile_embedding TEXT;
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_user_profiles_embedding
+    ON user_profiles(profile_embedding) WHERE profile_embedding IS NOT NULL;
+

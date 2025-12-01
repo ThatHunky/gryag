@@ -126,6 +126,20 @@ class Settings(BaseSettings):
         3, alias="IMAGE_GENERATION_DAILY_LIMIT", ge=1, le=10
     )  # Images per user per day (admins unlimited)
 
+    # Voice response configuration
+    enable_voice_responses: bool = Field(False, alias="ENABLE_VOICE_RESPONSES")
+    gemini_tts_model: str = Field(
+        "gemini-2.5-flash-tts", alias="GEMINI_TTS_MODEL"
+    )  # Note: API uses 'gemini-2.5-flash-tts' (not 'preview-tts')
+    voice_response_chat_ids: str = Field(
+        "", alias="VOICE_RESPONSE_CHAT_IDS"
+    )  # Comma-separated chat IDs where voice responses are enabled
+    voice_response_probability: float = Field(
+        0.3, alias="VOICE_RESPONSE_PROBABILITY", ge=0.0, le=1.0
+    )  # Probability of using voice (0.0-1.0)
+    voice_response_voice: str = Field("Zephyr", alias="VOICE_RESPONSE_VOICE")
+    voice_response_language: str = Field("uk-UA", alias="VOICE_RESPONSE_LANGUAGE")
+
     # Donation scheduler configuration
     enable_donation_scheduler: bool = Field(True, alias="ENABLE_DONATION_SCHEDULER")
     donation_ignored_chat_ids: str = Field(
@@ -167,6 +181,29 @@ class Settings(BaseSettings):
     max_profiles_per_day: int = Field(
         50, alias="MAX_PROFILES_PER_DAY", ge=1
     )  # Limit to avoid overload
+
+    # Chat summary generation configuration (system instructions builder)
+    enable_chat_summary_jobs: bool = Field(
+        True, alias="ENABLE_CHAT_SUMMARY_JOBS"
+    )  # Enable background summary generation
+    summary_jobs_interval_hours: int = Field(
+        6, alias="SUMMARY_JOBS_INTERVAL_HOURS", ge=1, le=24
+    )  # How often to run summary jobs (processes a batch each time)
+    summary_jobs_chats_per_batch: int = Field(
+        5, alias="SUMMARY_JOBS_CHATS_PER_BATCH", ge=1, le=20
+    )  # Number of chats to process per batch
+    summary_jobs_stagger_slots: int = Field(
+        24, alias="SUMMARY_JOBS_STAGGER_SLOTS", ge=4, le=48
+    )  # Number of time slots to distribute chats across (higher = more spread out)
+    summary_30day_cooldown_days: int = Field(
+        7, alias="SUMMARY_30DAY_COOLDOWN_DAYS", ge=1, le=30
+    )  # Minimum days between 30-day summary regenerations
+    summary_7day_cooldown_days: int = Field(
+        3, alias="SUMMARY_7DAY_COOLDOWN_DAYS", ge=1, le=14
+    )  # Minimum days between 7-day summary regenerations
+    summary_allowed_chat_ids: str = Field(
+        "", alias="SUMMARY_ALLOWED_CHAT_IDS"
+    )  # Comma-separated chat IDs to generate summaries for (empty = all chats)
 
     # Fact extraction configuration - uses Google Gemini API (rule-based + optional Gemini fallback)
     enable_gemini_fact_extraction: bool = Field(
@@ -658,6 +695,22 @@ class Settings(BaseSettings):
         if not self.donation_ignored_chat_ids:
             return []
         parts = [part.strip() for part in self.donation_ignored_chat_ids.split(",")]
+        return [int(part) for part in parts if part]
+
+    @property
+    def summary_allowed_chat_ids_list(self) -> list[int]:
+        """Parse summary allowed chat IDs from string to list."""
+        if not self.summary_allowed_chat_ids:
+            return []
+        parts = [part.strip() for part in self.summary_allowed_chat_ids.split(",")]
+        return [int(part) for part in parts if part]
+
+    @property
+    def voice_response_chat_ids_list(self) -> list[int]:
+        """Parse voice response chat IDs from string to list."""
+        if not self.voice_response_chat_ids:
+            return []
+        parts = [part.strip() for part in self.voice_response_chat_ids.split(",")]
         return [int(part) for part in parts if part]
 
     @property

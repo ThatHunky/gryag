@@ -42,7 +42,8 @@ class CommandThrottleMiddleware(BaseMiddleware):
         "gryagban",
         "gryagunban",
         "gryagreset",
-        "gryagchatinfo",  # ADMIN_COMMANDS
+        "gryagchatinfo",
+        "gryagchats",  # ADMIN_COMMANDS
         "broadcastdonate",  # Hidden admin command
         "gryagprofile",
         "gryagfacts",

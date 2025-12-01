@@ -42,6 +42,10 @@ def get_admin_commands(prefix: str = "gryag") -> list[BotCommand]:
             command=f"{prefix}chatinfo",
             description="🔒 Показати ID чату для конфігурації (тільки адміни)",
         ),
+        BotCommand(
+            command=f"{prefix}chats",
+            description="🔒 Список чатів з ботом (кількість та назви, тільки адміни)",
+        ),
     ]
 
 
@@ -346,6 +350,137 @@ async def chatinfo_command(
         response += "\n✅ Всі чати дозволені (global режим)"
 
     await message.reply(response)
+
+
+@router.message(Command(commands=["gryagchats", "chats"]))
+async def list_chats_command(
+    message: Message,
+    bot: Bot,
+    settings: Settings,
+    persona_loader: Any | None = None,
+) -> None:
+    """List all chats where the bot has messages (admin only).
+
+    Shows count and names of all chats (both private and groups) where the bot
+    has received or sent messages.
+    """
+    if not _is_admin(message, settings):
+        await message.reply(_get_response("admin_only", persona_loader, ADMIN_ONLY))
+        return
+
+    try:
+        # Query all distinct chat IDs from messages table
+        query, params = convert_query_to_postgres(
+            "SELECT DISTINCT chat_id FROM messages ORDER BY chat_id",
+            (),
+        )
+
+        chat_ids: list[int] = []
+        async with get_db_connection(settings.database_url) as conn:
+            rows = await conn.fetch(query, *params)
+            chat_ids = [row["chat_id"] for row in rows]
+
+        total_chats = len(chat_ids)
+        if total_chats == 0:
+            await message.reply("❌ Не знайдено жодного чату в базі даних.")
+            return
+
+        await message.reply("🔄 Отримую інформацію про чати...")
+
+        # Fetch chat information for each chat
+        chats_info: list[dict[str, Any]] = []
+        inaccessible_count = 0
+
+        for chat_id in chat_ids:
+            try:
+                chat = await bot.get_chat(chat_id)
+                chat_type = chat.type.value if hasattr(chat.type, "value") else str(chat.type)
+                
+                # Get chat name/title
+                chat_name = None
+                if chat.title:
+                    chat_name = chat.title
+                elif chat.first_name:
+                    chat_name = chat.first_name
+                    if chat.last_name:
+                        chat_name += f" {chat.last_name}"
+                elif chat.username:
+                    chat_name = f"@{chat.username}"
+                else:
+                    chat_name = f"Chat {chat_id}"
+
+                chats_info.append({
+                    "id": chat_id,
+                    "name": chat_name,
+                    "type": chat_type,
+                    "username": chat.username,
+                })
+            except TelegramBadRequest as e:
+                # Chat not accessible (bot left, chat deleted, etc.)
+                inaccessible_count += 1
+                LOGGER.debug(f"Could not access chat {chat_id}: {e}")
+            except Exception as e:
+                # Other errors
+                inaccessible_count += 1
+                LOGGER.warning(f"Error getting chat info for {chat_id}: {e}")
+
+        # Sort chats: groups first, then private chats
+        def sort_key(chat: dict[str, Any]) -> tuple[int, str]:
+            # Groups have negative IDs, private chats have positive IDs
+            # Sort by: type (groups first), then name
+            is_group = chat["id"] < 0
+            return (0 if is_group else 1, chat["name"].lower())
+
+        chats_info.sort(key=sort_key)
+
+        # Build response
+        response = f"📊 <b>Список чатів з ботом</b>\n\n"
+        response += f"📈 <b>Всього чатів:</b> {total_chats}\n"
+        if inaccessible_count > 0:
+            response += f"⚠️ Недоступних: {inaccessible_count}\n"
+        response += f"✅ Доступних: {len(chats_info)}\n\n"
+
+        # Group chats
+        group_chats = [c for c in chats_info if c["id"] < 0]
+        if group_chats:
+            response += f"<b>👥 Групи ({len(group_chats)}):</b>\n"
+            for chat in group_chats:
+                chat_line = f"• {chat['name']}"
+                if chat["username"]:
+                    chat_line += f" (@{chat['username']})"
+                chat_line += f" <code>{chat['id']}</code>"
+                response += chat_line + "\n"
+            response += "\n"
+
+        # Private chats
+        private_chats = [c for c in chats_info if c["id"] > 0]
+        if private_chats:
+            response += f"<b>💬 Приватні чати ({len(private_chats)}):</b>\n"
+            # Show first 20 private chats to avoid message being too long
+            display_chats = private_chats[:20]
+            for chat in display_chats:
+                chat_line = f"• {chat['name']}"
+                if chat["username"]:
+                    chat_line += f" (@{chat['username']})"
+                chat_line += f" <code>{chat['id']}</code>"
+                response += chat_line + "\n"
+            
+            if len(private_chats) > 20:
+                response += f"\n... та ще {len(private_chats) - 20} приватних чатів\n"
+
+        await message.reply(response, parse_mode="HTML")
+        LOGGER.info(
+            f"Admin {message.from_user.id} listed {len(chats_info)} accessible chats "
+            f"out of {total_chats} total"
+        )
+
+    except Exception as e:
+        error_msg = f"❌ Помилка під час отримання списку чатів: {str(e)}"
+        await message.reply(error_msg)
+        LOGGER.error(
+            f"Exception during list_chats command: {e}",
+            exc_info=True,
+        )
 
 
 @router.message(Command(commands=["broadcastdonate"]))

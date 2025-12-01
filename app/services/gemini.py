@@ -967,6 +967,56 @@ class GeminiClient:
                 return "\n\n".join(thinking_fragments).strip()
         return ""
 
+    def _extract_audio(self, response: Any) -> tuple[bytes, str] | None:
+        """
+        Extract audio data from Gemini TTS response.
+
+        Args:
+            response: Gemini API response object
+
+        Returns:
+            Tuple of (audio_bytes, mime_type) or None if not found
+        """
+        try:
+            candidates = getattr(response, "candidates", None) or []
+            for candidate in candidates:
+                content = getattr(candidate, "content", None)
+                if not content:
+                    continue
+                parts = getattr(content, "parts", None) or []
+                for part in parts:
+                    # Check for inline_data with audio MIME type
+                    inline_data = getattr(part, "inline_data", None)
+                    if inline_data:
+                        mime_type = getattr(inline_data, "mime_type", "")
+                        data = getattr(inline_data, "data", "")
+                        if mime_type.startswith("audio/") and data:
+                            try:
+                                audio_bytes = base64.b64decode(data)
+                                return (audio_bytes, mime_type)
+                            except Exception as e:
+                                self._logger.warning(
+                                    f"Failed to decode audio data: {e}"
+                                )
+                                continue
+
+                    # Alternative: Check for file_data (if Gemini uses file URIs)
+                    file_data = getattr(part, "file_data", None)
+                    if file_data:
+                        uri = getattr(file_data, "file_uri", None)
+                        if uri:
+                            self._logger.warning(
+                                "TTS returned file URI instead of inline data - "
+                                "file URI handling not implemented"
+                            )
+
+            return None
+        except Exception as e:
+            self._logger.error(
+                f"Error extracting audio from response: {e}", exc_info=True
+            )
+            return None
+
     async def _handle_tools(
         self,
         initial_contents: list[dict[str, Any]],

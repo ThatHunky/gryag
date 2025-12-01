@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import random
 import re
 import time
 from collections import deque
@@ -15,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Router
 from aiogram.enums import ParseMode
-from aiogram.types import Message
+from aiogram.types import BufferedInputFile, Message
 
 from app.config import Settings
 from app.handlers.bot_learning_integration import (
@@ -31,6 +32,7 @@ from app.handlers.chat_tools import (
 )
 from app.infrastructure.db_utils import get_db_connection
 from app.persona import SYSTEM_PERSONA
+from app.repositories.chat_summary_repository import ChatSummaryRepository
 from app.repositories.memory_repository import MemoryRepository
 from app.services import telemetry
 from app.services.bot_learning import BotLearningEngine
@@ -52,6 +54,7 @@ from app.services.image_generation import (
     ImageGenerationService,
 )
 from app.services.media import collect_media_parts
+from app.services.tts import TTSError, TTSService
 from app.services.polls import _active_polls, polls_tool
 from app.services.rate_limiter import RateLimiter
 from app.services.redis_types import RedisLike
@@ -59,6 +62,9 @@ from app.services.system_prompt_manager import SystemPromptManager
 from app.services.telegram_service import TelegramService
 from app.services.triggers import addressed_to_bot
 from app.services.typing import typing_indicator
+from app.services.instruction.system_instruction_builder import (
+    SystemInstructionBuilder,
+)
 from app.services.user_profile import UserProfileStore
 from app.utils.persona_helpers import get_response
 
@@ -1128,19 +1134,100 @@ async def _process_and_send_response(
 
     response_message: Message | None = None
 
-    if thinking_message_sent and thinking_msg is not None:
-        try:
-            await thinking_msg.edit_text(
-                reply_payload,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-            )
-            response_message = thinking_msg
-        except Exception as exc:
+    # Check if voice response should be used
+    should_use_voice = False
+    if (
+        ctx.settings.enable_voice_responses
+        and ctx.chat_id in ctx.settings.voice_response_chat_ids_list
+        and random.random() < ctx.settings.voice_response_probability
+    ):
+        should_use_voice = True
+        LOGGER.info(
+            f"Voice response enabled for chat {ctx.chat_id}, generating TTS audio"
+        )
+
+        # Get TTS service from context (injected via middleware)
+        if not ctx.tts_service:
             LOGGER.warning(
-                "Failed to replace thinking message with final answer: %s", exc
+                "TTS service not available in context, falling back to text response"
             )
-            thinking_message_sent = False
+            should_use_voice = False
+
+        if ctx.tts_service:
+            # Generate TTS audio
+            try:
+                audio_result = await ctx.tts_service.generate_audio(reply_trimmed)
+                if audio_result:
+                    audio_bytes, mime_type = audio_result
+                    LOGGER.info(
+                        f"TTS audio generated: size={len(audio_bytes)}, "
+                        f"mime_type={mime_type}"
+                    )
+
+                    # Convert to OGG/Opus if needed (Telegram requires OGG/Opus for voice)
+                    if not mime_type.startswith("audio/ogg"):
+                        LOGGER.warning(
+                            f"Audio format {mime_type} may not be compatible with "
+                            "Telegram voice messages. Attempting to send anyway."
+                        )
+
+                    # Create BufferedInputFile and send as voice message
+                    try:
+                        voice_file = BufferedInputFile(
+                            audio_bytes, filename="response.ogg"
+                        )
+                        if thinking_message_sent and thinking_msg is not None:
+                            # Delete thinking message before sending voice
+                            try:
+                                await thinking_msg.delete()
+                            except Exception:
+                                pass  # Ignore deletion errors
+                            thinking_message_sent = False
+
+                        response_message = await ctx.message.reply_voice(voice_file)
+                        LOGGER.info(
+                            f"Voice response sent successfully to chat {ctx.chat_id}: "
+                            f"response_id={response_message.message_id if response_message else None}"
+                        )
+                    except Exception as exc:
+                        LOGGER.warning(
+                            f"Failed to send voice message, falling back to text: {exc}",
+                            exc_info=True,
+                        )
+                        should_use_voice = False
+                else:
+                    LOGGER.warning(
+                        "TTS generation returned no audio, falling back to text"
+                    )
+                    should_use_voice = False
+            except TTSError as exc:
+                LOGGER.warning(
+                    f"TTS generation failed, falling back to text: {exc}",
+                    exc_info=True,
+                )
+                should_use_voice = False
+            except Exception as exc:
+                LOGGER.error(
+                    f"Unexpected error during TTS generation: {exc}",
+                    exc_info=True,
+                )
+                should_use_voice = False
+
+    if not should_use_voice:
+        # Continue with text response
+        if thinking_message_sent and thinking_msg is not None:
+            try:
+                await thinking_msg.edit_text(
+                    reply_payload,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+                response_message = thinking_msg
+            except Exception as exc:
+                LOGGER.warning(
+                    "Failed to replace thinking message with final answer: %s", exc
+                )
+                thinking_message_sent = False
 
     if not thinking_message_sent or thinking_msg is None:
         LOGGER.debug(
@@ -2459,6 +2546,86 @@ async def _inject_user_memories(
     return system_prompt
 
 
+async def _build_dynamic_system_instruction(
+    ctx: MessageHandlerContext,
+    summary_repository: ChatSummaryRepository | None = None,
+) -> str:
+    """
+    Build dynamic system instruction using SystemInstructionBuilder.
+
+    Args:
+        ctx: Message handler context
+        summary_repository: Optional summary repository
+
+    Returns:
+        Complete dynamic system instruction
+    """
+    if not summary_repository:
+        # Fallback to native if no repository
+        return await _build_native_system_instruction(
+            base_persona=SYSTEM_PERSONA,
+            timestamp_context="",
+            ctx=ctx,
+        )
+
+    try:
+        builder = SystemInstructionBuilder(
+            settings=ctx.settings,
+            summary_repository=summary_repository,
+            context_store=ctx.store,
+        )
+
+        # Get chat info
+        chat_name = None
+        member_count = None
+        if ctx.message.chat:
+            chat_name = ctx.message.chat.title or ctx.message.chat.username
+            if hasattr(ctx.message.chat, "members_count"):
+                member_count = ctx.message.chat.members_count
+
+        # Get recent messages for immediate context
+        messages = await ctx.store.recent(
+            chat_id=ctx.chat_id, thread_id=ctx.thread_id, max_messages=30
+        )
+
+        # Get current message
+        current_message = None
+        if ctx.message.text or ctx.message.caption:
+            current_message = {
+                "text": ctx.message.text or ctx.message.caption,
+                "ts": int(ctx.message.date.timestamp()),
+            }
+
+        # Get replied-to message
+        replied_to_message = None
+        if ctx.message.reply_to_message:
+            replied_to = ctx.message.reply_to_message
+            replied_to_message = {
+                "text": replied_to.text or replied_to.caption,
+                "ts": int(replied_to.date.timestamp()),
+            }
+
+        # Assemble instruction
+        instruction = await builder.assemble_system_instruction(
+            chat_id=ctx.chat_id,
+            chat_name=chat_name,
+            member_count=member_count,
+            messages=messages,
+            current_message=current_message,
+            replied_to_message=replied_to_message,
+        )
+
+        return instruction
+    except Exception as e:
+        LOGGER.error(f"Failed to build dynamic system instruction: {e}", exc_info=True)
+        # Fallback to native
+        return await _build_native_system_instruction(
+            base_persona=SYSTEM_PERSONA,
+            timestamp_context="",
+            ctx=ctx,
+        )
+
+
 async def _build_native_system_instruction(
     base_persona: str,
     timestamp_context: str,
@@ -2643,6 +2810,7 @@ async def handle_group_message(
     multi_level_context_manager: MultiLevelContextManager | None = None,
     persona_loader: Any | None = None,
     image_gen_service: ImageGenerationService | None = None,
+    tts_service: Any | None = None,
     feature_limiter: Any | None = None,
     memory_repo: MemoryRepository | None = None,
     chat_profile_store: Any | None = None,
@@ -2790,6 +2958,7 @@ async def handle_group_message(
                 rate_limiter=rate_limiter,
                 persona_loader=persona_loader,
                 image_gen_service=image_gen_service,
+                tts_service=tts_service,
                 donation_scheduler=donation_scheduler,
                 memory_repo=memory_repo,
                 telegram_service=telegram_service,
@@ -3843,6 +4012,7 @@ class MessageHandlerContext:
     rate_limiter: RateLimiter | None
     persona_loader: Any | None
     image_gen_service: ImageGenerationService | None
+    tts_service: Any | None
     donation_scheduler: Any | None
     memory_repo: MemoryRepository
     telegram_service: TelegramService | None

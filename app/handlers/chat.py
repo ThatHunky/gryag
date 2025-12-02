@@ -1138,10 +1138,14 @@ async def _process_and_send_response(
     voice_sent_successfully = False
 
     # Check if voice response should be used
+    # Early exit: completely disable TTS if ENABLE_VOICE_RESPONSES is False
     should_use_voice = False
-    if (
-        ctx.settings.enable_voice_responses
-        and ctx.chat_id in ctx.settings.voice_response_chat_ids_list
+    # Safety check: ensure TTS is completely disabled if enable_voice_responses is False
+    if not ctx.settings.enable_voice_responses:
+        # TTS is disabled, skip all TTS logic
+        pass
+    elif (
+        ctx.chat_id in ctx.settings.voice_response_chat_ids_list
         and random.random() < ctx.settings.voice_response_probability
     ):
         should_use_voice = True
@@ -1150,6 +1154,7 @@ async def _process_and_send_response(
         )
 
         # Get TTS service from context (injected via middleware)
+        # Additional safety check: ensure TTS service is available
         if not ctx.tts_service:
             LOGGER.warning(
                 "TTS service not available in context, falling back to text response"

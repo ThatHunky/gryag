@@ -407,8 +407,10 @@ async def main() -> None:
                     "Voice responses will be disabled.",
                     exc_info=True,
                 )
+                tts_service = None  # Ensure TTS service is None on failure
     else:
         logging.info("Voice responses disabled (ENABLE_VOICE_RESPONSES=false)")
+        tts_service = None  # Explicitly ensure TTS service is None when disabled
 
     # Log web search configuration
     if settings.enable_web_search:

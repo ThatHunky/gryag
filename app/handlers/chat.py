@@ -1134,6 +1134,9 @@ async def _process_and_send_response(
 
     response_message: Message | None = None
 
+    # Track if voice message was successfully sent (to prevent duplicate text response)
+    voice_sent_successfully = False
+
     # Check if voice response should be used
     should_use_voice = False
     if (
@@ -1159,42 +1162,59 @@ async def _process_and_send_response(
                 audio_result = await ctx.tts_service.generate_audio(reply_trimmed)
                 if audio_result:
                     audio_bytes, mime_type = audio_result
-                    LOGGER.info(
-                        f"TTS audio generated: size={len(audio_bytes)}, "
-                        f"mime_type={mime_type}"
-                    )
-
-                    # Convert to OGG/Opus if needed (Telegram requires OGG/Opus for voice)
-                    if not mime_type.startswith("audio/ogg"):
-                        LOGGER.warning(
-                            f"Audio format {mime_type} may not be compatible with "
-                            "Telegram voice messages. Attempting to send anyway."
-                        )
-
-                    # Create BufferedInputFile and send as voice message
-                    try:
-                        voice_file = BufferedInputFile(
-                            audio_bytes, filename="response.ogg"
-                        )
-                        if thinking_message_sent and thinking_msg is not None:
-                            # Delete thinking message before sending voice
-                            try:
-                                await thinking_msg.delete()
-                            except Exception:
-                                pass  # Ignore deletion errors
-                            thinking_message_sent = False
-
-                        response_message = await ctx.message.reply_voice(voice_file)
-                        LOGGER.info(
-                            f"Voice response sent successfully to chat {ctx.chat_id}: "
-                            f"response_id={response_message.message_id if response_message else None}"
-                        )
-                    except Exception as exc:
-                        LOGGER.warning(
-                            f"Failed to send voice message, falling back to text: {exc}",
-                            exc_info=True,
+                    
+                    # Validate audio bytes are not empty
+                    if not audio_bytes or len(audio_bytes) == 0:
+                        LOGGER.error(
+                            f"TTS generated empty audio file (mime_type={mime_type}), "
+                            "falling back to text"
                         )
                         should_use_voice = False
+                    elif len(audio_bytes) < 100:
+                        LOGGER.warning(
+                            f"TTS generated very small audio file ({len(audio_bytes)} bytes, "
+                            f"mime_type={mime_type}), might be invalid. Falling back to text."
+                        )
+                        should_use_voice = False
+                    else:
+                        LOGGER.info(
+                            f"TTS audio generated: size={len(audio_bytes)}, "
+                            f"mime_type={mime_type}"
+                        )
+
+                        # Convert to OGG/Opus if needed (Telegram requires OGG/Opus for voice)
+                        if not mime_type.startswith("audio/ogg"):
+                            LOGGER.warning(
+                                f"Audio format {mime_type} may not be compatible with "
+                                "Telegram voice messages. Attempting to send anyway."
+                            )
+
+                        # Create BufferedInputFile and send as voice message
+                        try:
+                            voice_file = BufferedInputFile(
+                                audio_bytes, filename="response.ogg"
+                            )
+                            if thinking_message_sent and thinking_msg is not None:
+                                # Delete thinking message before sending voice
+                                try:
+                                    await thinking_msg.delete()
+                                except Exception:
+                                    pass  # Ignore deletion errors
+                                thinking_message_sent = False
+
+                            response_message = await ctx.message.reply_voice(voice_file)
+                            LOGGER.info(
+                                f"Voice response sent successfully to chat {ctx.chat_id}: "
+                                f"response_id={response_message.message_id if response_message else None}"
+                            )
+                            # Mark that voice was successfully sent to prevent duplicate text response
+                            voice_sent_successfully = True
+                        except Exception as exc:
+                            LOGGER.warning(
+                                f"Failed to send voice message, falling back to text: {exc}",
+                                exc_info=True,
+                            )
+                            should_use_voice = False
                 else:
                     LOGGER.warning(
                         "TTS generation returned no audio, falling back to text"
@@ -1229,7 +1249,8 @@ async def _process_and_send_response(
                 )
                 thinking_message_sent = False
 
-    if not thinking_message_sent or thinking_msg is None:
+    # Only send text response if voice wasn't successfully sent
+    if not voice_sent_successfully and (not thinking_message_sent or thinking_msg is None):
         LOGGER.debug(
             f"Sending response to chat {ctx.chat_id}: "
             f"length={len(reply_payload)}, message_id={ctx.message.message_id}"

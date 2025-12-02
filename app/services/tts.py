@@ -232,26 +232,74 @@ class TTSService:
         """
         try:
             candidates = getattr(response, "candidates", None) or []
-            for candidate in candidates:
+            
+            if not candidates:
+                self.logger.error("TTS response has no candidates")
+                # Try to log the full response structure for debugging
+                try:
+                    response_str = str(response)[:500]  # First 500 chars
+                    self.logger.debug(f"TTS response (first 500 chars): {response_str}")
+                except Exception:
+                    pass
+                return None
+            
+            for idx, candidate in enumerate(candidates):
                 content = getattr(candidate, "content", None)
                 if not content:
                     continue
+                
                 parts = getattr(content, "parts", None) or []
-                for part in parts:
+                
+                for part_idx, part in enumerate(parts):
                     # Check for inline_data with audio MIME type
                     inline_data = getattr(part, "inline_data", None)
                     if inline_data:
                         mime_type = getattr(inline_data, "mime_type", "")
                         data = getattr(inline_data, "data", "")
+                        
                         if mime_type.startswith("audio/") and data:
                             try:
-                                audio_bytes = base64.b64decode(data)
+                                # Check if data is already bytes
+                                if isinstance(data, bytes):
+                                    audio_bytes = data
+                                else:
+                                    # Assume it's base64-encoded string
+                                    audio_bytes = base64.b64decode(data)
+                                
+                                if not audio_bytes:
+                                    self.logger.error(
+                                        f"Audio data is empty (mime_type={mime_type}, "
+                                        f"data_type={type(data).__name__}, "
+                                        f"data_length={len(data) if hasattr(data, '__len__') else 'N/A'})"
+                                    )
+                                    continue
+                                
+                                if len(audio_bytes) < 100:  # Very small files are likely invalid
+                                    self.logger.warning(
+                                        f"Decoded audio data is very small ({len(audio_bytes)} bytes), "
+                                        f"might be invalid (mime_type={mime_type})"
+                                    )
+                                
+                                self.logger.info(
+                                    f"Successfully extracted audio: {len(audio_bytes)} bytes, "
+                                    f"mime_type={mime_type}"
+                                )
                                 return (audio_bytes, mime_type)
                             except Exception as e:
-                                self.logger.warning(
-                                    f"Failed to decode audio data: {e}"
+                                self.logger.error(
+                                    f"Failed to decode audio data (type={type(data).__name__}): {e}",
+                                    exc_info=True
                                 )
                                 continue
+                        elif data and not mime_type.startswith("audio/"):
+                            self.logger.debug(
+                                f"Found inline_data but wrong MIME type: {mime_type} "
+                                f"(expected audio/*)"
+                            )
+                        elif not data:
+                            self.logger.warning(
+                                f"Found inline_data with audio MIME type {mime_type} but no data"
+                            )
 
                     # Alternative: Check for file_data (if Gemini uses file URIs)
                     file_data = getattr(part, "file_data", None)
@@ -260,9 +308,17 @@ class TTSService:
                         if uri:
                             self.logger.warning(
                                 "TTS returned file URI instead of inline data - "
-                                "file URI handling not implemented"
+                                "file URI handling not implemented. URI: %s", uri
                             )
+                    
+                    # Check if part has text (might indicate an error message)
+                    text = getattr(part, "text", None)
+                    if text:
+                        self.logger.warning(
+                            f"TTS response part {part_idx} contains text instead of audio: {text[:200]}"
+                        )
 
+            self.logger.error("No audio data found in TTS response after checking all candidates and parts")
             return None
         except Exception as e:
             self.logger.error(f"Error extracting audio from response: {e}", exc_info=True)

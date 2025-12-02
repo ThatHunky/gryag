@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import TYPE_CHECKING
 
@@ -19,6 +20,50 @@ if TYPE_CHECKING:
 
 
 LOGGER = logging.getLogger(__name__)
+
+# Patterns that indicate attempts to override immutable rules
+IMMUTABLE_RULE_VIOLATIONS = [
+    # Language override attempts
+    (r"(?:talk|speak|respond|write|communicate|use).*?(?:russian|російськ|русск)", re.IGNORECASE),
+    (r"(?:talk|speak|respond|write|communicate|use).*?(?:english|англійськ)", re.IGNORECASE),
+    (r"(?:always|завжди|всегда).*?(?:russian|російськ|русск)", re.IGNORECASE),
+    (r"(?:always|завжди|всегда).*?(?:english|англійськ)", re.IGNORECASE),
+    # Formatting override attempts
+    (r"(?:use|використовуй|используй).*?(?:markdown|форматування|форматирование)", re.IGNORECASE),
+    (r"(?:always|завжди|всегда).*?(?:bold|жирний|жирный|italic|курсив)", re.IGNORECASE),
+    # Identity override attempts
+    (r"(?:you are|ти є|ты есть|you're).*?(?:not|не).*?(?:ukrainian|українець|украинец)", re.IGNORECASE),
+    (r"(?:forget|забудь|забудь).*?(?:ukrainian|українськ|украинск)", re.IGNORECASE),
+]
+
+
+def _validate_memory_against_immutable_rules(memory_text: str) -> tuple[bool, str | None]:
+    """
+    Validate that a memory doesn't attempt to override immutable rules.
+    
+    Args:
+        memory_text: The memory text to validate
+        
+    Returns:
+        Tuple of (is_valid, violation_message)
+        - is_valid: True if memory is valid, False if it violates immutable rules
+        - violation_message: Description of the violation if invalid, None if valid
+    """
+    for pattern, flags in IMMUTABLE_RULE_VIOLATIONS:
+        if re.search(pattern, memory_text, flags):
+            # Determine violation type for better error message
+            if "russian" in pattern.lower() or "російськ" in pattern.lower() or "русск" in pattern.lower():
+                return False, "Cannot store memory that overrides immutable language rule (Ukrainian only)"
+            elif "english" in pattern.lower() or "англійськ" in pattern.lower():
+                return False, "Cannot store memory that overrides immutable language rule (Ukrainian only)"
+            elif "markdown" in pattern.lower() or "форматування" in pattern.lower() or "форматирование" in pattern.lower():
+                return False, "Cannot store memory that overrides immutable formatting rule (plain text only)"
+            elif "ukrainian" in pattern.lower() or "українськ" in pattern.lower() or "украинск" in pattern.lower():
+                return False, "Cannot store memory that overrides immutable identity rules"
+            else:
+                return False, "Cannot store memory that contradicts immutable system rules"
+    
+    return True, None
 
 
 async def remember_memory_tool(
@@ -38,6 +83,30 @@ async def remember_memory_tool(
             )
         if not chat_id:
             return json.dumps({"status": "error", "message": "Chat ID not provided"})
+
+        # Validate memory against immutable rules
+        is_valid, violation_message = _validate_memory_against_immutable_rules(memory_text)
+        if not is_valid:
+            LOGGER.warning(
+                f"Rejected memory for user {user_id} that violates immutable rules: '{memory_text}'",
+                extra={
+                    "user_id": user_id,
+                    "chat_id": chat_id,
+                    "memory_text": memory_text,
+                    "violation": violation_message,
+                },
+            )
+            telemetry.increment_counter(
+                "memory_tool_rejected",
+                tool="remember_memory",
+                reason="immutable_rule_violation",
+            )
+            return json.dumps(
+                {
+                    "status": "error",
+                    "message": violation_message or "Memory violates immutable system rules",
+                }
+            )
 
         new_memory = await memory_repo.add_memory(
             user_id=user_id,

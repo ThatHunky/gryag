@@ -45,11 +45,12 @@ ENV PATH="${VENV_PATH}/bin:${PATH}" \
 # Create non-root user
 RUN addgroup --system app && adduser --system --ingroup app appuser
 
-# Minimal OS packages
+# Minimal OS packages (including ffmpeg for audio conversion)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     ca-certificates \
     curl \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

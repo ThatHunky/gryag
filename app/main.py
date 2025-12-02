@@ -374,27 +374,39 @@ async def main() -> None:
         tts_api_key = settings.gemini_api_key or (
             settings.gemini_api_keys_list[0] if settings.gemini_api_keys_list else None
         )
-        if not tts_api_key:
+        
+        # Allow TTS without API key if using edge-tts
+        if not tts_api_key and settings.tts_provider not in ("edge-tts", "auto"):
             logging.warning(
-                "Voice responses enabled but no Gemini API key available. "
-                "TTS service will not be initialized."
+                "Voice responses enabled but no Gemini API key available and "
+                "TTS provider is not edge-tts. TTS service will not be initialized."
             )
         else:
-            tts_service = TTSService(
-                api_key=tts_api_key,
-                model=settings.gemini_tts_model,
-                voice=settings.voice_response_voice,
-                language=settings.voice_response_language,
-            )
-            logging.info(
-                "TTS service initialized",
-                extra={
-                    "model": settings.gemini_tts_model,
-                    "voice": settings.voice_response_voice,
-                    "language": settings.voice_response_language,
-                    "enabled_chats": len(settings.voice_response_chat_ids_list),
-                },
-            )
+            try:
+                tts_service = TTSService(
+                    api_key=tts_api_key,
+                    model=settings.gemini_tts_model,
+                    voice=settings.voice_response_voice,
+                    language=settings.voice_response_language,
+                    provider=settings.tts_provider,
+                    edge_tts_voice=settings.edge_tts_voice,
+                )
+                logging.info(
+                    "TTS service initialized",
+                    extra={
+                        "provider": settings.tts_provider,
+                        "model": settings.gemini_tts_model,
+                        "voice": settings.voice_response_voice,
+                        "language": settings.voice_response_language,
+                        "enabled_chats": len(settings.voice_response_chat_ids_list),
+                    },
+                )
+            except Exception as e:
+                logging.error(
+                    f"Failed to initialize TTS service: {e}. "
+                    "Voice responses will be disabled.",
+                    exc_info=True,
+                )
     else:
         logging.info("Voice responses disabled (ENABLE_VOICE_RESPONSES=false)")
 

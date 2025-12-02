@@ -131,13 +131,19 @@ class Settings(BaseSettings):
     gemini_tts_model: str = Field(
         "gemini-2.5-flash-tts", alias="GEMINI_TTS_MODEL"
     )  # Note: API uses 'gemini-2.5-flash-tts' (not 'preview-tts')
+    tts_provider: str = Field(
+        "auto", alias="TTS_PROVIDER"
+    )  # TTS provider: "gemini", "edge-tts", or "auto" (fallback)
     voice_response_chat_ids: str = Field(
         "", alias="VOICE_RESPONSE_CHAT_IDS"
     )  # Comma-separated chat IDs where voice responses are enabled
     voice_response_probability: float = Field(
         0.3, alias="VOICE_RESPONSE_PROBABILITY", ge=0.0, le=1.0
     )  # Probability of using voice (0.0-1.0)
-    voice_response_voice: str = Field("Zephyr", alias="VOICE_RESPONSE_VOICE")
+    voice_response_voice: str = Field("Zephyr", alias="VOICE_RESPONSE_VOICE")  # Gemini voice name
+    edge_tts_voice: str = Field(
+        "uk-UA-PolinaNeural", alias="EDGE_TTS_VOICE"
+    )  # Edge TTS voice name (e.g., "uk-UA-PolinaNeural" for female, "uk-UA-OstapNeural" for male)
     voice_response_language: str = Field("uk-UA", alias="VOICE_RESPONSE_LANGUAGE")
 
     # Donation scheduler configuration

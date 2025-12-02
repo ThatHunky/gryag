@@ -103,7 +103,7 @@ class TelegramService:
             return {"error": "Search query cannot be empty"}
 
         try:
-            async with get_db_connection(self.settings.db_path) as db:
+            async with get_db_connection(self.settings.database_url) as db:
                 # Search in user_profiles table by username or display_name
                 # Select only 3 columns to normalize with message search
                 cursor = await db.execute(

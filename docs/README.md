@@ -10,7 +10,7 @@ This directory contains the repository documentation organized into subfolders. 
 | [API_DOCUMENTATION.md](API_DOCUMENTATION.md) | Comprehensive API documentation for all public APIs, functions, and components |
 | [CHANGELOG.md](CHANGELOG.md) | Detailed changelog with all project changes |
 | [architecture/](architecture/) | System architecture and data models |
-| [features/](features/) | Feature specifications and documentation |
+| [features/](features/) | Feature specifications (see [features/README.md](features/README.md) for index) |
 | [fixes/](fixes/) | Bug fix documentation |
 | [guides/](guides/) | Operational guides and runbooks |
 | [history/](history/) | Transient exports or archived notes |

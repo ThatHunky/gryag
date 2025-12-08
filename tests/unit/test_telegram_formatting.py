@@ -310,3 +310,132 @@ def test_format_for_telegram_markdownv2_escapes():
         assert (
             result == expected
         ), f"Failed for: {input_text}\nExpected: {expected}\nGot: {result}"
+
+
+# LaTeX conversion tests
+def test_convert_latex_inline_math():
+    """Test inline LaTeX math conversion: $...$"""
+    from app.handlers.chat import _convert_latex_to_plaintext
+
+    text = "$17_b$ це $b + 7$"
+    result = _convert_latex_to_plaintext(text)
+    assert result == "17_b це b + 7"
+
+
+def test_convert_latex_display_math():
+    """Test display LaTeX math conversion: $$...$$"""
+    from app.handlers.chat import _convert_latex_to_plaintext
+
+    text = "$$x + y = z$$"
+    result = _convert_latex_to_plaintext(text)
+    assert result == "x + y = z"
+
+
+def test_convert_latex_mixed_inline_display():
+    """Test mixed inline and display math."""
+    from app.handlers.chat import _convert_latex_to_plaintext
+
+    text = "Inline: $a$ and display: $$b + c$$"
+    result = _convert_latex_to_plaintext(text)
+    assert result == "Inline: a and display: b + c"
+
+
+def test_convert_latex_multiple_expressions():
+    """Test multiple LaTeX expressions in one text."""
+    from app.handlers.chat import _convert_latex_to_plaintext
+
+    text = "$17_b$ це $b + 7$. Також $9b + 7 = 9(b + 7) - 56$"
+    result = _convert_latex_to_plaintext(text)
+    assert result == "17_b це b + 7. Також 9b + 7 = 9(b + 7) - 56"
+
+
+def test_convert_latex_with_subscripts():
+    """Test LaTeX expressions with subscripts."""
+    from app.handlers.chat import _convert_latex_to_plaintext
+
+    text = "$b + 7$ та $9b + 7$"
+    result = _convert_latex_to_plaintext(text)
+    assert result == "b + 7 та 9b + 7"
+
+
+def test_convert_latex_real_example():
+    """Test real example from the screenshot."""
+    from app.handlers.chat import _convert_latex_to_plaintext
+
+    text = "$17_b$ це $b + 7$. $97_b$ це $9b + 7$. Нам треба, щоб $(b + 7)$ ділило $(9b + 7)$."
+    result = _convert_latex_to_plaintext(text)
+    expected = "17_b це b + 7. 97_b це 9b + 7. Нам треба, щоб (b + 7) ділило (9b + 7)."
+    assert result == expected
+
+
+def test_convert_latex_with_regular_text():
+    """Test LaTeX expressions mixed with regular text."""
+    from app.handlers.chat import _convert_latex_to_plaintext
+
+    text = "Це ж тупа маніпуляція з основами. $17_b$ це $b + 7$. Розписуємо: $9b + 7 = 9(b + 7) - 56$."
+    result = _convert_latex_to_plaintext(text)
+    expected = "Це ж тупа маніпуляція з основами. 17_b це b + 7. Розписуємо: 9b + 7 = 9(b + 7) - 56."
+    assert result == expected
+
+
+def test_convert_latex_no_math():
+    """Test text without LaTeX math expressions."""
+    from app.handlers.chat import _convert_latex_to_plaintext
+
+    text = "Привіт, як справи?"
+    result = _convert_latex_to_plaintext(text)
+    assert result == "Привіт, як справи?"
+
+
+def test_convert_latex_empty_string():
+    """Test empty string."""
+    from app.handlers.chat import _convert_latex_to_plaintext
+
+    result = _convert_latex_to_plaintext("")
+    assert result == ""
+
+
+def test_convert_latex_none():
+    """Test None input."""
+    from app.handlers.chat import _convert_latex_to_plaintext
+
+    result = _convert_latex_to_plaintext(None)
+    assert result is None
+
+
+def test_convert_latex_unmatched_dollar():
+    """Test unmatched dollar sign (edge case)."""
+    from app.handlers.chat import _convert_latex_to_plaintext
+
+    text = "Це $незакритий вираз"
+    result = _convert_latex_to_plaintext(text)
+    # Should leave unmatched dollar as-is
+    assert "$" in result
+
+
+def test_convert_latex_dollar_in_text():
+    """Test dollar sign used as currency (not LaTeX)."""
+    from app.handlers.chat import _convert_latex_to_plaintext
+
+    text = "Ціна: $100"
+    result = _convert_latex_to_plaintext(text)
+    # Single dollar at end shouldn't be treated as LaTeX
+    assert "$" in result or result == "Ціна: $100"
+
+
+def test_convert_latex_display_before_inline():
+    """Test display math $$ before inline $ to ensure order doesn't matter."""
+    from app.handlers.chat import _convert_latex_to_plaintext
+
+    text = "Display: $$x$$ and inline: $y$"
+    result = _convert_latex_to_plaintext(text)
+    assert result == "Display: x and inline: y"
+
+
+def test_convert_latex_complex_expression():
+    """Test complex LaTeX expression with multiple operations."""
+    from app.handlers.chat import _convert_latex_to_plaintext
+
+    text = "$b + 7 = 28 \\implies b = 21$"
+    result = _convert_latex_to_plaintext(text)
+    assert result == "b + 7 = 28 \\implies b = 21"

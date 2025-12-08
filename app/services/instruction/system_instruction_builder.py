@@ -242,7 +242,17 @@ class SystemInstructionBuilder:
         formatted = []
         for msg in truncated:
             role = msg.get("role", "user")
+            # Extract text from either direct 'text' field or 'parts' array
             text = msg.get("text", "").strip()
+            if not text and "parts" in msg:
+                # Extract text from parts array (format from context_store.recent())
+                parts = msg.get("parts", [])
+                text_parts = [
+                    part.get("text", "")
+                    for part in parts
+                    if isinstance(part, dict) and "text" in part
+                ]
+                text = " ".join(text_parts).strip()
             ts = msg.get("ts") or msg.get("timestamp", 0)
 
             # Format timestamp
@@ -252,6 +262,10 @@ class SystemInstructionBuilder:
             else:
                 time_str = "Unknown"
 
+            # Skip empty messages
+            if not text:
+                continue
+                
             # Format message
             if role == "user":
                 sender_name = (

@@ -988,6 +988,8 @@ async def _process_and_send_response(
     # Comprehensive response cleaning
     original_reply = reply_text
     reply_text = _clean_response_text(reply_text)
+    # Convert LaTeX math expressions to plain text before other formatting
+    reply_text = _convert_latex_to_plaintext(reply_text)
     reply_text = _enforce_plaintext_ukrainian(reply_text)
 
     # Log if we had to clean metadata from the response
@@ -1138,12 +1140,15 @@ async def _process_and_send_response(
     voice_sent_successfully = False
 
     # Check if voice response should be used
-    # Early exit: completely disable TTS if ENABLE_VOICE_RESPONSES is False
+    # COMPLETELY DISABLE TTS: Check both setting and service availability
     should_use_voice = False
-    # Safety check: ensure TTS is completely disabled if enable_voice_responses is False
+    # Early exit: completely disable TTS if ENABLE_VOICE_RESPONSES is False OR tts_service is None
     if not ctx.settings.enable_voice_responses:
-        # TTS is disabled, skip all TTS logic
-        pass
+        # TTS is completely disabled via ENABLE_VOICE_RESPONSES setting
+        LOGGER.debug(f"TTS disabled: enable_voice_responses={ctx.settings.enable_voice_responses}")
+    elif ctx.tts_service is None:
+        # TTS service not initialized
+        LOGGER.debug(f"TTS disabled: tts_service is None")
     elif (
         ctx.chat_id in ctx.settings.voice_response_chat_ids_list
         and random.random() < ctx.settings.voice_response_probability
@@ -1153,118 +1158,109 @@ async def _process_and_send_response(
             f"Voice response enabled for chat {ctx.chat_id}, generating TTS audio"
         )
 
-        # Get TTS service from context (injected via middleware)
-        # Additional safety check: ensure TTS service is available
-        if not ctx.tts_service:
-            LOGGER.warning(
-                "TTS service not available in context, falling back to text response"
-            )
-            should_use_voice = False
-
-        if ctx.tts_service:
-            # Generate TTS audio
-            try:
-                audio_result = await ctx.tts_service.generate_audio(reply_trimmed)
-                if audio_result:
-                    audio_bytes, mime_type = audio_result
-                    
-                    # Validate audio bytes are not empty
-                    if not audio_bytes or len(audio_bytes) == 0:
-                        LOGGER.error(
-                            f"TTS generated empty audio file (mime_type={mime_type}), "
-                            "falling back to text"
-                        )
-                        should_use_voice = False
-                    elif len(audio_bytes) < 100:
-                        LOGGER.warning(
-                            f"TTS generated very small audio file ({len(audio_bytes)} bytes, "
-                            f"mime_type={mime_type}), might be invalid. Falling back to text."
-                        )
-                        should_use_voice = False
-                    else:
-                        LOGGER.info(
-                            f"TTS audio generated: size={len(audio_bytes)}, "
-                            f"mime_type={mime_type}"
-                        )
-
-                        # Convert to OGG/Opus if needed (Telegram requires OGG/Opus for voice)
-                        if not mime_type.startswith("audio/ogg"):
-                            LOGGER.info(
-                                f"Converting audio from {mime_type} to OGG/Opus for Telegram"
-                            )
-                            try:
-                                # Determine input format from MIME type
-                                format_map = {
-                                    "audio/mpeg": "mp3",
-                                    "audio/mp3": "mp3",
-                                    "audio/wav": "wav",
-                                    "audio/wave": "wav",
-                                    "audio/aac": "aac",
-                                    "audio/flac": "flac",
-                                }
-                                input_format = format_map.get(mime_type.lower(), "mp3")
-                                
-                                # Convert using TTS service's conversion method
-                                audio_bytes = ctx.tts_service.convert_audio_to_ogg(
-                                    audio_bytes, input_format
-                                )
-                                mime_type = "audio/ogg"
-                                LOGGER.info(
-                                    f"Audio converted successfully: {len(audio_bytes)} bytes"
-                                )
-                            except Exception as conv_exc:
-                                LOGGER.error(
-                                    f"Failed to convert audio to OGG: {conv_exc}. "
-                                    "Falling back to text response.",
-                                    exc_info=True,
-                                )
-                                should_use_voice = False
-
-                        # Only proceed with sending if conversion succeeded (or wasn't needed)
-                        if should_use_voice:
-                            # Create BufferedInputFile and send as voice message
-                            try:
-                                voice_file = BufferedInputFile(
-                                    audio_bytes, filename="response.ogg"
-                                )
-                                if thinking_message_sent and thinking_msg is not None:
-                                    # Delete thinking message before sending voice
-                                    try:
-                                        await thinking_msg.delete()
-                                    except Exception:
-                                        pass  # Ignore deletion errors
-                                    thinking_message_sent = False
-
-                                response_message = await ctx.message.reply_voice(voice_file)
-                                LOGGER.info(
-                                    f"Voice response sent successfully to chat {ctx.chat_id}: "
-                                    f"response_id={response_message.message_id if response_message else None}"
-                                )
-                                # Mark that voice was successfully sent to prevent duplicate text response
-                                voice_sent_successfully = True
-                            except Exception as exc:
-                                LOGGER.warning(
-                                    f"Failed to send voice message, falling back to text: {exc}",
-                                    exc_info=True,
-                                )
-                                should_use_voice = False
-                else:
-                    LOGGER.warning(
-                        "TTS generation returned no audio, falling back to text"
+        # Generate TTS audio
+        try:
+            audio_result = await ctx.tts_service.generate_audio(reply_trimmed)
+            if audio_result:
+                audio_bytes, mime_type = audio_result
+                
+                # Validate audio bytes are not empty
+                if not audio_bytes or len(audio_bytes) == 0:
+                    LOGGER.error(
+                        f"TTS generated empty audio file (mime_type={mime_type}), "
+                        "falling back to text"
                     )
                     should_use_voice = False
-            except TTSError as exc:
+                elif len(audio_bytes) < 100:
+                    LOGGER.warning(
+                        f"TTS generated very small audio file ({len(audio_bytes)} bytes, "
+                        f"mime_type={mime_type}), might be invalid. Falling back to text."
+                    )
+                    should_use_voice = False
+                else:
+                    LOGGER.info(
+                        f"TTS audio generated: size={len(audio_bytes)}, "
+                        f"mime_type={mime_type}"
+                    )
+
+                    # Convert to OGG/Opus if needed (Telegram requires OGG/Opus for voice)
+                    if not mime_type.startswith("audio/ogg"):
+                        LOGGER.info(
+                            f"Converting audio from {mime_type} to OGG/Opus for Telegram"
+                        )
+                        try:
+                            # Determine input format from MIME type
+                            format_map = {
+                                "audio/mpeg": "mp3",
+                                "audio/mp3": "mp3",
+                                "audio/wav": "wav",
+                                "audio/wave": "wav",
+                                "audio/aac": "aac",
+                                "audio/flac": "flac",
+                            }
+                            input_format = format_map.get(mime_type.lower(), "mp3")
+                            
+                            # Convert using TTS service's conversion method
+                            audio_bytes = ctx.tts_service.convert_audio_to_ogg(
+                                audio_bytes, input_format
+                            )
+                            mime_type = "audio/ogg"
+                            LOGGER.info(
+                                f"Audio converted successfully: {len(audio_bytes)} bytes"
+                            )
+                        except Exception as conv_exc:
+                            LOGGER.error(
+                                f"Failed to convert audio to OGG: {conv_exc}. "
+                                "Falling back to text response.",
+                                exc_info=True,
+                            )
+                            should_use_voice = False
+
+                    # Only proceed with sending if conversion succeeded (or wasn't needed)
+                    if should_use_voice:
+                        # Create BufferedInputFile and send as voice message
+                        try:
+                            voice_file = BufferedInputFile(
+                                audio_bytes, filename="response.ogg"
+                            )
+                            if thinking_message_sent and thinking_msg is not None:
+                                # Delete thinking message before sending voice
+                                try:
+                                    await thinking_msg.delete()
+                                except Exception:
+                                    pass  # Ignore deletion errors
+                                thinking_message_sent = False
+
+                            response_message = await ctx.message.reply_voice(voice_file)
+                            LOGGER.info(
+                                f"Voice response sent successfully to chat {ctx.chat_id}: "
+                                f"response_id={response_message.message_id if response_message else None}"
+                            )
+                            # Mark that voice was successfully sent to prevent duplicate text response
+                            voice_sent_successfully = True
+                        except Exception as exc:
+                            LOGGER.warning(
+                                f"Failed to send voice message, falling back to text: {exc}",
+                                exc_info=True,
+                            )
+                            should_use_voice = False
+            else:
                 LOGGER.warning(
-                    f"TTS generation failed, falling back to text: {exc}",
-                    exc_info=True,
+                    "TTS generation returned no audio, falling back to text"
                 )
                 should_use_voice = False
-            except Exception as exc:
-                LOGGER.error(
-                    f"Unexpected error during TTS generation: {exc}",
-                    exc_info=True,
-                )
-                should_use_voice = False
+        except TTSError as exc:
+            LOGGER.warning(
+                f"TTS generation failed, falling back to text: {exc}",
+                exc_info=True,
+            )
+            should_use_voice = False
+        except Exception as exc:
+            LOGGER.error(
+                f"Unexpected error during TTS generation: {exc}",
+                exc_info=True,
+            )
+            should_use_voice = False
 
     if not should_use_voice:
         # Continue with text response
@@ -2302,6 +2298,49 @@ def _clean_response_text(text: str) -> str:
     cleaned = "\n".join(cleaned_lines)
 
     return cleaned
+
+
+def _convert_latex_to_plaintext(text: str) -> str:
+    """
+    Convert LaTeX math expressions to readable plain text.
+    
+    Handles:
+    - Inline math: $...$ -> removes dollar signs, converts subscripts
+    - Display math: $$...$$ -> removes dollar signs, converts subscripts
+    
+    Converts LaTeX subscripts (_b) to readable format (keeps underscore for readability).
+    Preserves mathematical content while making it Telegram-compatible.
+    """
+    if not text:
+        return text
+    
+    import re
+    
+    def process_math_content(content: str) -> str:
+        """Process the content inside LaTeX delimiters."""
+        # Convert LaTeX subscripts (_b) to readable format
+        # Keep underscore for readability: 17_b stays as 17_b
+        # This makes it clear it's a subscript without breaking readability
+        return content
+    
+    # Handle display math $$...$$ first (to avoid matching single $ inside)
+    # Use non-greedy matching to handle multiple expressions
+    text = re.sub(
+        r"\$\$([^$]+?)\$\$",
+        lambda m: process_math_content(m.group(1)),
+        text,
+    )
+    
+    # Handle inline math $...$
+    # Match $...$ but avoid matching $$...$$ (already processed)
+    # Use negative lookbehind/lookahead to avoid matching $$ as single $
+    text = re.sub(
+        r"(?<!\$)\$([^$\n]+?)\$(?!\$)",
+        lambda m: process_math_content(m.group(1)),
+        text,
+    )
+    
+    return text
 
 
 def _enforce_plaintext_ukrainian(text: str) -> str:

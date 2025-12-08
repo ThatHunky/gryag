@@ -45,12 +45,17 @@ async def main() -> None:
 
     # Initialize services
     gemini_client = GeminiClient(
-        api_key=settings.gemini_api_key,
-        model=settings.gemini_model,
-        embed_model=settings.gemini_embed_model,
+        settings.gemini_api_key,
+        settings.gemini_model,
+        settings.gemini_embed_model,
         embedding_cache=EmbeddingCache(
             db_path=settings.database_url,
         ),
+        api_keys=settings.gemini_api_keys_list,
+        free_tier_mode=settings.free_tier_mode,
+        quota_block_seconds=settings.gemini_quota_block_seconds,
+        enable_thinking=settings.gemini_enable_thinking,
+        thinking_budget_tokens=settings.thinking_budget_tokens,
     )
 
     summary_repository = ChatSummaryRepository(database_url=settings.database_url)

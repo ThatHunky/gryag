@@ -228,7 +228,17 @@ class SummaryGenerator:
         formatted = []
         for msg in messages:
             role = msg.get("role", "user")
+            # Extract text from either direct 'text' field or 'parts' array
             text = msg.get("text", "").strip()
+            if not text and "parts" in msg:
+                # Extract text from parts array (format from context_store.recent())
+                parts = msg.get("parts", [])
+                text_parts = [
+                    part.get("text", "")
+                    for part in parts
+                    if isinstance(part, dict) and "text" in part
+                ]
+                text = " ".join(text_parts).strip()
             sender_name = msg.get("sender_name") or msg.get("username", "User")
 
             if not text:
@@ -276,7 +286,17 @@ Summary:"""
         formatted = []
         for msg in messages:
             role = msg.get("role", "user")
+            # Extract text from either direct 'text' field or 'parts' array
             text = msg.get("text", "").strip()
+            if not text and "parts" in msg:
+                # Extract text from parts array (format from context_store.recent())
+                parts = msg.get("parts", [])
+                text_parts = [
+                    part.get("text", "")
+                    for part in parts
+                    if isinstance(part, dict) and "text" in part
+                ]
+                text = " ".join(text_parts).strip()
             sender_name = msg.get("sender_name") or msg.get("username", "User")
 
             if not text:

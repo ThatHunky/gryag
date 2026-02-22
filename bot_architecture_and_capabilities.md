@@ -43,7 +43,7 @@ For the new iteration, the architecture relies on a strong split between a **Pyt
 
 ### Architecture Overview
 1. **Python (Frontend)**: Handles the Telegram API connection via `aiogram`. Responsible for parsing incoming updates, downloading media, maintaining fast websocket connections, and sending formatted responses back to the user. It forwards sanitized requests to the Go backend.
-2. **Go (Backend)**: Handles the heavyweight business logic: memory retrieval, SQLite database operations, Gemini API generation, OpenAI API routing, and tool execution.
+2. **Go (Backend)**: Handles the heavyweight business logic: memory retrieval, PostgreSQL/Redis database operations, Gemini API generation, OpenAI API routing, and tool execution.
 
 ### Wiring the Gemini API
 
@@ -130,7 +130,6 @@ While the legacy bot was powerful, its 5-layer memory and hybrid local/cloud ext
     - *Long-Term Facts*: A simple key-value or document store of facts about users. 
     - *Consolidated Summaries*: Let Gemini 2.5 Flash native large context window (1M+ tokens) do the heavy lifting of summarizing past episodes *on the fly* rather than attempting complex manual grouping logic.
 2. **Native Tool Calling (Function Calling)**: Remove custom extraction pipelines (like Regex matching or Phi-3-mini). Let the Gemini/OpenAI API natively decide when to trigger a tool (e.g., `save_user_fact(user_id, fact)` or `get_weather(city)`).
-3. **Drop Redis (If Possible)**: Unless horizontal scaling is strictly required immediately, `SQLite` is more than fast enough for rate-limiting, caching, and state management in a single-instance Go backend.
 
 ### Recommended Simplified Tech Stack
 
@@ -151,14 +150,14 @@ While the legacy bot was powerful, its 5-layer memory and hybrid local/cloud ext
 #### Simplified Toolset (What to Keep vs Change)
 *   **Keep**: `search_web` (via Google Search Grounding natively inside Gemini).
 *   **Change**: Replace manual `remember_memory`/`forget_memory` with native Gemini Tool Calling. 
-*   **Change**: Drop manual image generation plugins if not vital; focus strictly on text/multimodal *understanding* first.
+*   **Upgrade**: Image generation powered by Nano Banana Pro at 2K resolution (see Section 9).
 *   **Drop**: `SQLite`. Replaced by the robust combination of `PostgreSQL` and `Redis`.
 
 ## 8. Dynamic Instructions Template
 
 To harness the capabilities of Gemini 2.5 without overflowing the context or causing hallucination, the prompt structure follows a strict "**Dynamic Instructions**" format inject per request:
 
-1. **Immutable Block**: The core personality (sarcastic, Ukrainian, uncensored, zero-filter), format constraints (no markdown), and fixed identity rules.
+1. **Immutable Block (via `SystemInstruction`)**: The core personality (sarcastic, Ukrainian, uncensored, zero-filter), format constraints (no markdown), and fixed identity rules. As per Section 14, this block is injected using Gemini's native `SystemInstruction` parameter, not the conversation array.
 2. **Current Time & Chat Info**: Injected as raw text to allow time-awareness without metadata echoing.
 3. **Tools Block**: The explicit list of capabilities available to the bot (e.g., `generate_image`, `weather`, `remember_memory`, `mute_user`).
 4. **Context (Multi-tiered Summary)**:
@@ -253,3 +252,27 @@ To ensure the bot remains robust, fast, and maintainable, the Go backend must ad
 2.  **Strict Structured Outputs (JSON Schema)**: When the Go backend asks the LLM to classify a user's intent or decide which tool to run, it **must** enforce `response_mime_type: "application/json"` and provide a strict `response_schema` (adhering to OpenAPI 3.0 types). This completely eliminates the need for regex parsing and guarantees type-safe responses (e.g., enforcing Enums for action types).
 3.  **Deterministic Tool Calling**: When the LLM is acting purely as a "router" (deciding whether to call a tool vs talking normally), the API call should temporarily override its config to a very low temperature (`temperature=0`). High temperature should only be used for the final creative conversational output.
 4.  **Model Context Protocol (MCP) Design**: As the list of bot capabilities grows (Memory, OpenClaw, Nano Banana, Weather, Web Search), connecting them via hardcoded `switch` statements becomes brittle. The backend architecture should aspire to implement an **MCP (Model Context Protocol)** router pattern. This abstracts tools into independent, discoverable endpoints, allowing Gemini to seamlessly query the MCP router for available tools and execute them dynamically without monolithic backend updates.
+
+## 15. Operational Engineering (Observability, Error Handling, IPC)
+
+Beyond feature logic, the V2 bot must be production-hardened with proper operational infrastructure:
+
+### 1. Inter-Process Communication (Frontend ↔ Backend)
+The Python frontend and Go backend communicate over an **internal Docker network**. The protocol must be explicitly chosen:
+*   **Default: REST over HTTP/2** using JSON payloads. Simple, debuggable, and universally supported.
+*   **Optional Upgrade: gRPC** with Protocol Buffers for strongly typed, high-throughput binary communication if latency becomes a bottleneck.
+*   All IPC endpoints must be documented with a shared schema (e.g., OpenAPI spec or `.proto` files) to prevent drift between the two codebases.
+
+### 2. Structured Logging & Observability
+*   **Structured JSON Logging**: Both the Python frontend and Go backend must emit structured JSON logs (not plain text) to `stdout`. This allows centralized log aggregation via Docker's native logging drivers or tools like Loki.
+*   **Correlation IDs**: Every incoming Telegram update must be assigned a unique `request_id` at the Python frontend entry point. This ID is passed through IPC to the Go backend, ensuring that all log lines for a single user interaction can be traced end-to-end.
+*   **Health Checks**: Each Docker container must expose a lightweight `/health` endpoint. Docker Compose's `healthcheck` directive monitors these, enabling automatic restart of unhealthy services.
+
+### 3. Graceful Degradation & Error Handling
+*   **API Fallbacks**: If Gemini API returns a 5xx error or times out, the Go backend must retry with exponential backoff (configurable max retries). If all retries fail, the bot should silently drop the request rather than crash.
+*   **Feature Isolation**: A failure in one tool (e.g., Nano Banana Pro API is down) must **never** cascade into the core conversational loop. Each tool execution must be wrapped in isolated error boundaries.
+*   **Admin Alerting**: Critical failures (repeated API errors, database connection loss, sandbox escape attempts) must trigger direct Telegram messages to the configured Admin IDs.
+
+### 4. Database Migration Strategy
+*   PostgreSQL schema changes must be managed through a versioned migration tool (e.g., `golang-migrate` or `goose`). Raw SQL `ALTER TABLE` commands must never be run manually in production.
+*   Migration files are stored in the repository under `migrations/` and executed automatically on container startup (before the Go backend begins accepting requests).

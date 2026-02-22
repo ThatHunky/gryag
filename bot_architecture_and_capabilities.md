@@ -22,7 +22,7 @@ A defining feature is the bot's ability to invisibly build profiles of users ove
 *   **Extraction Pipeline**:
     *   **Gemini API**: Primary engine for deeply nuanced dialogue and reasoning.
     *   **OpenAI API**: Utilized for fast structuring, fact classification, and routing.
-*   **User Facts**: Stores user location, pronouns, likes/dislikes, relationships, and history. 
+*   **User Facts**: Stores user location, pronouns, likes/dislikes, relationships, and history. Loaded dynamically into the prompt for specific users.
 *   **Self-Learning**: The bot analyzes its own performance and mistakes over time, automatically adjusting its persona behavior and strategies ("Semantic dedup", "temporal decay").
 
 ## 4. Multi-Modal Interactions
@@ -141,8 +141,8 @@ While the legacy bot was powerful, its 5-layer memory and hybrid local/cloud ext
 #### The "Backend" (The Brain)
 - **Language**: Go 1.23+
 - **Web Framework**: [`Fiber`](https://gofiber.io/) or the standard `net/http` for receiving requests from the Python frontend.
-- **Database**: `SQLite` (via `cgo` like `mattn/go-sqlite3` or pure Go like `modernc.org/sqlite`).
-    - Use SQLite for *everything*: message logs, user data, API rate limiting, and vector search (via `sqlite-vss` if semantic search is still desired, though standard FTS5 search is often enough).
+- **Primary Database**: `PostgreSQL v18+`. Given the high velocity of messages and complexity of vector/relational queries, PostgreSQL handles the heavy lifting for message logs, user facts, and episodic memory storage.
+- **Caching & State**: `Redis`. Utilized for extreme-low-latency operations: rate-limiting (sliding windows), active session caching, and immediate context buffers.
 - **AI Integration**:
     - **Google GenAI SDK (`google.golang.org/genai`)**: For the core conversational personality, utilizing Gemini 2.5 Flash's massive context window and native function calling. 
     - **OpenAI API (Optional)**: If you need extremely fast, cheap, predictable JSON formatting for minor classification tasks, though Gemini Flash is likely sufficient for both.
@@ -151,4 +151,18 @@ While the legacy bot was powerful, its 5-layer memory and hybrid local/cloud ext
 *   **Keep**: `search_web` (via Google Search Grounding natively inside Gemini).
 *   **Change**: Replace manual `remember_memory`/`forget_memory` with native Gemini Tool Calling. 
 *   **Change**: Drop manual image generation plugins if not vital; focus strictly on text/multimodal *understanding* first.
-*   **Add**: A simple internal `Memory Manager` in Go that the LLM accesses strictly via Function Calling (e.g., the LLM decides to format a JSON struct declaring "I should remember that User X likes pizza", and the Go backend intercepts this and writes to SQLite).
+*   **Drop**: `SQLite`. Replaced by the robust combination of `PostgreSQL` and `Redis`.
+
+## 8. Dynamic Instructions Template
+
+To harness the capabilities of Gemini 2.5 without overflowing the context or causing hallucination, the prompt structure follows a strict "**Dynamic Instructions**" format inject per request:
+
+1. **Immutable Block**: The core personality (sarcastic, Ukrainian, uncensored, zero-filter), format constraints (no markdown), and fixed identity rules.
+2. **Current Time & Chat Info**: Injected as raw text to allow time-awareness without metadata echoing.
+3. **Tools Block**: The explicit list of capabilities available to the bot (e.g., `generate_image`, `weather`, `remember_memory`, `mute_user`).
+4. **Context (Multi-tiered Summary)**:
+    - *30-Day Summary*: Overarching themes, memes, and significant past events.
+    - *7-Day Summary*: Immediate past behaviors, running jokes, and active plotlines.
+    - *Immediate Chat Context*: The raw log of the last `N` messages.
+5. **Current User Context**: Spliced-in facts specifically about the user currently talking (the message author).
+6. **Current Message**: The actual prompt/message triggering the bot.

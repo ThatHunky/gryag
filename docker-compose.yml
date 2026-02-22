@@ -17,12 +17,12 @@ services:
         condition: service_healthy
     env_file: .env
     environment:
-      - FRONTEND_HEALTH_PORT=8081
+      - FRONTEND_HEALTH_PORT=27711
     networks:
       - gryag-net
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:27711/health')"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -41,9 +41,9 @@ services:
     env_file: .env
     environment:
       - BACKEND_HOST=0.0.0.0
-      - BACKEND_PORT=8080
+      - BACKEND_PORT=27710
     expose:
-      - "8080"
+      - "27710"
     networks:
       - gryag-net
     restart: unless-stopped
@@ -51,7 +51,7 @@ services:
       - ./config:/app/config:ro
       - ./migrations:/app/migrations:ro
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:27710/health"]
       interval: 10s
       timeout: 3s
       retries: 3

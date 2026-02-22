@@ -32,8 +32,8 @@ log = structlog.get_logger()
 
 # ── Configuration ────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-BACKEND_URL = f"http://{os.getenv('BACKEND_HOST', 'gryag-backend')}:{os.getenv('BACKEND_PORT', '8080')}"
-HEALTH_PORT = int(os.getenv("FRONTEND_HEALTH_PORT", "8081"))
+BACKEND_URL = f"http://{os.getenv('BACKEND_HOST', 'gryag-backend')}:{os.getenv('BACKEND_PORT', '27710')}"
+HEALTH_PORT = int(os.getenv("FRONTEND_HEALTH_PORT", "27711"))
 
 
 # ── Bot & Dispatcher ────────────────────────────────────────────────────

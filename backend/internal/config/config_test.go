@@ -18,8 +18,8 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.GeminiModel != "gemini-2.5-flash" {
 		t.Errorf("expected model 'gemini-2.5-flash', got '%s'", cfg.GeminiModel)
 	}
-	if cfg.BackendPort != 8080 {
-		t.Errorf("expected port 8080, got %d", cfg.BackendPort)
+	if cfg.BackendPort != 27710 {
+		t.Errorf("expected port 27710, got %d", cfg.BackendPort)
 	}
 	if cfg.RateLimitGlobalPerMinute != 10 {
 		t.Errorf("expected global rate limit 10, got %d", cfg.RateLimitGlobalPerMinute)

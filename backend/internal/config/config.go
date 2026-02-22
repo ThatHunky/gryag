@@ -107,7 +107,7 @@ func Load() (*Config, error) {
 
 		// Backend Server
 		BackendHost: getEnv("BACKEND_HOST", "0.0.0.0"),
-		BackendPort: getEnvInt("BACKEND_PORT", 8080),
+		BackendPort: getEnvInt("BACKEND_PORT", 27710),
 
 		// Feature Toggles
 		EnableSandbox:           getEnvBool("ENABLE_SANDBOX", true),

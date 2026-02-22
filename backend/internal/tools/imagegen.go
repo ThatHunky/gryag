@@ -1,33 +1,29 @@
 package tools
 
 import (
-	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
-	"time"
 
 	"github.com/ThatHunky/gryag/backend/internal/config"
+	"google.golang.org/genai"
 )
 
-// ImageGenTool handles image generation via the Nano Banana Pro API.
+// ImageGenTool handles image generation via Gemini 3 Pro Image.
 type ImageGenTool struct {
 	config *config.Config
-	client *http.Client
 }
 
 // NewImageGenTool creates a new image generation tool.
 func NewImageGenTool(cfg *config.Config) *ImageGenTool {
 	return &ImageGenTool{
 		config: cfg,
-		client: &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
-// GenerateImage creates a new image from a text prompt via the Nano Banana Pro API.
+// GenerateImage creates a new image from a text prompt via Gemini 3 Pro Image.
 func (ig *ImageGenTool) GenerateImage(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
 		Prompt string `json:"prompt"`
@@ -38,100 +34,50 @@ func (ig *ImageGenTool) GenerateImage(ctx context.Context, args json.RawMessage)
 
 	slog.Info("generating image", "prompt_length", len(params.Prompt))
 
-	if ig.config.NanoBananaAPIKey == "" || ig.config.NanoBananaAPIURL == "" {
-		return "Image generation is not configured. Set NANO_BANANA_API_KEY and NANO_BANANA_API_URL.", nil
+	if ig.config.GeminiAPIKey == "" {
+		return "Image generation is not configured. Set GEMINI_API_KEY.", nil
 	}
 
-	// Build the API request
-	reqBody, _ := json.Marshal(map[string]any{
-		"prompt":  params.Prompt,
-		"api_key": ig.config.NanoBananaAPIKey,
-		"width":   2560,
-		"height":  1440,
+	client, err := genai.NewClient(ctx, &genai.ClientConfig{
+		APIKey:  ig.config.GeminiAPIKey,
+		Backend: genai.BackendGeminiAPI,
 	})
-
-	req, err := http.NewRequestWithContext(ctx, "POST", ig.config.NanoBananaAPIURL+"/generate", bytes.NewReader(reqBody))
 	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
+		return "", fmt.Errorf("genai client: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+ig.config.NanoBananaAPIKey)
 
-	resp, err := ig.client.Do(req)
+	config := &genai.GenerateContentConfig{
+		// ResponseModalities: []string{"IMAGE"} is deprecated in favor of specific model defaults or ImageConfig
+	}
+
+	resp, err := client.Models.GenerateContent(ctx, "gemini-3-pro-image-preview", []*genai.Content{
+		{
+			Role:  "user",
+			Parts: []*genai.Part{genai.NewPartFromText(params.Prompt)},
+		},
+	}, config)
+
 	if err != nil {
 		return "", fmt.Errorf("image gen API call failed: %w", err)
 	}
-	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Sprintf("Image generation API returned status %d: %s", resp.StatusCode, string(body)), nil
+	if len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil {
+		return "API returned no candidates", nil
 	}
 
-	// Parse the response to extract the image URL or media_id
-	var apiResp struct {
-		ImageURL string `json:"image_url"`
-		MediaID  string `json:"media_id"`
-	}
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return "", fmt.Errorf("parse API response: %w", err)
+	// Find the image data
+	for _, part := range resp.Candidates[0].Content.Parts {
+		if part.InlineData != nil {
+			// We found the image! Base64 encode it and return it in a special JSON format.
+			b64 := base64.StdEncoding.EncodeToString(part.InlineData.Data)
+			return fmt.Sprintf(`{"media_base64": "%s", "media_type": "photo"}`, b64), nil
+		}
 	}
 
-	slog.Info("image generated", "media_id", apiResp.MediaID)
-	return fmt.Sprintf(`{"image_url": %q, "media_id": %q}`, apiResp.ImageURL, apiResp.MediaID), nil
+	return "API returned candidates but no inline image data", nil
 }
 
-// EditImage modifies an existing generated image via the Nano Banana Pro API.
+// EditImage is disabled for now, but stubbed.
 func (ig *ImageGenTool) EditImage(ctx context.Context, args json.RawMessage) (string, error) {
-	var params struct {
-		MediaID string `json:"media_id"`
-		Prompt  string `json:"prompt"`
-	}
-	if err := json.Unmarshal(args, &params); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
-	}
-
-	slog.Info("editing image", "media_id", params.MediaID, "prompt_length", len(params.Prompt))
-
-	if ig.config.NanoBananaAPIKey == "" || ig.config.NanoBananaAPIURL == "" {
-		return "Image generation is not configured. Set NANO_BANANA_API_KEY and NANO_BANANA_API_URL.", nil
-	}
-
-	// Build the edit request — sends the original media_id and the edit prompt
-	reqBody, _ := json.Marshal(map[string]any{
-		"media_id": params.MediaID,
-		"prompt":   params.Prompt,
-		"api_key":  ig.config.NanoBananaAPIKey,
-	})
-
-	req, err := http.NewRequestWithContext(ctx, "POST", ig.config.NanoBananaAPIURL+"/edit", bytes.NewReader(reqBody))
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+ig.config.NanoBananaAPIKey)
-
-	resp, err := ig.client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("image edit API call failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Sprintf("Image edit API returned status %d: %s", resp.StatusCode, string(body)), nil
-	}
-
-	var apiResp struct {
-		ImageURL string `json:"image_url"`
-		MediaID  string `json:"media_id"`
-	}
-	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return "", fmt.Errorf("parse API response: %w", err)
-	}
-
-	slog.Info("image edited", "new_media_id", apiResp.MediaID)
-	return fmt.Sprintf(`{"image_url": %q, "media_id": %q}`, apiResp.ImageURL, apiResp.MediaID), nil
+	return "Image editing is currently not supported by this API.", nil
 }

@@ -5,6 +5,7 @@ A lightweight Telegram router that forwards messages to the Go backend.
 It performs no thinking — it is purely a dumb pipe.
 """
 
+import base64
 import asyncio
 import logging
 import os
@@ -14,7 +15,7 @@ import aiohttp
 import structlog
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ChatAction, ContentType, ParseMode
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, BufferedInputFile
 from aiohttp import web
 
 from md_to_tg import md_to_telegram_html
@@ -122,25 +123,31 @@ async def handle_message(message: types.Message) -> None:
                     reply_text = data.get("reply", "")
                     media_url = data.get("media_url", "")
                     media_type = data.get("media_type", "")
+                    media_base64 = data.get("media_base64", "")
 
                     # Convert markdown to Telegram HTML
                     reply_html = md_to_telegram_html(reply_text) if reply_text else ""
 
                     # Handle media responses (image generation results)
-                    if media_url and media_type == "photo":
+                    if (media_url or media_base64) and media_type == "photo":
                         try:
+                            photo_data = media_url
+                            if media_base64:
+                                photo_bytes = base64.b64decode(media_base64)
+                                photo_data = BufferedInputFile(photo_bytes, filename="generated.png")
+
                             await message.answer_photo(
-                                photo=media_url,
+                                photo=photo_data,
                                 caption=reply_html[:1024] if reply_html else None,
                                 parse_mode=ParseMode.HTML,
                             )
-                            logger.info("photo_sent", media_url=media_url)
+                            logger.info("photo_sent", has_base64=bool(media_base64), media_url=media_url)
                         except Exception as e:
                             logger.error("photo_send_failed", error=str(e))
                             # Fall back to text with URL
                             if reply_html:
                                 await message.answer(
-                                    f"{reply_html}\n\n🖼 {media_url}",
+                                    f"{reply_html}\n\n🖼 {media_url if media_url else '<Image generated but upload failed>'}",
                                     parse_mode=ParseMode.HTML,
                                 )
                     elif media_url and media_type == "document":

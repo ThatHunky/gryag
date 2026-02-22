@@ -47,13 +47,9 @@ func NewClient(cfg *config.Config) (*Client, error) {
 	}, nil
 }
 
-// GenerateResponse sends a fully assembled Dynamic Instructions prompt to Gemini
-// and returns the model's text response.
-func (c *Client) GenerateResponse(ctx context.Context, instructions *DynamicInstructions, tools []*genai.Tool) (string, error) {
+// GenerateResponse sends a conversation history to Gemini and returns the full response.
+func (c *Client) GenerateResponse(ctx context.Context, contents []*genai.Content, tools []*genai.Tool) (*genai.GenerateContentResponse, error) {
 	logger := slog.With("model", c.config.GeminiModel)
-
-	// Build the content parts from the Dynamic Instructions
-	parts := instructions.BuildParts()
 
 	config := &genai.GenerateContentConfig{
 		// Section 14.1: SystemInstruction is the persona — separated from the conversation array
@@ -70,20 +66,13 @@ func (c *Client) GenerateResponse(ctx context.Context, instructions *DynamicInst
 		}
 	}
 
-	resp, err := c.genai.Models.GenerateContent(ctx, c.config.GeminiModel, []*genai.Content{
-		{
-			Role:  "user",
-			Parts: parts,
-		},
-	}, config)
+	resp, err := c.genai.Models.GenerateContent(ctx, c.config.GeminiModel, contents, config)
 	if err != nil {
-		return "", fmt.Errorf("generate content: %w", err)
+		return nil, fmt.Errorf("generate content: %w", err)
 	}
 
-	// Extract the text response
-	text := extractText(resp)
-	logger.Info("generation complete", "response_length", len(text))
-	return text, nil
+	logger.Info("generation complete")
+	return resp, nil
 }
 
 // RouteIntent uses the model at low temperature to decide what tool(s) to call.

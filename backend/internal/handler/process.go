@@ -28,12 +28,12 @@ type ProcessRequest struct {
 	MediaType string `json:"media_type"`
 }
 
-// ProcessResponse holds the reply sent back to the Python frontend.
 type ProcessResponse struct {
-	Reply     string `json:"reply"`
-	RequestID string `json:"request_id"`
-	MediaURL  string `json:"media_url,omitempty"`
-	MediaType string `json:"media_type,omitempty"`
+	Reply       string `json:"reply"`
+	RequestID   string `json:"request_id"`
+	MediaURL    string `json:"media_url,omitempty"`
+	MediaType   string `json:"media_type,omitempty"`
+	MediaBase64 string `json:"media_base64,omitempty"`
 }
 
 // Handler wires all subsystems together for request processing.
@@ -111,18 +111,79 @@ func (h *Handler) Process(w http.ResponseWriter, r *http.Request) {
 	// 3. Get the registered tools for the API call
 	genaiTools := h.registry.GetTools()
 
-	// 4. Call Gemini with the assembled prompt
-	reply, err := h.llm.GenerateResponse(ctx, di, genaiTools)
-	if err != nil {
-		logger.Error("gemini generation failed", "error", err)
-		respondJSON(w, &ProcessResponse{Reply: "Error generating response.", RequestID: requestID})
-		return
+	// 4. Initial conversation history payload
+	contents := []*genai.Content{
+		{
+			Role:  "user",
+			Parts: di.BuildParts(),
+		},
 	}
 
-	// 5. Check if the response contains function calls — if so, execute them
+	reply := ""
+	mediaBase64 := ""
+	mediaType := ""
+
+	// 5. Tool execution loop (max 5 iterations to prevent infinite loops)
+	for i := 0; i < 5; i++ {
+		resp, err := h.llm.GenerateResponse(ctx, contents, genaiTools)
+		if err != nil {
+			logger.Error("gemini generation failed", "error", err)
+			respondJSON(w, &ProcessResponse{Reply: "Error generating response.", RequestID: requestID})
+			return
+		}
+
+		if len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil {
+			break
+		}
+		cand := resp.Candidates[0]
+
+		// Ensure we append the model's exact response to the history
+		contents = append(contents, cand.Content)
+
+		hasToolCall := false
+		var toolResponses []*genai.Part
+
+		for _, part := range cand.Content.Parts {
+			if part.Text != "" {
+				reply += part.Text
+			} else if part.FunctionCall != nil {
+				hasToolCall = true
+				res := h.HandleToolCall(ctx, part.FunctionCall)
+
+				returnToModel := res.Output
+
+				// Intercept image output to avoid context bloat!
+				if part.FunctionCall.Name == "generate_image" {
+					var raw struct {
+						MediaBase64 string `json:"media_base64"`
+					}
+					if err := json.Unmarshal([]byte(res.Output), &raw); err == nil && raw.MediaBase64 != "" {
+						mediaBase64 = raw.MediaBase64
+						mediaType = "photo"
+						returnToModel = "Image generated successfully. It has been attached to the chat for the user to see."
+					}
+				}
+
+				toolResponses = append(toolResponses, genai.NewPartFromFunctionResponse(part.FunctionCall.Name, map[string]any{"result": returnToModel}))
+			}
+		}
+
+		if !hasToolCall {
+			break
+		}
+
+		// Append tool execution results and loop
+		contents = append(contents, &genai.Content{
+			Role:  "user",
+			Parts: toolResponses,
+		})
+	}
+
 	resp := &ProcessResponse{
-		Reply:     reply,
-		RequestID: requestID,
+		Reply:       reply,
+		RequestID:   requestID,
+		MediaBase64: mediaBase64,
+		MediaType:   mediaType,
 	}
 
 	// 6. Store the bot's reply in the message log
@@ -136,7 +197,7 @@ func (h *Handler) Process(w http.ResponseWriter, r *http.Request) {
 		logger.Error("failed to store bot reply", "error", err)
 	}
 
-	logger.Info("reply generated", "reply_length", len(reply))
+	logger.Info("reply generated", "reply_length", len(reply), "has_media", mediaBase64 != "")
 	respondJSON(w, resp)
 }
 

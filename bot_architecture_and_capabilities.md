@@ -234,3 +234,13 @@ Based on the blueprint above, here are further enhancements you should consider 
 1.  **Transition to Telegram Webhooks vs Polling**: While polling is easy for local development, production should utilize Telegram Webhooks for instant push-events, handled by the Python frontend behind a reverse proxy (like Nginx or Traefik) providing SSL/TLS termination.
 2.  **Voice Messages & STT**: Telegram is heavily voice-message driven. The Python frontend can download `.ogg` voice notes, transcode them, and feed them into the Gemini 2.5 Flash native multimodal engine (or a dedicated Whisper model) to allow users to literally "talk" to Gryag.
 3.  **Proactive Messaging (Cron Scheduling)**: Give the bot agency to speak *without* being spoken to. A cron-job in the Go backend can wake the LLM every few hours, letting it review the silent chat history and decide if it wants to make a sarcastic comment or start a new topic, increasing the illusion of it being a real chat participant.
+
+## 13. Global Configurability Mandate (Zero-Hardcode Policy)
+
+A fundamental design principle for the V2 build is that **everything must be configurable**. Whoever decides to deploy this repository must be able to shape the bot entirely through environment variables (`.env`) or a central configuration file (`config.yaml`/`config.json`), without ever touching the Go or Python source code.
+
+*   **Feature Toggles**: Every major component (OpenClaw Python Sandbox, Nano Banana Pro image generation, Proactive/Cron Messaging, Web Search Tool) must have an explicit `ENABLE_*=true/false` toggle.
+*   **Rate Limits & Throttle Tuning**: The Redis sliding-window values (messages per minute, max media generations per day, penalty timeouts) must be exposed as configurable integer variables.
+*   **Model Selection**: The specific LLMs used (e.g., `GEMINI_MODEL="gemini-2.5-flash"`) and temperature parameters must be configurable to allow operators to easily upgrade or downgrade models based on cost constraints.
+*   **Persona Overrides**: As outlined in Section 1, the core persona instructions must be hot-swappable via a template file (e.g., `persona.txt`), allowing the bot to instantly transform from a "sarcastic Ukrainian" to a "helpful coding assistant" based purely on configuration.
+*   **Database URIs**: Standardized connection strings for PostgreSQL and Redis to allow flexible deployments.

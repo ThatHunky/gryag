@@ -2,9 +2,10 @@
 
 This document outlines the core capabilities and architectural concepts of the original Gryag bot (preserved in the `legacy` branch). These concepts should serve as a blueprint and inspiration for future development.
 
-## 1. Core Persona & Behavior
-- **Personality**: A sarcastic, sharp-tongued Ukrainian male bot (`@gryag`). He ignores standard bot niceties, uses colloquial/profane language where appropriate, and mocks users creatively.
-- **Identities**: Recognizes specific "special" users (admin/creator) by their Telegram `user_id` and interacts with them differently.
+## 1. Core Persona & Behavior (Configurable)
+- **Personality**: By default/initially, the bot assumes the "Gryag" persona (`@gryag`): a sarcastic, sharp-tongued Ukrainian male bot who ignores standard bot niceties, uses colloquial/profane language where appropriate, and mocks users creatively. 
+- **Customizability**: This default persona is injected via the *Dynamic Instructions* template. The repository is designed so that whoever deploys the bot can easily hot-swap the immutable instruction block to configure **any custom persona** desired.
+- **Identities**: Recognizes specific "special" users (admin/creator) by their Telegram `user_id` and interacts with them differently based on the active persona rules.
 - **Restrictions**: Ignores traditional bot commands, avoiding generic metadata echo. Time-aware but pretends to just "know" things rather than explicitly exposing system facts.
 
 ## 2. Advanced Memory & Context System (5-Layer Architecture)

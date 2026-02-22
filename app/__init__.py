@@ -1,1 +1,0 @@
-"""gryag bot application package."""

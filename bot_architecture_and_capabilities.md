@@ -187,6 +187,6 @@ The bot will support premium image generation, specifically targeting **Nano Ban
     *   *Reference ID*: The bot replies with the image and a hidden or internal `media_id`. 
     *   *Editing*: If the user replies to the generated image asking to "make it darker" or "add a hat", the LLM retrieves the *original 2K quality image* from the temporary cache using the `media_id`, edits it via the appropriate API tool, and returns the result without cumulative compression artifacting.
 *   **File Delivery (Document vs. Photo)**: 
-    *   Telegram heavily compresses standard "Photos".
-    *   By default, the bot sends the image as a standard viewable photo. 
-    *   However, the LLM must understand context: if the user explicitly asks for "high quality", "full resolution", or "as a file", the frontend must send the image as a **Telegram Document (`sendDocument`)** to preserve the raw 2K Nano Banana Pro quality.
+    *   Previously, Telegram aggressively capped photos at 1280px. However, the Bot API now natively supports `sendPhoto` for resolutions up to **2560px** (which perfectly maps to 2K/1440p) without server-side dimensional downscaling.
+    *   By default, the bot sends the Nano Banana Pro image using `sendPhoto`. Users who have the "Experimental > Send large photos" setting enabled in their Desktop clients (or HD modes on mobile) will receive and view the stunning 2K image seamlessly in the feed.
+    *   A document (`sendDocument`) fallback is only necessary if the user explicitly demands the absolute raw uncompressed byte stream to bypass any residual JPEG compression Telegram applies during transit.

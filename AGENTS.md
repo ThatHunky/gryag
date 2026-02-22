@@ -7,7 +7,7 @@ This file provides the context, commands, boundaries, and style guidelines neces
 ## 1. Project Overview & Stack
 - **Backend**: Go 1.22+ (Strictly standard library for HTTP/SQL where possible, `google.golang.org/genai` for LLM, `lib/pq` for Postgres)
 - **Frontend / UI**: Python 3.11+ using `aiogram 3.x`
-- **Data Stores**: PostgreSQL 16 (persistent memory/logs) and Redis (rate limiting)
+- **Data Stores**: PostgreSQL 18+ (persistent memory/logs) and Redis (rate limiting)
 - **Deployment**: Docker Compose
 - **Design Pattern**: "Dumb Pipe" Frontend (pure router) + Stateless Go Backend (business logic & tools)
 

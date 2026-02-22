@@ -191,3 +191,22 @@ The bot will support premium image generation, specifically targeting **Nano Ban
     *   Previously, Telegram aggressively capped photos at 1280px. However, the Bot API now natively supports `sendPhoto` for resolutions up to **2560px** (which perfectly maps to 2K/1440p) without server-side dimensional downscaling.
     *   By default, the bot sends the Nano Banana Pro image using `sendPhoto`. Users who have the "Experimental > Send large photos" setting enabled in their Desktop clients (or HD modes on mobile) will receive and view the stunning 2K image seamlessly in the feed.
     *   A document (`sendDocument`) fallback is only necessary if the user explicitly demands the absolute raw uncompressed byte stream to bypass any residual JPEG compression Telegram applies during transit.
+
+## 10. Access Control, Admin Setup & Rate Limiting
+
+Because the bot relies on powerful LLMs and advanced media generation (which incur high API costs and compute time), robust access control is required.
+
+### 1. Admin/Creator Setup
+- **Configuration Level**: Admin Telegram `user_id`s (and potentially high-privilege VIPs) must be configured directly via Environment Variables (e.g., `ADMIN_IDS=12345678,87654321`) or a secure backend configuration file, completely separate from the LLM context.
+- **Privilege Separation**:
+    - *Operational Privileges*: Only Admins can invoke backend-level override commands (e.g., forcing a bot restart, flushing Redis caches, or modifying the system prompt).
+    - *Persona Privileges*: The backend injects the Admin IDs into the *Dynamic Instructions* context so the LLM recognizes its "creator", triggering the respectful/subservient conversational behavior outlined in the persona.
+
+### 2. Rate Limiting & Throttling (Redis)
+All incoming Telegram updates are intercepted by a highly performant Redis middleware layer *before* they hit the database or LLM generation logic.
+- **Tiered Sliding Window Algorithm**:
+    - **Global Chat Limit**: Prevent an entire group chat from overwhelming the bot (e.g., max 10 requests per minute per chat group).
+    - **Per-User Throttle**: Restrict individual users from spamming (e.g., max 3 messages per rolling 60-second window).
+    - **Expensive Tool Quotas**: Specific constraints placed on slow or costly tools. For instance, Nano Banana Pro image generation might be hard-capped at 5 images per user, per day.
+- **Cost Protection (Circuit Breakers)**: If an API anomaly is detected (e.g., Gemini spinning in an infinite loop or Telegram sending duplicated webhook events), Redis tracks consecutive failures/rapid spikes and temporarily short-circuits execution for that chat/user, notifying Admins directly. 
+- **Graceful Rejection**: If a user hits a throttle, the backend instantly ignores the request or returns a randomized, sarcastic cached rejection string (e.g., *"Take a breath, I'm not your personal servant. Ask again in a minute."*) without ever invoking the LLM API.

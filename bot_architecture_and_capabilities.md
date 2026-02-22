@@ -19,10 +19,9 @@ The legacy bot utilized a sophisticated, multi-tiered memory system aimed at red
 ## 3. Fact Extraction & User Profiling
 A defining feature is the bot's ability to invisibly build profiles of users over time.
 
-*   **Hybrid Extraction Pipeline**:
-    *   **Rule-based (Regex)**: Catches ~70% of common facts instantly (0 cost).
-    *   **Local LLM (Phi-3-mini)**: Runs locally to analyze complex sentences and extract preferences/facts (~85% coverage).
-    *   **Fallback (Gemini)**: Uses cloud API only when strictly necessary.
+*   **Extraction Pipeline**:
+    *   **Gemini API**: Primary engine for deeply nuanced dialogue and reasoning.
+    *   **OpenAI API**: Utilized for fast structuring, fact classification, and routing.
 *   **User Facts**: Stores user location, pronouns, likes/dislikes, relationships, and history. 
 *   **Self-Learning**: The bot analyzes its own performance and mistakes over time, automatically adjusting its persona behavior and strategies ("Semantic dedup", "temporal decay").
 
@@ -45,5 +44,5 @@ The LLM dynamically decides when to use external tools:
 ## Future Direction (V2)
 For the new iteration, the architectural focus should likely remain on:
 1. **Separation of Concerns**: Clean boundaries between Telegram Handlers, Memory Retrieval, Tool Execution, and LLM formatting.
-2. **Efficiency**: Retaining the hybrid (local + cloud) approach to save API costs.
+2. **Efficiency**: Smart API routing (using OpenAI for fast/cheap tasks and Gemini for heavy reasoning) to save costs.
 3. **Pluggability**: Easier addition of new "tools" for the LLM. 

@@ -15,7 +15,7 @@ For a detailed breakdown of the features, architectural principles, and the adva
 ### Key Ideals to Retain
 - **Character & Persona**: Sharp, sarcastic, zero-filter Ukrainian persona.
 - **Deep Contextual Awareness**: Remembering user facts, identifying episodes, and reducing redundant API calls through local/hybrid context strategies.
-- **Cost Optimization**: Complex token-saving mechanics and local fact extraction. 
+- **Cost Optimization**: Complex token-saving mechanics and intelligent routing between Gemini API and OpenAI API. 
 
 ## Development
 (Instructions for the new V2 setup will go here as development begins).

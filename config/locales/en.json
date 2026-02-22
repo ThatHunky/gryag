@@ -1,0 +1,18 @@
+{
+    "memory.stored": "Memory stored successfully (id: {0}).",
+    "memory.duplicate": "Memory already exists (duplicate detected).",
+    "memory.forgotten": "Memory {0} forgotten.",
+    "memory.none": "No memories stored for this user.",
+    "image.not_configured": "Image generation is not configured. Set NANO_BANANA_API_KEY and NANO_BANANA_API_URL.",
+    "image.disabled": "Image generation is currently disabled.",
+    "sandbox.disabled": "Code execution is currently disabled.",
+    "sandbox.timeout": "Code execution timed out.",
+    "sandbox.no_output": "(no output)",
+    "sandbox.output_truncated": "... (output truncated)",
+    "sandbox.error": "Execution error:\n{0}",
+    "weather.pending": "Weather for {0}: integration pending.",
+    "currency.pending": "Currency conversion {0} {1} → {2}: integration pending.",
+    "tool.unknown": "Unknown tool: {0}",
+    "tool.internal_error": "Internal error in tool {0}",
+    "error.backend_stub": "Backend stub: message received."
+}

@@ -1,0 +1,157 @@
+package tools
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+
+	"github.com/ThatHunky/gryag/backend/internal/config"
+	"github.com/ThatHunky/gryag/backend/internal/db"
+	"github.com/ThatHunky/gryag/backend/internal/i18n"
+)
+
+// Executor dispatches tool calls from the LLM to their concrete implementations.
+type Executor struct {
+	memory   *MemoryTool
+	imageGen *ImageGenTool
+	sandbox  *SandboxTool
+	config   *config.Config
+	i18n     *i18n.Bundle
+	lang     string
+}
+
+// NewExecutor creates a new tool executor with all implementations wired up.
+func NewExecutor(cfg *config.Config, database *db.DB, bundle *i18n.Bundle) *Executor {
+	return &Executor{
+		memory:   NewMemoryTool(database, bundle, cfg.DefaultLang),
+		imageGen: NewImageGenTool(cfg),
+		sandbox:  NewSandboxTool(cfg),
+		config:   cfg,
+		i18n:     bundle,
+		lang:     cfg.DefaultLang,
+	}
+}
+
+// ToolResult holds the result of a tool execution.
+type ToolResult struct {
+	Name   string `json:"name"`
+	Output string `json:"output"`
+	Error  string `json:"error,omitempty"`
+}
+
+// t is a helper for translation within the executor.
+func (e *Executor) t(key string, args ...string) string {
+	if e.i18n == nil {
+		return key
+	}
+	return e.i18n.T(e.lang, key, args...)
+}
+
+// Execute runs a tool by name with the given arguments (JSON).
+// Each tool execution is wrapped in an isolated error boundary (Section 15.3).
+func (e *Executor) Execute(ctx context.Context, name string, args json.RawMessage) *ToolResult {
+	logger := slog.With("tool", name)
+	logger.Info("executing tool", "args_length", len(args))
+
+	result := &ToolResult{Name: name}
+
+	// Recover from panics — feature isolation per Section 15.3
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("tool panicked", "panic", r)
+			result.Error = e.t("tool.internal_error", name)
+			result.Output = ""
+		}
+	}()
+
+	var output string
+	var err error
+
+	switch name {
+	// Memory tools
+	case "recall_memories":
+		output, err = e.memory.RecallMemories(ctx, args)
+	case "remember_memory":
+		output, err = e.memory.RememberMemory(ctx, args)
+	case "forget_memory":
+		output, err = e.memory.ForgetMemory(ctx, args)
+
+	// Calculator — evaluated via sandbox for safety
+	case "calculator":
+		var params struct {
+			Expression string `json:"expression"`
+		}
+		if jsonErr := json.Unmarshal(args, &params); jsonErr == nil {
+			code := fmt.Sprintf("print(eval(%q))", params.Expression)
+			codeArgs, _ := json.Marshal(map[string]string{"code": code})
+			output, err = e.sandbox.RunPythonCode(ctx, codeArgs)
+		} else {
+			err = jsonErr
+		}
+
+	// Weather — stub (requires external API integration)
+	case "weather":
+		var params struct {
+			Location string `json:"location"`
+		}
+		if jsonErr := json.Unmarshal(args, &params); jsonErr == nil {
+			output = e.t("weather.pending", params.Location)
+		} else {
+			err = jsonErr
+		}
+
+	// Currency — stub (requires external API integration)
+	case "currency":
+		var params struct {
+			From   string  `json:"from"`
+			To     string  `json:"to"`
+			Amount float64 `json:"amount"`
+		}
+		if jsonErr := json.Unmarshal(args, &params); jsonErr == nil {
+			output = e.t("currency.pending", fmt.Sprintf("%.2f", params.Amount), params.From, params.To)
+		} else {
+			err = jsonErr
+		}
+
+	// Image generation
+	case "generate_image":
+		if !e.config.EnableImageGeneration {
+			output = e.t("image.disabled")
+		} else {
+			output, err = e.imageGen.GenerateImage(ctx, args)
+		}
+	case "edit_image":
+		if !e.config.EnableImageGeneration {
+			output = e.t("image.disabled")
+		} else {
+			output, err = e.imageGen.EditImage(ctx, args)
+		}
+
+	// Code sandbox
+	case "run_python_code":
+		if !e.config.EnableSandbox {
+			output = e.t("sandbox.disabled")
+		} else {
+			output, err = e.sandbox.RunPythonCode(ctx, codeArgs(args))
+		}
+
+	default:
+		result.Error = e.t("tool.unknown", name)
+		return result
+	}
+
+	if err != nil {
+		logger.Error("tool execution failed", "error", err)
+		result.Error = err.Error()
+	} else {
+		result.Output = output
+	}
+
+	return result
+}
+
+// codeArgs is a passthrough for sandbox args.
+func codeArgs(args json.RawMessage) json.RawMessage {
+	return args
+}

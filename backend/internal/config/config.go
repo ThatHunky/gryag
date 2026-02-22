@@ -74,6 +74,10 @@ type Config struct {
 	TelegramMode  string
 	WebhookURL    string
 	WebhookSecret string
+
+	// Localization
+	LocaleDir   string
+	DefaultLang string
 }
 
 // Load reads all configuration from environment variables.
@@ -144,6 +148,10 @@ func Load() (*Config, error) {
 		TelegramMode:  getEnv("TELEGRAM_MODE", "polling"),
 		WebhookURL:    getEnv("WEBHOOK_URL", ""),
 		WebhookSecret: getEnv("WEBHOOK_SECRET", ""),
+
+		// Localization
+		LocaleDir:   getEnv("LOCALE_DIR", "config/locales"),
+		DefaultLang: getEnv("DEFAULT_LANG", "uk"),
 	}
 
 	// Validate required fields

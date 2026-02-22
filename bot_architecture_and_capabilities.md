@@ -148,7 +148,7 @@ While the legacy bot was powerful, its 5-layer memory and hybrid local/cloud ext
     - **OpenAI API (Optional)**: If you need extremely fast, cheap, predictable JSON formatting for minor classification tasks, though Gemini Flash is likely sufficient for both.
 
 #### Simplified Toolset (What to Keep vs Change)
-*   **Keep**: `search_web` (via Google Search Grounding natively inside Gemini).
+*   **Keep**: `search_web` (via Google Search Grounding natively inside Gemini). As of Gemini 2.5, Grounding can be combined with custom Function Calling declarations in the **same API request** — the model can use both Google Search and custom tools concurrently within a single generation call.
 *   **Change**: Replace manual `remember_memory`/`forget_memory` with native Gemini Tool Calling. 
 *   **Upgrade**: Image generation powered by Nano Banana Pro at 2K resolution (see Section 9).
 *   **Drop**: `SQLite`. Replaced by the robust combination of `PostgreSQL` and `Redis`.

@@ -10,8 +10,6 @@
     "sandbox.no_output": "(no output)",
     "sandbox.output_truncated": "... (output truncated)",
     "sandbox.error": "Execution error:\n{0}",
-    "weather.pending": "Weather for {0}: integration pending.",
-    "currency.pending": "Currency conversion {0} {1} → {2}: integration pending.",
     "tool.unknown": "Unknown tool: {0}",
     "tool.internal_error": "Internal error in tool {0}",
     "search.no_results": "No messages found.",

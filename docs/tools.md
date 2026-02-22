@@ -35,24 +35,6 @@ Evaluate a mathematical expression. Executed safely inside the Python sandbox.
 |-----------|------|----------|-------------|
 | `expression` | string | ✅ | Math expression (e.g., `2**10 + 3.14`) |
 
-### `weather`
-Get weather for a location. *(Integration pending)*
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `location` | string | ✅ | City or location name |
-
-### `currency`
-Convert between currencies. *(Integration pending)*
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `from` | string | ✅ | Source currency code (e.g., `USD`) |
-| `to` | string | ✅ | Target currency code (e.g., `UAH`) |
-| `amount` | number | ✅ | Amount to convert |
-
----
-
 ## Feature-Toggled
 
 ### `generate_image` (`ENABLE_IMAGE_GENERATION=true`)

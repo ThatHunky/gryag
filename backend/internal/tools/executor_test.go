@@ -65,19 +65,3 @@ func TestExecutor_DisabledImageGen(t *testing.T) {
 	}
 }
 
-func TestExecutor_WeatherStub(t *testing.T) {
-	os.Setenv("GEMINI_API_KEY", "test-key")
-	defer os.Unsetenv("GEMINI_API_KEY")
-	cfg, _ := config.Load()
-
-	executor := NewExecutor(cfg, nil, nil, nil)
-	args := json.RawMessage(`{"location": "Kyiv"}`)
-	result := executor.Execute(context.Background(), "weather", args)
-
-	if result.Error != "" {
-		t.Errorf("unexpected error: %s", result.Error)
-	}
-	if result.Output == "" {
-		t.Error("expected non-empty output from weather stub")
-	}
-}

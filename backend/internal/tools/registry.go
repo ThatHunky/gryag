@@ -70,32 +70,6 @@ func NewRegistry(cfg *config.Config) *Registry {
 		},
 	})
 
-	r.register("weather", &genai.FunctionDeclaration{
-		Name:        "weather",
-		Description: "Get current weather and forecasts for a location.",
-		Parameters: &genai.Schema{
-			Type: genai.TypeObject,
-			Properties: map[string]*genai.Schema{
-				"location": {Type: genai.TypeString, Description: "City name or location"},
-			},
-			Required: []string{"location"},
-		},
-	})
-
-	r.register("currency", &genai.FunctionDeclaration{
-		Name:        "currency",
-		Description: "Convert between currencies or get exchange rates.",
-		Parameters: &genai.Schema{
-			Type: genai.TypeObject,
-			Properties: map[string]*genai.Schema{
-				"from":   {Type: genai.TypeString, Description: "Source currency code (e.g. USD)"},
-				"to":     {Type: genai.TypeString, Description: "Target currency code (e.g. UAH)"},
-				"amount": {Type: genai.TypeNumber, Description: "Amount to convert"},
-			},
-			Required: []string{"from", "to", "amount"},
-		},
-	})
-
 	r.register("search_messages", &genai.FunctionDeclaration{
 		Name:        "search_messages",
 		Description: "Search through chat message history. Returns matching messages with links and file IDs for media. Use this to recall what someone said or find a specific message/photo/video. You can include the message link in your reply so the user can jump to it.",
@@ -113,7 +87,7 @@ func NewRegistry(cfg *config.Config) *Registry {
 	if cfg.EnableWebSearch {
 		r.register("search_web", &genai.FunctionDeclaration{
 			Name:        "search_web",
-			Description: "Search the web for current information, news, or facts. Use for news, trending topics, or when the user asks for something you need to look up.",
+			Description: "Search the web for current information, news, weather, currency rates, or facts. Use for news, trending topics, weather, currency conversion, or when the user asks for something you need to look up.",
 			Parameters: &genai.Schema{
 				Type: genai.TypeObject,
 				Properties: map[string]*genai.Schema{

@@ -62,6 +62,13 @@ type Config struct {
 	ProactiveActiveStartHour int // 0-23, inclusive
 	ProactiveActiveEndHour   int // 0-23, exclusive (e.g. 9-22 means 09:00–21:59)
 
+	// Summarization (3 AM Kyiv; 7-day every 3 days, 30-day every 12 days)
+	EnableSummarization       bool
+	SummaryRunHour            int // 0-23, Kyiv time (default 3)
+	Summary7DayIntervalDays   int
+	Summary30DayIntervalDays  int
+	SummaryMaxMessagesPerWindow int
+
 	// Context Window
 	ImmediateContextSize int
 	MediaBufferMax       int
@@ -141,6 +148,13 @@ func Load() (*Config, error) {
 		// Proactive Messaging (active hours in Kyiv time; parsed below)
 		ProactiveActiveStartHour: 9,
 		ProactiveActiveEndHour:   22,
+
+		// Summarization (3 AM Kyiv; 7-day every 3 days, 30-day every 12 days)
+		EnableSummarization:         getEnvBool("ENABLE_SUMMARIZATION", false),
+		SummaryRunHour:              getEnvInt("SUMMARY_RUN_HOUR", 3),
+		Summary7DayIntervalDays:     getEnvInt("SUMMARY_7DAY_INTERVAL_DAYS", 3),
+		Summary30DayIntervalDays:    getEnvInt("SUMMARY_30DAY_INTERVAL_DAYS", 12),
+		SummaryMaxMessagesPerWindow: getEnvInt("SUMMARY_MAX_MESSAGES_PER_WINDOW", 2000),
 
 		// Context Window
 		ImmediateContextSize: getEnvInt("IMMEDIATE_CONTEXT_SIZE", 50),

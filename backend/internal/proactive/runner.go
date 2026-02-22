@@ -70,7 +70,7 @@ func (r *Runner) RunOne(ctx context.Context) {
 		}
 	}
 
-	di, err := llm.NewDynamicInstructions(ctx, r.db, chatID, userID, username, firstName, "[Proactive turn]", r.cfg.ImmediateContextSize)
+	di, err := llm.NewDynamicInstructions(ctx, r.db, chatID, userID, username, firstName, "[Proactive turn]", r.cfg.ImmediateContextSize, nil, "")
 	if err != nil {
 		logger.Error("dynamic instructions failed", "error", err)
 		return

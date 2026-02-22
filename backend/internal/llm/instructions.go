@@ -35,8 +35,10 @@ type DynamicInstructions struct {
 	// Section 8.6: Multi-media buffer (up to 10 media items)
 	MediaParts []*genai.Part
 
-	// Section 8.7: Current message
-	CurrentMessage string
+	// Section 8.7: Current message (and reply/quote context)
+	CurrentMessage   string
+	ReplyToMessageID *int64
+	ReplyToText      string
 }
 
 // NewDynamicInstructions creates a DynamicInstructions from the database context.
@@ -47,14 +49,18 @@ func NewDynamicInstructions(
 	userID int64,
 	username, firstName, text string,
 	contextSize int,
+	replyToMessageID *int64,
+	replyToText string,
 ) (*DynamicInstructions, error) {
 	di := &DynamicInstructions{
-		CurrentTime:    time.Now().Format("15:04 Monday, 02/01/2006"),
-		ChatID:         chatID,
-		UserID:         userID,
-		Username:       username,
-		FirstName:      firstName,
-		CurrentMessage: text,
+		CurrentTime:      time.Now().Format("15:04 Monday, 02/01/2006"),
+		ChatID:           chatID,
+		UserID:           userID,
+		Username:         username,
+		FirstName:        firstName,
+		CurrentMessage:   text,
+		ReplyToMessageID: replyToMessageID,
+		ReplyToText:      replyToText,
 	}
 
 	// Load recent messages for immediate context
@@ -70,6 +76,14 @@ func NewDynamicInstructions(
 		return nil, fmt.Errorf("get user facts: %w", err)
 	}
 	di.UserFacts = facts
+
+	// Load latest 30-day and 7-day summaries (Section 8.4)
+	if s30, err := database.GetLatestSummary(ctx, chatID, "30day"); err == nil {
+		di.Summary30Day = s30
+	}
+	if s7, err := database.GetLatestSummary(ctx, chatID, "7day"); err == nil {
+		di.Summary7Day = s7
+	}
 
 	return di, nil
 }
@@ -149,12 +163,21 @@ func (di *DynamicInstructions) BuildParts() []*genai.Part {
 	// Up to 10 media parts injected directly as genai.Part entries
 	parts = append(parts, di.MediaParts...)
 
-	// 7. Current Message (Section 8.7)
+	// 7. Current Message (Section 8.7), including reply/quote when present
 	msgBlock := fmt.Sprintf("# Current Message\nFrom: %s", di.FirstName)
 	if di.Username != "" {
 		msgBlock += fmt.Sprintf(" (@%s)", di.Username)
 	}
 	msgBlock += fmt.Sprintf(" [user_id: %d]\nMessage: %s", di.UserID, di.CurrentMessage)
+	if di.ReplyToText != "" {
+		if di.ReplyToMessageID != nil {
+			msgBlock += fmt.Sprintf("\nReplying to (message_id %d): %s", *di.ReplyToMessageID, di.ReplyToText)
+		} else {
+			msgBlock += "\nReplying to: " + di.ReplyToText
+		}
+	} else if di.ReplyToMessageID != nil {
+		msgBlock += fmt.Sprintf("\nReplying to message_id: %d", *di.ReplyToMessageID)
+	}
 	parts = append(parts, genai.NewPartFromText(msgBlock))
 
 	return parts

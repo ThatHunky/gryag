@@ -161,6 +161,11 @@ async def handle_message(message: types.Message) -> None:
             "file_id": file_id,
             "media_type": media_type,
         }
+        if getattr(message, "reply_to_message", None):
+            payload["reply_to_message_id"] = message.reply_to_message.message_id
+            payload["reply_to_text"] = (
+                message.reply_to_message.text or message.reply_to_message.caption or ""
+            )
         if media_base64:
             payload["media_base64"] = media_base64
             payload["mime_type"] = mime_type

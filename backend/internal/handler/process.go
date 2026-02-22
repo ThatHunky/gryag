@@ -20,17 +20,19 @@ import (
 
 // ProcessRequest holds the incoming message payload from the Python frontend.
 type ProcessRequest struct {
-	ChatID      int64  `json:"chat_id"`
-	UserID      *int64 `json:"user_id"`
-	Username    string `json:"username"`
-	FirstName   string `json:"first_name"`
-	Text        string `json:"text"`
-	MessageID   int64  `json:"message_id"`
-	Date        string `json:"date"`
-	FileID      string `json:"file_id"`
-	MediaType   string `json:"media_type"`
-	MediaBase64 string `json:"media_base64"`
-	MimeType    string `json:"mime_type"`
+	ChatID            int64   `json:"chat_id"`
+	UserID            *int64  `json:"user_id"`
+	Username          string  `json:"username"`
+	FirstName         string  `json:"first_name"`
+	Text              string  `json:"text"`
+	MessageID         int64   `json:"message_id"`
+	Date              string  `json:"date"`
+	FileID            string  `json:"file_id"`
+	MediaType         string  `json:"media_type"`
+	MediaBase64       string  `json:"media_base64"`
+	MimeType          string  `json:"mime_type"`
+	ReplyToMessageID  *int64  `json:"reply_to_message_id,omitempty"`
+	ReplyToText       string  `json:"reply_to_text,omitempty"`
 }
 
 type ProcessResponse struct {
@@ -94,22 +96,23 @@ func (h *Handler) Process(w http.ResponseWriter, r *http.Request) {
 		userID = *req.UserID
 	}
 	msgRecord := &db.Message{
-		ChatID:    req.ChatID,
-		UserID:    req.UserID,
-		Username:  strPtr(req.Username),
-		FirstName: strPtr(req.FirstName),
-		Text:      strPtr(req.Text),
-		MessageID: &req.MessageID,
-		RequestID: &requestID,
-		FileID:    strPtr(req.FileID),
-		MediaType: strPtr(req.MediaType),
+		ChatID:           req.ChatID,
+		UserID:           req.UserID,
+		Username:         strPtr(req.Username),
+		FirstName:        strPtr(req.FirstName),
+		Text:             strPtr(req.Text),
+		MessageID:        &req.MessageID,
+		RequestID:        &requestID,
+		FileID:           strPtr(req.FileID),
+		MediaType:        strPtr(req.MediaType),
+		ReplyToMessageID: req.ReplyToMessageID,
 	}
 	if _, err := h.db.InsertMessage(ctx, msgRecord); err != nil {
 		logger.Error("failed to store incoming message", "error", err)
 	}
 
 	// 2. Build Dynamic Instructions from DB context
-	di, err := llm.NewDynamicInstructions(ctx, h.db, req.ChatID, userID, req.Username, req.FirstName, req.Text, h.config.ImmediateContextSize)
+	di, err := llm.NewDynamicInstructions(ctx, h.db, req.ChatID, userID, req.Username, req.FirstName, req.Text, h.config.ImmediateContextSize, req.ReplyToMessageID, req.ReplyToText)
 	if err != nil {
 		logger.Error("failed to build dynamic instructions", "error", err)
 		reply := "Internal error building context."

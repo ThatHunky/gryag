@@ -17,6 +17,7 @@ import (
 	"github.com/ThatHunky/gryag/backend/internal/llm"
 	"github.com/ThatHunky/gryag/backend/internal/middleware"
 	"github.com/ThatHunky/gryag/backend/internal/proactive"
+	"github.com/ThatHunky/gryag/backend/internal/summarizer"
 	"github.com/ThatHunky/gryag/backend/internal/tools"
 )
 
@@ -103,6 +104,13 @@ func main() {
 		proactiveRunner := proactive.NewRunner(cfg, database, llmClient, registry, executor, redisCache)
 		go proactive.Scheduler(context.Background(), proactiveRunner, cfg.ProactiveActiveStartHour, cfg.ProactiveActiveEndHour)
 		slog.Info("proactive messaging started", "active_hours_start", cfg.ProactiveActiveStartHour, "active_hours_end", cfg.ProactiveActiveEndHour)
+	}
+
+	// ── Summarization (optional; 3 AM Kyiv, 7-day every 3 days, 30-day every 12 days) ──
+	if cfg.EnableSummarization {
+		summarizerRunner := summarizer.NewRunner(database, redisCache, llmClient, cfg)
+		go summarizer.Scheduler(context.Background(), summarizerRunner, cfg)
+		slog.Info("summarization started", "run_hour_kyiv", cfg.SummaryRunHour, "7day_interval_days", cfg.Summary7DayIntervalDays, "30day_interval_days", cfg.Summary30DayIntervalDays)
 	}
 
 	// ── HTTP Mux ────────────────────────────────────────────────────────

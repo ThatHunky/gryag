@@ -5,10 +5,14 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/ThatHunky/gryag/backend/internal/config"
+	"github.com/ThatHunky/gryag/backend/internal/db"
 	"google.golang.org/genai"
 )
+
+const maxSummaryInputChars = 100_000
 
 // Client wraps the Google GenAI SDK client for Gemini interactions.
 type Client struct {
@@ -100,6 +104,56 @@ func (c *Client) RouteIntent(ctx context.Context, message string, tools []*genai
 	}
 
 	return resp, nil
+}
+
+// SummarizeChat produces a short factual summary of a chat log for the given window (e.g. "7-day", "30-day").
+// Messages are formatted like the immediate context block; input is truncated to maxSummaryInputChars.
+func (c *Client) SummarizeChat(ctx context.Context, messages []db.Message, windowLabel string) (string, error) {
+	if len(messages) == 0 {
+		return "", nil
+	}
+	var b strings.Builder
+	for _, msg := range messages {
+		name := "Unknown"
+		if msg.FirstName != nil {
+			name = *msg.FirstName
+		}
+		if msg.Username != nil {
+			name += " (@" + *msg.Username + ")"
+		}
+		text := ""
+		if msg.Text != nil {
+			text = *msg.Text
+		}
+		prefix := ""
+		if msg.IsBotReply {
+			prefix = "[BOT] "
+		}
+		if msg.WasThrottled {
+			prefix = "[THROTTLED] "
+		}
+		b.WriteString(fmt.Sprintf("%s%s: %s\n", prefix, name, text))
+	}
+	chatLog := b.String()
+	if len(chatLog) > maxSummaryInputChars {
+		chatLog = chatLog[len(chatLog)-maxSummaryInputChars:]
+	}
+	systemInstruction := "You are a summarization assistant. Summarize the following chat log concisely and factually. Preserve key topics, decisions, and context. Use the same language as the chat or English. Output only the summary, no preamble."
+	userContent := "Summarize this " + windowLabel + " conversation:\n\n" + chatLog
+	config := &genai.GenerateContentConfig{
+		SystemInstruction: &genai.Content{
+			Parts: []*genai.Part{genai.NewPartFromText(systemInstruction)},
+		},
+		Temperature: genai.Ptr(float32(0.2)),
+	}
+	contents := []*genai.Content{
+		{Role: "user", Parts: []*genai.Part{genai.NewPartFromText(userContent)}},
+	}
+	resp, err := c.genai.Models.GenerateContent(ctx, c.config.GeminiModel, contents, config)
+	if err != nil {
+		return "", fmt.Errorf("summarize chat: %w", err)
+	}
+	return extractText(resp), nil
 }
 
 // SearchWithGrounding runs a single Gemini request with Google Search grounding and returns

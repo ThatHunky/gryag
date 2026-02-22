@@ -157,30 +157,6 @@ func (e *Executor) Execute(ctx context.Context, name string, args json.RawMessag
 			err = jsonErr
 		}
 
-	// Weather — stub (requires external API integration)
-	case "weather":
-		var params struct {
-			Location string `json:"location"`
-		}
-		if jsonErr := json.Unmarshal(args, &params); jsonErr == nil {
-			output = e.t("weather.pending", params.Location)
-		} else {
-			err = jsonErr
-		}
-
-	// Currency — stub (requires external API integration)
-	case "currency":
-		var params struct {
-			From   string  `json:"from"`
-			To     string  `json:"to"`
-			Amount float64 `json:"amount"`
-		}
-		if jsonErr := json.Unmarshal(args, &params); jsonErr == nil {
-			output = e.t("currency.pending", fmt.Sprintf("%.2f", params.Amount), params.From, params.To)
-		} else {
-			err = jsonErr
-		}
-
 	// Image generation
 	case "generate_image":
 		if !e.config.EnableImageGeneration {

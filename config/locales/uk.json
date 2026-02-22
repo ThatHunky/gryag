@@ -10,8 +10,6 @@
     "sandbox.no_output": "(немає виводу)",
     "sandbox.output_truncated": "... (вивід обрізано)",
     "sandbox.error": "Помилка виконання:\n{0}",
-    "weather.pending": "Погода для {0}: інтеграція в процесі.",
-    "currency.pending": "Конвертація {0} {1} → {2}: інтеграція в процесі.",
     "tool.unknown": "Невідомий інструмент: {0}",
     "tool.internal_error": "Внутрішня помилка в інструменті {0}",
     "search.no_results": "Нічого не знайдено.",

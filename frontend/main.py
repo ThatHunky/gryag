@@ -6,7 +6,6 @@ It performs no thinking — it is purely a dumb pipe.
 """
 
 import asyncio
-import json
 import logging
 import os
 import uuid
@@ -14,7 +13,7 @@ import uuid
 import aiohttp
 import structlog
 from aiogram import Bot, Dispatcher, types
-from aiogram.enums import ChatAction
+from aiogram.enums import ChatAction, ContentType
 from aiohttp import web
 
 # ── Structured JSON Logging (Section 15.2) ──────────────────────────────
@@ -62,6 +61,7 @@ async def handle_message(message: types.Message) -> None:
         chat_id=message.chat.id,
         user_id=message.from_user.id if message.from_user else None,
         text=message.text[:100] if message.text else None,
+        content_type=message.content_type,
     )
 
     # Start typing indicator
@@ -69,12 +69,13 @@ async def handle_message(message: types.Message) -> None:
     typing_task = asyncio.create_task(send_typing_loop(message.chat.id, stop_typing))
 
     try:
+        # Build the payload for the backend
         payload = {
             "chat_id": message.chat.id,
             "user_id": message.from_user.id if message.from_user else None,
             "username": message.from_user.username if message.from_user else None,
             "first_name": message.from_user.first_name if message.from_user else None,
-            "text": message.text or "",
+            "text": message.text or message.caption or "",
             "message_id": message.message_id,
             "date": message.date.isoformat() if message.date else None,
         }
@@ -89,9 +90,43 @@ async def handle_message(message: types.Message) -> None:
                 if resp.status == 200:
                     data = await resp.json()
                     reply_text = data.get("reply", "")
-                    if reply_text:
-                        await message.answer(reply_text)
+                    media_url = data.get("media_url", "")
+                    media_type = data.get("media_type", "")
+
+                    # Handle media responses (image generation results)
+                    if media_url and media_type == "photo":
+                        try:
+                            await message.answer_photo(
+                                photo=media_url,
+                                caption=reply_text[:1024] if reply_text else None,
+                            )
+                            logger.info("photo_sent", media_url=media_url)
+                        except Exception as e:
+                            logger.error("photo_send_failed", error=str(e))
+                            # Fall back to text with URL
+                            if reply_text:
+                                await message.answer(f"{reply_text}\n\n🖼 {media_url}")
+                    elif media_url and media_type == "document":
+                        try:
+                            await message.answer_document(
+                                document=media_url,
+                                caption=reply_text[:1024] if reply_text else None,
+                            )
+                            logger.info("document_sent", media_url=media_url)
+                        except Exception as e:
+                            logger.error("document_send_failed", error=str(e))
+                            if reply_text:
+                                await message.answer(f"{reply_text}\n\n📎 {media_url}")
+                    elif reply_text:
+                        # Split long messages (Telegram limit: 4096 chars)
+                        for i in range(0, len(reply_text), 4096):
+                            chunk = reply_text[i : i + 4096]
+                            await message.answer(chunk)
                         logger.info("reply_sent", reply_length=len(reply_text))
+
+                elif resp.status == 204:
+                    # Rate limited — strict silence (Section 10)
+                    logger.info("throttled_silent", chat_id=message.chat.id)
                 else:
                     logger.warn("backend_error", status=resp.status)
 

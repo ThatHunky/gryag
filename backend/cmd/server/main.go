@@ -1,13 +1,22 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
+	"github.com/ThatHunky/gryag/backend/internal/cache"
 	"github.com/ThatHunky/gryag/backend/internal/config"
+	"github.com/ThatHunky/gryag/backend/internal/db"
+	"github.com/ThatHunky/gryag/backend/internal/handler"
+	"github.com/ThatHunky/gryag/backend/internal/i18n"
+	"github.com/ThatHunky/gryag/backend/internal/llm"
+	"github.com/ThatHunky/gryag/backend/internal/middleware"
+	"github.com/ThatHunky/gryag/backend/internal/tools"
 )
 
 func main() {
@@ -28,62 +37,88 @@ func main() {
 		"backend_addr", cfg.ListenAddr(),
 		"postgres", cfg.PostgresHost,
 		"redis", cfg.RedisAddr(),
+		"locale_dir", cfg.LocaleDir,
+		"default_lang", cfg.DefaultLang,
 	)
+
+	// ── i18n Bundle ─────────────────────────────────────────────────────
+	bundle, err := i18n.NewBundle(cfg.LocaleDir, cfg.DefaultLang)
+	if err != nil {
+		slog.Error("failed to load i18n locales", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("i18n loaded", "languages", bundle.Languages())
+
+	// ── PostgreSQL ──────────────────────────────────────────────────────
+	database, err := db.New(cfg.PostgresDSN())
+	if err != nil {
+		slog.Error("failed to connect to postgres", "error", err)
+		os.Exit(1)
+	}
+	defer database.Close()
+
+	// ── Redis ───────────────────────────────────────────────────────────
+	redisCache, err := cache.New(cfg.RedisAddr(), cfg.RedisPassword)
+	if err != nil {
+		slog.Error("failed to connect to redis", "error", err)
+		os.Exit(1)
+	}
+	defer redisCache.Close()
+
+	// ── Gemini LLM Client ───────────────────────────────────────────────
+	llmClient, err := llm.NewClient(cfg)
+	if err != nil {
+		slog.Error("failed to initialize gemini client", "error", err)
+		os.Exit(1)
+	}
+
+	// ── Tool Registry & Executor ────────────────────────────────────────
+	registry := tools.NewRegistry(cfg)
+	executor := tools.NewExecutor(cfg, database, bundle)
+	slog.Info("tools loaded", "count", registry.Count(), "names", registry.GetToolNames())
+
+	// ── Request Handler ─────────────────────────────────────────────────
+	h := handler.New(cfg, database, redisCache, llmClient, registry, executor)
+
+	// ── Rate Limiter Middleware ──────────────────────────────────────────
+	rateLimiter := middleware.NewRateLimiter(redisCache, database, cfg)
 
 	// ── HTTP Mux ────────────────────────────────────────────────────────
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", handler.HealthCheck)
+	mux.Handle("POST /api/v1/process", rateLimiter.Middleware(http.HandlerFunc(h.Process)))
 
-	// Health check (Section 15.2)
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]string{
-			"status": "ok",
-			"time":   time.Now().UTC().Format(time.RFC3339),
-		})
-	})
-
-	// Stub process endpoint — the main entry point from the Python frontend
-	mux.HandleFunc("POST /api/v1/process", func(w http.ResponseWriter, r *http.Request) {
-		requestID := r.Header.Get("X-Request-ID")
-		logger := slog.With("request_id", requestID)
-
-		// Decode the incoming payload
-		var payload map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			logger.Warn("invalid request payload", "error", err)
-			http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
-			return
-		}
-		defer r.Body.Close()
-
-		logger.Info("received process request",
-			"chat_id", payload["chat_id"],
-			"user_id", payload["user_id"],
-		)
-
-		// Stub response — will be replaced with actual Gemini integration in Phase 3
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"reply":      "Backend stub: message received.",
-			"request_id": requestID,
-		})
-	})
-
-	// ── Start Server ────────────────────────────────────────────────────
+	// ── Server with Graceful Shutdown ────────────────────────────────────
 	addr := cfg.ListenAddr()
-	slog.Info("starting gryag-backend", "addr", addr)
-
 	server := &http.Server{
 		Addr:         addr,
 		Handler:      mux,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
+		WriteTimeout: 120 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
 
-	if err := server.ListenAndServe(); err != nil {
-		slog.Error("server failed", "error", err)
-		os.Exit(1)
+	// Start server in a goroutine
+	go func() {
+		slog.Info("starting gryag-backend", "addr", addr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("server failed", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	// Wait for interrupt signal for graceful shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	sig := <-quit
+	slog.Info("shutting down", "signal", sig.String())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		slog.Error("server forced shutdown", "error", err)
 	}
+
+	slog.Info("server stopped")
 }

@@ -244,3 +244,12 @@ A fundamental design principle for the V2 build is that **everything must be con
 *   **Model Selection**: The specific LLMs used (e.g., `GEMINI_MODEL="gemini-2.5-flash"`) and temperature parameters must be configurable to allow operators to easily upgrade or downgrade models based on cost constraints.
 *   **Persona Overrides**: As outlined in Section 1, the core persona instructions must be hot-swappable via a template file (e.g., `persona.txt`), allowing the bot to instantly transform from a "sarcastic Ukrainian" to a "helpful coding assistant" based purely on configuration.
 *   **Database URIs**: Standardized connection strings for PostgreSQL and Redis to allow flexible deployments.
+
+## 14. Advanced Engineering & API Best Practices (2025 Standards)
+
+To ensure the bot remains robust, fast, and maintainable, the Go backend must adhere to the latest architectural standards for LLM orchestration:
+
+1.  **Native `SystemInstruction` Parameter**: Do not inject the core persona (the "Immutable Block") into the standard conversation array. The Gemini SDK provides a dedicated `SystemInstruction` field. This distinct separation prevents the model from "forgetting" its persona during long context windows and strongly guards against user prompt-injection attacks targeting the persona.
+2.  **Strict Structured Outputs (JSON Schema)**: When the Go backend asks the LLM to classify a user's intent or decide which tool to run, it **must** enforce `response_mime_type: "application/json"` and provide a strict `response_schema` (adhering to OpenAPI 3.0 types). This completely eliminates the need for regex parsing and guarantees type-safe responses (e.g., enforcing Enums for action types).
+3.  **Deterministic Tool Calling**: When the LLM is acting purely as a "router" (deciding whether to call a tool vs talking normally), the API call should temporarily override its config to a very low temperature (`temperature=0`). High temperature should only be used for the final creative conversational output.
+4.  **Model Context Protocol (MCP) Design**: As the list of bot capabilities grows (Memory, OpenClaw, Nano Banana, Weather, Web Search), connecting them via hardcoded `switch` statements becomes brittle. The backend architecture should aspire to implement an **MCP (Model Context Protocol)** router pattern. This abstracts tools into independent, discoverable endpoints, allowing Gemini to seamlessly query the MCP router for available tools and execute them dynamically without monolithic backend updates.

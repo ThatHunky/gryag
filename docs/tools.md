@@ -56,19 +56,25 @@ Convert between currencies. *(Integration pending)*
 ## Feature-Toggled
 
 ### `generate_image` (`ENABLE_IMAGE_GENERATION=true`)
-Generate a photorealistic image at 2K resolution via Nano Banana Pro.
+Generate a photorealistic image at 2K resolution via Gemini 3 Pro Image Preview (same GEMINI_API_KEY as chat). The backend caches the image and returns a `media_id` in the tool result so the model can pass it to `edit_image` later.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `prompt` | string | ✅ | Image generation prompt **in ENGLISH** |
+| `prompt` | string | ✅ | Image generation prompt **in ENGLISH only** (translate from the user's language) |
+| `aspect_ratio` | string | | Optional. One of: 1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9 |
+| `as_document` | boolean | | Optional. If true, send as file/document instead of inline photo |
 
 ### `edit_image` (`ENABLE_IMAGE_GENERATION=true`)
-Edit an existing generated image by its `media_id`.
+Edit an image: either by `media_id` (from a previous `generate_image` or `edit_image` response) or the image attached to the current message (`use_context_image: true`). Prompt must be in English only.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `media_id` | string | ✅ | ID from a previous `generate_image` response |
-| `prompt` | string | ✅ | Edit instructions **in ENGLISH** |
+| `prompt` | string | ✅ | Edit instructions **in ENGLISH only** |
+| `media_id` | string | | ID from a previous generation (for "edit that one") |
+| `use_context_image` | boolean | | Set true when the user attached an image to the current message and asked to edit it |
+| `aspect_ratio` | string | | Optional. Same values as `generate_image` |
+
+**Supported input media (user sends to bot):** The bot receives and injects into context: photo, video, voice, sticker, animation (GIF), video_note, and document (image/video). So the model can see and hear attachments; use `use_context_image` when the user says "edit this" with an image attached.
 
 ### `run_python_code` (`ENABLE_SANDBOX=true`)
 Execute Python code in the locked-down sandbox container. Zero network access, read-only filesystem, resource limits.
@@ -86,8 +92,12 @@ Execute Python code in the locked-down sandbox container. Zero network access, r
 
 ---
 
-## Google Search Grounding (`ENABLE_WEB_SEARCH=true`)
-Automatically injected alongside custom tools. Not a function call — Gemini uses it natively to ground responses in real-time web data.
+### `search_web` (`ENABLE_WEB_SEARCH=true`)
+Search the web using **Gemini Grounding** (a separate Gemini request with Google Search). No extra API key; uses `GEMINI_API_KEY`. Available in normal chat and in proactive messaging (e.g. 30% “conduct a news search” path).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | ✅ | Search query (e.g. “latest news Ukraine”, “weather London”) |
 
 ## Admin Endpoints
 

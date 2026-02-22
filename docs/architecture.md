@@ -12,7 +12,7 @@ graph LR
     BE <-->|messages, facts| PG[(PostgreSQL 18)]
     BE <-->|rate limits, locks| RD[(Redis 7)]
     BE -->|docker run --network none| SB[Sandbox Container]
-    BE -->|HTTP| NB[Nano Banana Pro API]
+    BE -->|GenerateContent| GEMIMG[Gemini 3 Pro Image]
 ```
 
 ## Component Responsibilities
@@ -20,7 +20,7 @@ graph LR
 | Component | Language | Role |
 |-----------|----------|------|
 | **Frontend** (`frontend/`) | Python 3.12 | Telegram polling, typing indicators, media sending, correlation IDs |
-| **Backend** (`backend/`) | Go 1.23 | All thinking: config, i18n, DB, Redis, Gemini SDK, tools, rate limiting |
+| **Backend** (`backend/`) | Go 1.24 | All thinking: config, i18n, DB, Redis, Gemini SDK, tools, rate limiting |
 | **PostgreSQL** | — | Messages, user facts, chat summaries, media cache, schema migrations |
 | **Redis** | — | Sliding-window rate limits, queue locks (exclusive processing per chat) |
 | **Sandbox** | Python 3.12 | Isolated code execution: `--network none`, `--read-only`, resource limits |

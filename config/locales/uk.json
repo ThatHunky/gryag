@@ -3,7 +3,7 @@
     "memory.duplicate": "Така пам'ять вже існує (дублікат).",
     "memory.forgotten": "Пам'ять {0} забута.",
     "memory.none": "Ніяких спогадів про цього користувача не збережено.",
-    "image.not_configured": "Генерація зображень не налаштована. Встановіть NANO_BANANA_API_KEY та NANO_BANANA_API_URL.",
+    "image.not_configured": "Генерація зображень не налаштована. Встановіть GEMINI_API_KEY для генерації зображень.",
     "image.disabled": "Генерація зображень наразі вимкнена.",
     "sandbox.disabled": "Виконання коду наразі вимкнено.",
     "sandbox.timeout": "Виконання коду перевищило ліміт часу.",
@@ -15,5 +15,8 @@
     "tool.unknown": "Невідомий інструмент: {0}",
     "tool.internal_error": "Внутрішня помилка в інструменті {0}",
     "search.no_results": "Нічого не знайдено.",
-    "error.backend_stub": "Бекенд-заглушка: повідомлення отримано."
+    "error.backend_stub": "Бекенд-заглушка: повідомлення отримано.",
+    "error.context_build": "Внутрішня помилка побудови контексту.",
+    "error.generation_failed": "Помилка генерації відповіді.",
+    "tool.search_web_not_configured": "Веб-пошук не налаштовано."
 }

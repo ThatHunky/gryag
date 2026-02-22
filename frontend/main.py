@@ -37,11 +37,50 @@ log = structlog.get_logger()
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 BACKEND_URL = f"http://{os.getenv('BACKEND_HOST', 'gryag-backend')}:{os.getenv('BACKEND_PORT', '27710')}"
 HEALTH_PORT = int(os.getenv("FRONTEND_HEALTH_PORT", "27711"))
+ENABLE_PROACTIVE_MESSAGING = os.getenv("ENABLE_PROACTIVE_MESSAGING", "false").lower() in ("true", "1", "yes")
+PROACTIVE_POLL_INTERVAL_SEC = int(os.getenv("PROACTIVE_POLL_INTERVAL_SEC", "90"))
 
 
 # ── Bot & Dispatcher ────────────────────────────────────────────────────
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# Max size (bytes) to send media to backend; larger files are skipped to avoid timeouts (plan: size limits).
+MEDIA_MAX_BYTES = int(os.getenv("MEDIA_MAX_BYTES", str(10 * 1024 * 1024)))  # 10 MB default
+
+
+async def download_media_as_base64(file_id: str, mime_type: str | None = None) -> tuple[str, str] | None:
+    """Download file by file_id and return (base64_string, mime_type). Returns None if too large or download fails."""
+    try:
+        tg_file = await bot.get_file(file_id)
+        if tg_file.file_size and tg_file.file_size > MEDIA_MAX_BYTES:
+            return None
+        data = await bot.download_file(tg_file.file_path)
+        if data is None:
+            return None
+        raw = data.getvalue() if hasattr(data, "getvalue") else (data.read() if hasattr(data, "read") else b"")
+        if not isinstance(raw, bytes):
+            raw = b""
+        if len(raw) > MEDIA_MAX_BYTES:
+            return None
+        mime = mime_type or "application/octet-stream"
+        return base64.b64encode(raw).decode("ascii"), mime
+    except Exception:
+        return None
+
+
+def _mime_for_media_type(media_type: str, document_mime: str | None) -> str:
+    if document_mime:
+        return document_mime
+    return {
+        "photo": "image/jpeg",
+        "video": "video/mp4",
+        "document": "image/png",
+        "voice": "audio/ogg",
+        "video_note": "video/mp4",
+        "sticker": "image/webp",
+        "animation": "video/mp4",
+    }.get(media_type, "application/octet-stream")
 
 
 async def send_typing_loop(chat_id: int, stop_event: asyncio.Event) -> None:
@@ -98,6 +137,18 @@ async def handle_message(message: types.Message) -> None:
             file_id = message.animation.file_id
             media_type = "animation"
 
+        # Download media and send as base64 so the backend/LLM can see it (plan: all media types)
+        media_base64 = None
+        mime_type = None
+        if file_id:
+            doc_mime = getattr(message.document, "mime_type", None) if message.document else None
+            mime_type = _mime_for_media_type(media_type or "", doc_mime)
+            result = await download_media_as_base64(file_id, mime_type)
+            if result:
+                media_base64, mime_type = result
+            else:
+                logger.warning("media_download_failed", file_id=file_id, media_type=media_type)
+
         # Build the payload for the backend
         payload = {
             "chat_id": message.chat.id,
@@ -110,6 +161,10 @@ async def handle_message(message: types.Message) -> None:
             "file_id": file_id,
             "media_type": media_type,
         }
+        if media_base64:
+            payload["media_base64"] = media_base64
+            payload["mime_type"] = mime_type
+            logger.info("sending_media_to_backend", media_type=media_type, mime_type=mime_type, size_bytes=len(media_base64) * 3 // 4)
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -150,19 +205,23 @@ async def handle_message(message: types.Message) -> None:
                                     f"{reply_html}\n\n🖼 {media_url if media_url else '<Image generated but upload failed>'}",
                                     parse_mode=ParseMode.HTML,
                                 )
-                    elif media_url and media_type == "document":
+                    elif (media_url or media_base64) and media_type == "document":
                         try:
+                            document_data = media_url
+                            if media_base64:
+                                doc_bytes = base64.b64decode(media_base64)
+                                document_data = BufferedInputFile(doc_bytes, filename="generated.png")
                             await message.answer_document(
-                                document=media_url,
+                                document=document_data,
                                 caption=reply_html[:1024] if reply_html else None,
                                 parse_mode=ParseMode.HTML,
                             )
-                            logger.info("document_sent", media_url=media_url)
+                            logger.info("document_sent", has_base64=bool(media_base64), media_url=media_url)
                         except Exception as e:
                             logger.error("document_send_failed", error=str(e))
                             if reply_html:
                                 await message.answer(
-                                    f"{reply_html}\n\n📎 {media_url}",
+                                    f"{reply_html}\n\n📎 {media_url if media_url else '<File generated but upload failed>'}",
                                     parse_mode=ParseMode.HTML,
                                 )
                     elif reply_html:
@@ -189,6 +248,37 @@ async def handle_message(message: types.Message) -> None:
             await typing_task
         except asyncio.CancelledError:
             pass
+
+
+# ── Proactive messaging poller ───────────────────────────────────────────
+async def proactive_poller_loop() -> None:
+    """Poll backend for queued proactive messages and send them to Telegram."""
+    logger = log.bind(component="proactive_poller")
+    while True:
+        try:
+            await asyncio.sleep(PROACTIVE_POLL_INTERVAL_SEC)
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{BACKEND_URL}/api/v1/proactive",
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    if resp.status == 204:
+                        continue
+                    if resp.status != 200:
+                        logger.warning("proactive_poll_bad_status", status=resp.status)
+                        continue
+                    data = await resp.json()
+                    chat_id = data.get("chat_id")
+                    reply = data.get("reply", "")
+                    if not reply or chat_id is None:
+                        continue
+                    html = md_to_telegram_html(reply)
+                    await bot.send_message(chat_id=chat_id, text=html, parse_mode=ParseMode.HTML)
+                    logger.info("proactive_sent", chat_id=chat_id, reply_length=len(reply))
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("proactive_poller_error", error=str(e))
 
 
 # ── Health Endpoint (Section 15.2) ──────────────────────────────────────
@@ -226,6 +316,11 @@ async def main() -> None:
 
     # Start health check server
     await start_health_server()
+
+    # Start proactive poller when enabled
+    if ENABLE_PROACTIVE_MESSAGING:
+        asyncio.create_task(proactive_poller_loop())
+        log.info("proactive_poller_started", interval_sec=PROACTIVE_POLL_INTERVAL_SEC)
 
     # Start polling
     log.info("starting_polling")

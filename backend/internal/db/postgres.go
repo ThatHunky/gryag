@@ -131,6 +131,31 @@ func (d *DB) GetRecentMessages(ctx context.Context, chatID int64, limit int) ([]
 	return messages, nil
 }
 
+// GetRecentChatIDs returns distinct chat_id values that have messages since the given duration,
+// ordered by most recent activity first (for proactive messaging candidate selection).
+func (d *DB) GetRecentChatIDs(ctx context.Context, since time.Duration) ([]int64, error) {
+	const query = `
+		SELECT chat_id
+		FROM messages
+		WHERE created_at > $1
+		GROUP BY chat_id
+		ORDER BY MAX(created_at) DESC`
+	rows, err := d.pool.QueryContext(ctx, query, time.Now().Add(-since))
+	if err != nil {
+		return nil, fmt.Errorf("get recent chat ids: %w", err)
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan chat_id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
 // ── User Fact Operations ────────────────────────────────────────────────
 
 // InsertUserFact stores a new fact about a user. Duplicates are silently ignored.

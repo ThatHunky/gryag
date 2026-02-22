@@ -14,7 +14,7 @@ func TestExecutor_UnknownTool(t *testing.T) {
 	defer os.Unsetenv("GEMINI_API_KEY")
 	cfg, _ := config.Load()
 
-	executor := NewExecutor(cfg, nil, nil)
+	executor := NewExecutor(cfg, nil, nil, nil)
 	result := executor.Execute(context.Background(), "nonexistent_tool", json.RawMessage(`{}`))
 
 	if result.Error == "" {
@@ -31,7 +31,7 @@ func TestExecutor_DisabledSandbox(t *testing.T) {
 	}()
 	cfg, _ := config.Load()
 
-	executor := NewExecutor(cfg, nil, nil)
+	executor := NewExecutor(cfg, nil, nil, nil)
 	args := json.RawMessage(`{"code": "print('hello')"}`)
 	result := executor.Execute(context.Background(), "run_python_code", args)
 
@@ -53,7 +53,7 @@ func TestExecutor_DisabledImageGen(t *testing.T) {
 	}()
 	cfg, _ := config.Load()
 
-	executor := NewExecutor(cfg, nil, nil)
+	executor := NewExecutor(cfg, nil, nil, nil)
 	args := json.RawMessage(`{"prompt": "a cat wearing a hat"}`)
 	result := executor.Execute(context.Background(), "generate_image", args)
 
@@ -70,7 +70,7 @@ func TestExecutor_WeatherStub(t *testing.T) {
 	defer os.Unsetenv("GEMINI_API_KEY")
 	cfg, _ := config.Load()
 
-	executor := NewExecutor(cfg, nil, nil)
+	executor := NewExecutor(cfg, nil, nil, nil)
 	args := json.RawMessage(`{"location": "Kyiv"}`)
 	result := executor.Execute(context.Background(), "weather", args)
 

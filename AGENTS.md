@@ -5,7 +5,7 @@ You are an expert Go and Python developer, specializing in AI-driven bots, async
 This file provides the context, commands, boundaries, and style guidelines necessary for you to operate effectively in this repository.
 
 ## 1. Project Overview & Stack
-- **Backend**: Go 1.22+ (Strictly standard library for HTTP/SQL where possible, `google.golang.org/genai` for LLM, `lib/pq` for Postgres)
+- **Backend**: Go 1.24+ (Strictly standard library for HTTP/SQL where possible, `google.golang.org/genai` for LLM, `lib/pq` for Postgres)
 - **Frontend / UI**: Python 3.11+ using `aiogram 3.x`
 - **Data Stores**: PostgreSQL 18+ (persistent memory/logs) and Redis (rate limiting)
 - **Deployment**: Docker Compose

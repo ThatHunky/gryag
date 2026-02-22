@@ -1,9 +1,11 @@
 package middleware
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -39,22 +41,42 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 		requestID := r.Header.Get("X-Request-ID")
 		logger := slog.With("request_id", requestID)
 
-		// Parse the request body to extract chat_id and user_id
+		// Read the full body so we can both parse it here and pass it downstream.
+		bodyBytes, err := io.ReadAll(r.Body)
+		r.Body.Close()
+		if err != nil {
+			logger.Warn("failed to read request body", "error", err)
+			http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
+			return
+		}
+
 		var payload struct {
 			ChatID int64  `json:"chat_id"`
 			UserID *int64 `json:"user_id"`
 			Text   string `json:"text"`
 		}
-
-		// We need to read the body but also pass it downstream.
-		// Use a TeeReader-like approach by decoding and re-encoding.
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		if err := json.Unmarshal(bodyBytes, &payload); err != nil {
 			http.Error(w, `{"error":"invalid payload"}`, http.StatusBadRequest)
 			return
 		}
-		defer r.Body.Close()
 
 		ctx := r.Context()
+
+		// ── Check 0: Chat/group whitelist (if configured) ───────────────
+		if len(rl.config.AllowedChatIDs) > 0 {
+			allowed := false
+			for _, id := range rl.config.AllowedChatIDs {
+				if id == payload.ChatID {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				logger.Info("chat_not_allowed", "chat_id", payload.ChatID)
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
 
 		// ── Check 1: Global Chat Rate Limit ───────────────────────────
 		chatKey := fmt.Sprintf("rl:chat:%d", payload.ChatID)
@@ -111,9 +133,12 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 			}
 		}()
 
-		// Re-encode payload and attach to context for downstream handlers
+		// Restore body for downstream handler (Process needs full JSON).
+		// Do this after WithContext so the request we pass has the body set.
 		ctx = context.WithValue(ctx, payloadKey{}, payload)
 		r = r.WithContext(ctx)
+		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		r.ContentLength = int64(len(bodyBytes))
 
 		// Pass through to the actual handler
 		next.ServeHTTP(w, r)

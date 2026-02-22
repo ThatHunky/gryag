@@ -34,7 +34,7 @@ docker compose logs -f gryag-frontend
 | Service | Image | Port | Health |
 |---------|-------|------|--------|
 | `gryag-frontend` | Python 3.12 | 27711 | `GET /health` |
-| `gryag-backend` | Go 1.23 Alpine | 27710 | `GET /health` |
+| `gryag-backend` | Go 1.24 Alpine | 27710 | `GET /health` |
 | `gryag-postgres` | postgres:18-alpine | 5432 (internal) | `pg_isready` |
 | `gryag-redis` | redis:7-alpine | 6379 (internal) | `redis-cli ping` |
 | `gryag-sandbox` | Python 3.12 slim | none | on-demand |
@@ -80,15 +80,40 @@ curl -X POST http://localhost:27710/api/v1/admin/reload_persona \
 
 ## Running Tests
 
+**Backend (Go):**
 ```bash
 cd backend
-go test ./... -v
+go mod tidy
+go build ./...
+go test ./... -v -count=1
 ```
+
+**Frontend (Python):**
+```bash
+cd frontend
+pip install -r requirements.txt
+python3 -m pytest test_md_to_tg.py -v
+```
+
+## End-to-End Testing
+
+After `docker compose up -d` and with `.env` set (at least `TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`, `POSTGRES_PASSWORD`):
+
+1. **Health**: `curl http://localhost:27710/health` and frontend health on port 27711 (if exposed).
+2. **Chat**: Send a simple text message to the bot in Telegram; confirm reply and typing indicators.
+3. **Image generation**: Send a message that triggers image gen (e.g. "Draw a simple red circle" or "Generate an image of a cat"). Confirm the bot sends a photo (and optional caption).
+4. **Rate limiting**: Send many messages in a short window; when throttled, the bot must not respond (silent 204).
+5. **Search**: Ask the bot to recall something from history (e.g. "What did I last say about X?") and confirm it can use `search_messages` or context to reply.
 
 ## Production Checklist
 
 - [ ] Set a strong `POSTGRES_PASSWORD`
 - [ ] Set `TELEGRAM_MODE=webhook` + `WEBHOOK_URL` + `WEBHOOK_SECRET`
-- [ ] Set `NANO_BANANA_API_KEY` and `NANO_BANANA_API_URL` for image generation
+- [ ] Image generation uses `GEMINI_API_KEY` (same as chat); ensure it is set for image gen
 - [ ] Configure `ADMIN_IDS` with trusted Telegram user IDs
 - [ ] Review rate limits for your expected traffic
+
+## Notes
+
+- **GPG signing**: If you disabled commit signing (`git config commit.gpgSign false`) to unblock commits, re-enable with `git config commit.gpgSign true` when done.
+- **TODOs**: The codebase is kept free of `TODO`/`FIXME` in Go and Python; any remaining comments are explanatory only.

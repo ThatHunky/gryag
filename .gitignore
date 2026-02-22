@@ -28,3 +28,4 @@ docker-compose.override.yml
 
 # Temporary media
 media_cache/
+.specstory/

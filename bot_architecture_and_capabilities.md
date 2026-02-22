@@ -150,7 +150,7 @@ While the legacy bot was powerful, its 5-layer memory and hybrid local/cloud ext
 #### Simplified Toolset (What to Keep vs Change)
 *   **Keep**: `search_web` (via Google Search Grounding natively inside Gemini). As of Gemini 2.5, Grounding can be combined with custom Function Calling declarations in the **same API request** — the model can use both Google Search and custom tools concurrently within a single generation call.
 *   **Change**: Replace manual `remember_memory`/`forget_memory` with native Gemini Tool Calling. 
-*   **Upgrade**: Image generation powered by Nano Banana Pro at 2K resolution (see Section 9).
+*   **Upgrade**: Image generation powered by Gemini 3 Pro Image Preview at 2K resolution (see Section 9).
 *   **Drop**: `SQLite`. Replaced by the robust combination of `PostgreSQL` and `Redis`.
 
 ## 8. Dynamic Instructions Template
@@ -180,16 +180,16 @@ Gryag needs the ability to write and execute code on the fly to solve math, gene
     *   **Timeouts & Resource Limits**: The execution environment must have hard CPU/RAM limits and a strict execution timeout (e.g., 5 seconds) to prevent infinite loops or denial-of-service.
     *   **Artifact Return**: If the code generates a chart (e.g., `matplotlib`), the sandbox returns the raw bytes or base64 image back to the Go backend, which forwards it to the Python Telegram frontend to send to the user.
 
-### 2. Advanced Image Generation (Nano Banana Pro)
-The bot will support premium image generation, specifically targeting **Nano Banana Pro at 2K resolution**.
-*   **Execution**: The LLM translates user requests into English (if necessary) and triggers a `generate_image` tool mapped to the Nano Banana Pro API.
+### 2. Advanced Image Generation (Gemini 3 Pro Image Preview)
+The bot supports premium image generation via **Gemini 3 Pro Image Preview** at 2K resolution, using the same `GEMINI_API_KEY` as chat.
+*   **Execution**: The LLM translates user requests into English (if necessary) and triggers a `generate_image` tool; the backend calls the Gemini API (model `gemini-3-pro-image-preview`) and returns the image as base64 to the frontend.
 *   **Media Lifecycle & Editing**:
     *   *High-Quality Persistence*: 2K images are large. When generated, the original high-quality file must be temporarily cached on the backend (e.g., in a Redis-backed blob store or local temporary disk with a TTL of 24-48 hours).
     *   *Reference ID*: The bot replies with the image and a hidden or internal `media_id`. 
     *   *Editing*: If the user replies to the generated image asking to "make it darker" or "add a hat", the LLM retrieves the *original 2K quality image* from the temporary cache using the `media_id`, edits it via the appropriate API tool, and returns the result without cumulative compression artifacting.
 *   **File Delivery (Document vs. Photo)**: 
     *   Previously, Telegram aggressively capped photos at 1280px. However, the Bot API now natively supports `sendPhoto` for resolutions up to **2560px** (which perfectly maps to 2K/1440p) without server-side dimensional downscaling.
-    *   By default, the bot sends the Nano Banana Pro image using `sendPhoto`. Users who have the "Experimental > Send large photos" setting enabled in their Desktop clients (or HD modes on mobile) will receive and view the stunning 2K image seamlessly in the feed.
+    *   By default, the bot sends the generated image using `sendPhoto`. Users who have the "Experimental > Send large photos" setting enabled in their Desktop clients (or HD modes on mobile) will receive and view the stunning 2K image seamlessly in the feed.
     *   A document (`sendDocument`) fallback is only necessary if the user explicitly demands the absolute raw uncompressed byte stream to bypass any residual JPEG compression Telegram applies during transit.
 
 ## 10. Access Control, Admin Setup & Rate Limiting
@@ -207,7 +207,7 @@ All incoming Telegram updates are intercepted by a highly performant Redis middl
 - **Tiered Sliding Window Algorithm**:
     - **Global Chat Limit**: Prevent an entire group chat from overwhelming the bot (e.g., max 10 requests per minute per chat group).
     - **Per-User Throttle**: Restrict individual users from spamming (e.g., max 3 messages per rolling 60-second window).
-    - **Expensive Tool Quotas**: Specific constraints placed on slow or costly tools. For instance, Nano Banana Pro image generation might be hard-capped at 5 images per user, per day.
+    - **Expensive Tool Quotas**: Specific constraints placed on slow or costly tools. For instance, Gemini image generation might be hard-capped at 5 images per user, per day.
 - **Cost Protection (Circuit Breakers)**: If an API anomaly is detected (e.g., Gemini spinning in an infinite loop or Telegram sending duplicated webhook events), Redis tracks consecutive failures/rapid spikes and temporarily short-circuits execution for that chat/user, notifying Admins directly. 
 - **Strict Silence on Throttle (Background Logging)**: If a user hits a throttle, the backend **instantly drops the request**. The bot must **not** respond with any error messages, avoiding chat spam. However, the dropped message **must still be written to the PostgreSQL message log**. This ensures that when the bot finally *does* respond to a future valid trigger, it has full context of what was said during its silence.
 - **Message Queue Locking (Exclusive Processing)**: By default, the bot processes **one message at a time per chat context**. It must lock the ability to queue multiple triggers. If a user sends 5 consecutive messages while the bot is already thinking/generating a response to the 1st, the subsequent 4 are ignored for active processing (but are still logged to the DB for context unless explicitly configured otherwise by an Admin).
@@ -238,7 +238,7 @@ Based on the blueprint above, here are further enhancements you should consider 
 
 A fundamental design principle for the V2 build is that **everything must be configurable**. Whoever decides to deploy this repository must be able to shape the bot entirely through environment variables (`.env`) or a central configuration file (`config.yaml`/`config.json`), without ever touching the Go or Python source code.
 
-*   **Feature Toggles**: Every major component (OpenClaw Python Sandbox, Nano Banana Pro image generation, Proactive/Cron Messaging, Web Search Tool) must have an explicit `ENABLE_*=true/false` toggle.
+*   **Feature Toggles**: Every major component (OpenClaw Python Sandbox, Gemini image generation, Proactive/Cron Messaging, Web Search Tool) must have an explicit `ENABLE_*=true/false` toggle.
 *   **Rate Limits & Throttle Tuning**: The Redis sliding-window values (messages per minute, max media generations per day, penalty timeouts) must be exposed as configurable integer variables.
 *   **Model Selection**: The specific LLMs used (e.g., `GEMINI_MODEL="gemini-2.5-flash"`) and temperature parameters must be configurable to allow operators to easily upgrade or downgrade models based on cost constraints.
 *   **Persona Overrides**: As outlined in Section 1, the core persona instructions must be hot-swappable via a template file (e.g., `persona.txt`), allowing the bot to instantly transform from a "sarcastic Ukrainian" to a "helpful coding assistant" based purely on configuration.
@@ -251,7 +251,7 @@ To ensure the bot remains robust, fast, and maintainable, the Go backend must ad
 1.  **Native `SystemInstruction` Parameter**: Do not inject the core persona (the "Immutable Block") into the standard conversation array. The Gemini SDK provides a dedicated `SystemInstruction` field. This distinct separation prevents the model from "forgetting" its persona during long context windows and strongly guards against user prompt-injection attacks targeting the persona.
 2.  **Strict Structured Outputs (JSON Schema)**: When the Go backend asks the LLM to classify a user's intent or decide which tool to run, it **must** enforce `response_mime_type: "application/json"` and provide a strict `response_schema` (adhering to OpenAPI 3.0 types). This completely eliminates the need for regex parsing and guarantees type-safe responses (e.g., enforcing Enums for action types).
 3.  **Deterministic Tool Calling**: When the LLM is acting purely as a "router" (deciding whether to call a tool vs talking normally), the API call should temporarily override its config to a very low temperature (`temperature=0`). High temperature should only be used for the final creative conversational output.
-4.  **Model Context Protocol (MCP) Design**: As the list of bot capabilities grows (Memory, OpenClaw, Nano Banana, Weather, Web Search), connecting them via hardcoded `switch` statements becomes brittle. The backend architecture should aspire to implement an **MCP (Model Context Protocol)** router pattern. This abstracts tools into independent, discoverable endpoints, allowing Gemini to seamlessly query the MCP router for available tools and execute them dynamically without monolithic backend updates.
+4.  **Model Context Protocol (MCP) Design**: As the list of bot capabilities grows (Memory, OpenClaw, image generation, Weather, Web Search), connecting them via hardcoded `switch` statements becomes brittle. The backend architecture should aspire to implement an **MCP (Model Context Protocol)** router pattern. This abstracts tools into independent, discoverable endpoints, allowing Gemini to seamlessly query the MCP router for available tools and execute them dynamically without monolithic backend updates.
 
 ## 15. Operational Engineering (Observability, Error Handling, IPC)
 
@@ -270,7 +270,7 @@ The Python frontend and Go backend communicate over an **internal Docker network
 
 ### 3. Graceful Degradation & Error Handling
 *   **API Fallbacks**: If Gemini API returns a 5xx error or times out, the Go backend must retry with exponential backoff (configurable max retries). If all retries fail, the bot should silently drop the request rather than crash.
-*   **Feature Isolation**: A failure in one tool (e.g., Nano Banana Pro API is down) must **never** cascade into the core conversational loop. Each tool execution must be wrapped in isolated error boundaries.
+*   **Feature Isolation**: A failure in one tool (e.g., Gemini image API is down) must **never** cascade into the core conversational loop. Each tool execution must be wrapped in isolated error boundaries.
 *   **Admin Alerting**: Critical failures (repeated API errors, database connection loss, sandbox escape attempts) must trigger direct Telegram messages to the configured Admin IDs.
 
 ### 4. Database Migration Strategy

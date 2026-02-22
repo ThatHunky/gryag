@@ -10,8 +10,9 @@ import (
 // Config holds all application configuration parsed from environment variables.
 type Config struct {
 	// Telegram
-	TelegramBotToken string
-	AdminIDs         []int64
+	TelegramBotToken  string
+	AdminIDs          []int64
+	AllowedChatIDs    []int64 // optional; empty = allow all chats
 
 	// Gemini
 	GeminiAPIKey             string
@@ -57,12 +58,9 @@ type Config struct {
 	SandboxTimeoutSeconds int
 	SandboxMaxMemoryMB    int
 
-	// Image Generation
-	NanoBananaAPIKey string
-	NanoBananaAPIURL string
-
-	// Proactive Messaging
-	ProactiveCronSchedule string
+	// Proactive Messaging (Kyiv time)
+	ProactiveActiveStartHour int // 0-23, inclusive
+	ProactiveActiveEndHour   int // 0-23, exclusive (e.g. 9-22 means 09:00–21:59)
 
 	// Context Window
 	ImmediateContextSize int
@@ -70,6 +68,10 @@ type Config struct {
 
 	// Data Retention
 	MessageRetentionDays int
+
+	// Media cache (generated images for edit by media_id)
+	MediaCacheDir      string
+	MediaCacheTTLHours int
 
 	// Persona
 	PersonaFile string
@@ -90,6 +92,7 @@ func Load() (*Config, error) {
 		// Telegram
 		TelegramBotToken: getEnv("TELEGRAM_BOT_TOKEN", ""),
 		AdminIDs:         parseAdminIDs(getEnv("ADMIN_IDS", "")),
+		AllowedChatIDs:   parseAdminIDs(getEnv("ALLOWED_CHAT_IDS", "")),
 
 		// Gemini
 		GeminiAPIKey:             getEnv("GEMINI_API_KEY", ""),
@@ -135,12 +138,9 @@ func Load() (*Config, error) {
 		SandboxTimeoutSeconds: getEnvInt("SANDBOX_TIMEOUT_SECONDS", 5),
 		SandboxMaxMemoryMB:    getEnvInt("SANDBOX_MAX_MEMORY_MB", 128),
 
-		// Image Generation
-		NanoBananaAPIKey: getEnv("NANO_BANANA_API_KEY", ""),
-		NanoBananaAPIURL: getEnv("NANO_BANANA_API_URL", ""),
-
-		// Proactive Messaging
-		ProactiveCronSchedule: getEnv("PROACTIVE_CRON_SCHEDULE", "0 */4 * * *"),
+		// Proactive Messaging (active hours in Kyiv time; parsed below)
+		ProactiveActiveStartHour: 9,
+		ProactiveActiveEndHour:   22,
 
 		// Context Window
 		ImmediateContextSize: getEnvInt("IMMEDIATE_CONTEXT_SIZE", 50),
@@ -148,6 +148,10 @@ func Load() (*Config, error) {
 
 		// Data Retention
 		MessageRetentionDays: getEnvInt("MESSAGE_RETENTION_DAYS", 90),
+
+		// Media cache (generated images, TTL for edit by media_id)
+		MediaCacheDir:      getEnv("MEDIA_CACHE_DIR", "/tmp/gryag_media_cache"),
+		MediaCacheTTLHours: getEnvInt("MEDIA_CACHE_TTL_HOURS", 48),
 
 		// Persona
 		PersonaFile: getEnv("PERSONA_FILE", "config/persona.txt"),
@@ -161,6 +165,7 @@ func Load() (*Config, error) {
 		LocaleDir:   getEnv("LOCALE_DIR", "config/locales"),
 		DefaultLang: getEnv("DEFAULT_LANG", "uk"),
 	}
+	parseProactiveActiveHours(getEnv("PROACTIVE_ACTIVE_HOURS_KYIV", "9-22"), cfg)
 
 	// Validate required fields
 	if cfg.GeminiAPIKey == "" {
@@ -248,4 +253,23 @@ func parseAdminIDs(raw string) []int64 {
 		}
 	}
 	return ids
+}
+
+// parseProactiveActiveHours sets cfg.ProactiveActiveStartHour and ProactiveActiveEndHour from
+// a string like "9-22" (09:00–22:00 Kyiv) or "22-6" (22:00–06:00 overnight). End is exclusive.
+func parseProactiveActiveHours(raw string, cfg *Config) {
+	raw = strings.TrimSpace(raw)
+	parts := strings.Split(raw, "-")
+	if len(parts) != 2 {
+		return
+	}
+	start, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+	end, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err1 != nil || err2 != nil {
+		return
+	}
+	if start >= 0 && start <= 23 && end >= 0 && end <= 23 {
+		cfg.ProactiveActiveStartHour = start
+		cfg.ProactiveActiveEndHour = end
+	}
 }

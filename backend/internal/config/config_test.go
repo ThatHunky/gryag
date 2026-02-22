@@ -36,6 +36,9 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.EnableProactiveMessaging {
 		t.Error("expected EnableProactiveMessaging to be false by default")
 	}
+	if cfg.ProactiveActiveStartHour != 9 || cfg.ProactiveActiveEndHour != 22 {
+		t.Errorf("expected proactive active hours 9-22 by default, got %d-%d", cfg.ProactiveActiveStartHour, cfg.ProactiveActiveEndHour)
+	}
 	if cfg.PersonaFile != "config/persona.txt" {
 		t.Errorf("expected persona file 'config/persona.txt', got '%s'", cfg.PersonaFile)
 	}
@@ -91,6 +94,23 @@ func TestLoad_CustomValues(t *testing.T) {
 	}
 }
 
+func TestLoad_AllowedChatIDs(t *testing.T) {
+	os.Setenv("GEMINI_API_KEY", "test-key")
+	os.Setenv("ALLOWED_CHAT_IDS", "111,222,-100333")
+	defer func() {
+		os.Unsetenv("GEMINI_API_KEY")
+		os.Unsetenv("ALLOWED_CHAT_IDS")
+	}()
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.AllowedChatIDs) != 3 || cfg.AllowedChatIDs[0] != 111 || cfg.AllowedChatIDs[1] != 222 || cfg.AllowedChatIDs[2] != -100333 {
+		t.Errorf("expected allowed chat IDs [111 222 -100333], got %v", cfg.AllowedChatIDs)
+	}
+}
+
 func TestPostgresDSN(t *testing.T) {
 	os.Setenv("GEMINI_API_KEY", "test-key")
 	defer os.Unsetenv("GEMINI_API_KEY")
@@ -101,6 +121,23 @@ func TestPostgresDSN(t *testing.T) {
 	expected := "postgres://gryag:changeme_in_production@gryag-postgres:5432/gryag?sslmode=disable"
 	if dsn != expected {
 		t.Errorf("expected DSN '%s', got '%s'", expected, dsn)
+	}
+}
+
+func TestLoad_ProactiveActiveHours(t *testing.T) {
+	os.Setenv("GEMINI_API_KEY", "test-key")
+	os.Setenv("PROACTIVE_ACTIVE_HOURS_KYIV", "22-6")
+	defer func() {
+		os.Unsetenv("GEMINI_API_KEY")
+		os.Unsetenv("PROACTIVE_ACTIVE_HOURS_KYIV")
+	}()
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ProactiveActiveStartHour != 22 || cfg.ProactiveActiveEndHour != 6 {
+		t.Errorf("expected 22-6, got %d-%d", cfg.ProactiveActiveStartHour, cfg.ProactiveActiveEndHour)
 	}
 }
 

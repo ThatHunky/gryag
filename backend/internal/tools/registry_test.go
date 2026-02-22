@@ -22,10 +22,10 @@ func TestRegistry_AllToolsRegistered(t *testing.T) {
 	cfg := loadTestConfig(t)
 	r := NewRegistry(cfg)
 
-	// With defaults (sandbox + image gen enabled), we expect:
+	// With defaults (sandbox + image gen + web search enabled), we expect:
 	// recall_memories, remember_memory, forget_memory, calculator,
-	// weather, currency, search_messages, generate_image, edit_image, run_python_code = 10
-	expected := 10
+	// weather, currency, search_messages, search_web, generate_image, edit_image, run_python_code = 11
+	expected := 11
 	if r.Count() != expected {
 		t.Errorf("expected %d tools, got %d", expected, r.Count())
 		t.Logf("registered tools: %v", r.GetToolNames())
@@ -45,10 +45,10 @@ func TestRegistry_FeatureToggles(t *testing.T) {
 	cfg, _ := config.Load()
 	r := NewRegistry(cfg)
 
-	// With sandbox + image gen disabled, we expect:
+	// With sandbox + image gen disabled (web search still enabled by default), we expect:
 	// recall_memories, remember_memory, forget_memory, calculator,
-	// weather, currency, search_messages = 7
-	expected := 7
+	// weather, currency, search_messages, search_web = 8
+	expected := 8
 	if r.Count() != expected {
 		t.Errorf("expected %d tools, got %d", expected, r.Count())
 		t.Logf("registered tools: %v", r.GetToolNames())
@@ -62,43 +62,20 @@ func TestRegistry_FeatureToggles(t *testing.T) {
 	}
 }
 
-func TestRegistry_GetTools_IncludesGoogleSearch(t *testing.T) {
+func TestRegistry_GetTools_OnlyFunctionDeclarations(t *testing.T) {
 	cfg := loadTestConfig(t)
 	r := NewRegistry(cfg)
 	tools := r.GetTools()
 
-	// Should have 2 entries: one with FunctionDeclarations, one with GoogleSearch
-	if len(tools) != 2 {
-		t.Fatalf("expected 2 tool groups, got %d", len(tools))
+	// Only one tool group: our function declarations. No proprietary tools (e.g. Google Search).
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 tool group, got %d", len(tools))
 	}
-
-	hasSearch := false
-	for _, tool := range tools {
-		if tool.GoogleSearch != nil {
-			hasSearch = true
-		}
+	if tools[0].FunctionDeclarations == nil || len(tools[0].FunctionDeclarations) == 0 {
+		t.Error("expected FunctionDeclarations to be present")
 	}
-	if !hasSearch {
-		t.Error("expected GoogleSearch to be present in tools")
-	}
-}
-
-func TestRegistry_GetTools_NoSearchWhenDisabled(t *testing.T) {
-	os.Setenv("GEMINI_API_KEY", "test-key")
-	os.Setenv("ENABLE_WEB_SEARCH", "false")
-	t.Cleanup(func() {
-		os.Unsetenv("GEMINI_API_KEY")
-		os.Unsetenv("ENABLE_WEB_SEARCH")
-	})
-
-	cfg, _ := config.Load()
-	r := NewRegistry(cfg)
-	tools := r.GetTools()
-
-	for _, tool := range tools {
-		if tool.GoogleSearch != nil {
-			t.Error("GoogleSearch should not be present when web search is disabled")
-		}
+	if tools[0].GoogleSearch != nil {
+		t.Error("GoogleSearch must not be present; we use only our own tools")
 	}
 }
 

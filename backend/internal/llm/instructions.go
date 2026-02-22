@@ -89,7 +89,9 @@ func (di *DynamicInstructions) BuildParts() []*genai.Part {
 
 	// 2. Tools Block (Section 8.3) — injected as descriptive text
 	if di.ToolsDescription != "" {
-		parts = append(parts, genai.NewPartFromText("# Available Tools\n"+di.ToolsDescription))
+		toolsBlock := "# Available Tools\n" + di.ToolsDescription
+		toolsBlock += "\n\nFor generate_image and edit_image: the prompt parameter MUST be in English only. If the user writes in another language, translate their request into English before calling the tool."
+		parts = append(parts, genai.NewPartFromText(toolsBlock))
 	}
 
 	// 3. Context Summaries (Section 8.4)

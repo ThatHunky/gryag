@@ -9,29 +9,33 @@ import (
 	"github.com/ThatHunky/gryag/backend/internal/config"
 	"github.com/ThatHunky/gryag/backend/internal/db"
 	"github.com/ThatHunky/gryag/backend/internal/i18n"
+	"github.com/ThatHunky/gryag/backend/internal/llm"
 )
 
 // Executor dispatches tool calls from the LLM to their concrete implementations.
 type Executor struct {
-	memory   *MemoryTool
-	imageGen *ImageGenTool
-	sandbox  *SandboxTool
-	db       *db.DB
-	config   *config.Config
-	i18n     *i18n.Bundle
-	lang     string
+	memory    *MemoryTool
+	imageGen  *ImageGenTool
+	sandbox   *SandboxTool
+	db        *db.DB
+	config    *config.Config
+	i18n      *i18n.Bundle
+	lang      string
+	llmClient *llm.Client // optional; used for search_web (Gemini Grounding)
 }
 
 // NewExecutor creates a new tool executor with all implementations wired up.
-func NewExecutor(cfg *config.Config, database *db.DB, bundle *i18n.Bundle) *Executor {
+// llmClient can be nil; when set, it is used for the search_web tool (Gemini Grounding).
+func NewExecutor(cfg *config.Config, database *db.DB, bundle *i18n.Bundle, llmClient *llm.Client) *Executor {
 	return &Executor{
-		memory:   NewMemoryTool(database, bundle, cfg.DefaultLang),
-		imageGen: NewImageGenTool(cfg),
-		sandbox:  NewSandboxTool(cfg),
-		db:       database,
-		config:   cfg,
-		i18n:     bundle,
-		lang:     cfg.DefaultLang,
+		memory:    NewMemoryTool(database, bundle, cfg.DefaultLang),
+		imageGen:  NewImageGenTool(cfg, database),
+		sandbox:   NewSandboxTool(cfg),
+		db:        database,
+		config:    cfg,
+		i18n:      bundle,
+		lang:      cfg.DefaultLang,
+		llmClient: llmClient,
 	}
 }
 
@@ -78,6 +82,25 @@ func (e *Executor) Execute(ctx context.Context, name string, args json.RawMessag
 		output, err = e.memory.RememberMemory(ctx, args)
 	case "forget_memory":
 		output, err = e.memory.ForgetMemory(ctx, args)
+
+	// Web search (Gemini Grounding)
+	case "search_web":
+		if !e.config.EnableWebSearch {
+			output = e.t("tool.unknown", name)
+		} else if e.llmClient == nil {
+			output = e.t("tool.search_web_not_configured")
+		} else {
+			var params struct {
+				Query string `json:"query"`
+			}
+			if jsonErr := json.Unmarshal(args, &params); jsonErr == nil && params.Query != "" {
+				output, err = e.llmClient.SearchWithGrounding(ctx, params.Query)
+			} else if jsonErr != nil {
+				err = jsonErr
+			} else {
+				output = "Missing or empty query."
+			}
+		}
 
 	// Message search
 	case "search_messages":

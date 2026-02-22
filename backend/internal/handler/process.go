@@ -2,14 +2,17 @@ package handler
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/ThatHunky/gryag/backend/internal/cache"
 	"github.com/ThatHunky/gryag/backend/internal/config"
 	"github.com/ThatHunky/gryag/backend/internal/db"
+	"github.com/ThatHunky/gryag/backend/internal/i18n"
 	"github.com/ThatHunky/gryag/backend/internal/llm"
 	"github.com/ThatHunky/gryag/backend/internal/tools"
 	"google.golang.org/genai"
@@ -17,15 +20,17 @@ import (
 
 // ProcessRequest holds the incoming message payload from the Python frontend.
 type ProcessRequest struct {
-	ChatID    int64  `json:"chat_id"`
-	UserID    *int64 `json:"user_id"`
-	Username  string `json:"username"`
-	FirstName string `json:"first_name"`
-	Text      string `json:"text"`
-	MessageID int64  `json:"message_id"`
-	Date      string `json:"date"`
-	FileID    string `json:"file_id"`
-	MediaType string `json:"media_type"`
+	ChatID      int64  `json:"chat_id"`
+	UserID      *int64 `json:"user_id"`
+	Username    string `json:"username"`
+	FirstName   string `json:"first_name"`
+	Text        string `json:"text"`
+	MessageID   int64  `json:"message_id"`
+	Date        string `json:"date"`
+	FileID      string `json:"file_id"`
+	MediaType   string `json:"media_type"`
+	MediaBase64 string `json:"media_base64"`
+	MimeType    string `json:"mime_type"`
 }
 
 type ProcessResponse struct {
@@ -44,10 +49,11 @@ type Handler struct {
 	registry *tools.Registry
 	executor *tools.Executor
 	config   *config.Config
+	bundle   *i18n.Bundle
 }
 
 // New creates a new request handler with all dependencies.
-func New(cfg *config.Config, database *db.DB, c *cache.Cache, llmClient *llm.Client, reg *tools.Registry, exe *tools.Executor) *Handler {
+func New(cfg *config.Config, database *db.DB, c *cache.Cache, llmClient *llm.Client, reg *tools.Registry, exe *tools.Executor, bundle *i18n.Bundle) *Handler {
 	return &Handler{
 		db:       database,
 		cache:    c,
@@ -55,6 +61,7 @@ func New(cfg *config.Config, database *db.DB, c *cache.Cache, llmClient *llm.Cli
 		registry: reg,
 		executor: exe,
 		config:   cfg,
+		bundle:   bundle,
 	}
 }
 
@@ -75,6 +82,8 @@ func (h *Handler) Process(w http.ResponseWriter, r *http.Request) {
 		"chat_id", req.ChatID,
 		"user_id", req.UserID,
 		"text_length", len(req.Text),
+		"has_media", req.MediaBase64 != "",
+		"media_type", req.MediaType,
 	)
 
 	ctx := r.Context()
@@ -103,10 +112,30 @@ func (h *Handler) Process(w http.ResponseWriter, r *http.Request) {
 	di, err := llm.NewDynamicInstructions(ctx, h.db, req.ChatID, userID, req.Username, req.FirstName, req.Text, h.config.ImmediateContextSize)
 	if err != nil {
 		logger.Error("failed to build dynamic instructions", "error", err)
-		respondJSON(w, &ProcessResponse{Reply: "Internal error building context.", RequestID: requestID})
+		reply := "Internal error building context."
+		if h.bundle != nil {
+			reply = h.bundle.T(h.config.DefaultLang, "error.context_build")
+		}
+		respondJSON(w, &ProcessResponse{Reply: reply, RequestID: requestID})
 		return
 	}
 	di.ToolsDescription = h.registry.GetToolDescription()
+
+	// Inject current message media into context (Section 8.6) so the model can see/hear it
+	if req.MediaBase64 != "" {
+		data, err := base64.StdEncoding.DecodeString(req.MediaBase64)
+		if err != nil {
+			logger.Warn("failed to decode media_base64", "error", err)
+		} else {
+			mime := inferMimeType(req.MediaType, req.MimeType)
+			di.MediaParts = []*genai.Part{genai.NewPartFromBytes(data, mime)}
+		}
+	}
+
+	// Pass request media (base64) in context for edit_image(use_context_image=true)
+	if req.MediaBase64 != "" {
+		ctx = context.WithValue(ctx, tools.RequestMediaBase64Key, req.MediaBase64)
+	}
 
 	// 3. Get the registered tools for the API call
 	genaiTools := h.registry.GetTools()
@@ -128,7 +157,11 @@ func (h *Handler) Process(w http.ResponseWriter, r *http.Request) {
 		resp, err := h.llm.GenerateResponse(ctx, contents, genaiTools)
 		if err != nil {
 			logger.Error("gemini generation failed", "error", err)
-			respondJSON(w, &ProcessResponse{Reply: "Error generating response.", RequestID: requestID})
+			reply := "Error generating response."
+			if h.bundle != nil {
+				reply = h.bundle.T(h.config.DefaultLang, "error.generation_failed")
+			}
+			respondJSON(w, &ProcessResponse{Reply: reply, RequestID: requestID})
 			return
 		}
 
@@ -152,19 +185,33 @@ func (h *Handler) Process(w http.ResponseWriter, r *http.Request) {
 
 				returnToModel := res.Output
 
-				// Intercept image output to avoid context bloat!
-				if part.FunctionCall.Name == "generate_image" {
+				// Intercept image output: set response media and store in media_cache for edit by media_id
+				responsePayload := map[string]any{"result": returnToModel}
+				if part.FunctionCall.Name == "generate_image" || part.FunctionCall.Name == "edit_image" {
 					var raw struct {
 						MediaBase64 string `json:"media_base64"`
+						MediaType   string `json:"media_type"`
 					}
 					if err := json.Unmarshal([]byte(res.Output), &raw); err == nil && raw.MediaBase64 != "" {
 						mediaBase64 = raw.MediaBase64
-						mediaType = "photo"
+						if raw.MediaType != "" {
+							mediaType = raw.MediaType
+						} else {
+							mediaType = "photo"
+						}
 						returnToModel = "Image generated successfully. It has been attached to the chat for the user to see."
+						// Store in media_cache; pass media_id only in structured response so the model can use it for edit_image but must not echo it
+						if data, decErr := base64.StdEncoding.DecodeString(raw.MediaBase64); decErr == nil && h.config.MediaCacheDir != "" {
+							if mid, insErr := h.db.InsertMediaCache(ctx, h.config.MediaCacheDir, req.ChatID, req.UserID, data, h.config.MediaCacheTTLHours); insErr == nil {
+								returnToModel = "Image generated and attached to the chat. To edit later, call edit_image with the media_id from this response. Do not mention or show the media_id to the user—it is internal only."
+								responsePayload["media_id"] = mid
+							}
+						}
+						responsePayload["result"] = returnToModel
 					}
 				}
 
-				toolResponses = append(toolResponses, genai.NewPartFromFunctionResponse(part.FunctionCall.Name, map[string]any{"result": returnToModel}))
+				toolResponses = append(toolResponses, genai.NewPartFromFunctionResponse(part.FunctionCall.Name, responsePayload))
 			}
 		}
 
@@ -221,8 +268,46 @@ func strPtr(s string) *string {
 	return &s
 }
 
+// inferMimeType returns a MIME type for Gemini from Telegram media_type and optional mime_type.
+func inferMimeType(mediaType, mimeType string) string {
+	if mimeType != "" {
+		return mimeType
+	}
+	switch mediaType {
+	case "photo":
+		return "image/jpeg"
+	case "document":
+		return "image/png"
+	case "video", "video_note", "animation":
+		return "video/mp4"
+	case "voice":
+		return "audio/ogg"
+	case "sticker":
+		return "image/webp"
+	default:
+		return "application/octet-stream"
+	}
+}
+
 // HealthCheck returns the health status.
 func HealthCheck(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"status":"ok"}`)
+}
+
+// Proactive pops one proactive message from the queue and returns it for the frontend to send to Telegram.
+// GET /api/v1/proactive — 200 with {"chat_id": ..., "reply": ...} or 204 if queue empty.
+func (h *Handler) Proactive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	ctx := r.Context()
+	chatID, reply, ok := h.cache.PopProactive(ctx, 5*time.Second)
+	if !ok {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"chat_id": chatID, "reply": reply})
 }

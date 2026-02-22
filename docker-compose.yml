@@ -18,6 +18,8 @@ services:
     env_file: .env
     environment:
       - FRONTEND_HEALTH_PORT=27711
+    ports:
+      - "27711:27711"
     networks:
       - gryag-net
     restart: unless-stopped
@@ -42,8 +44,8 @@ services:
     environment:
       - BACKEND_HOST=0.0.0.0
       - BACKEND_PORT=27710
-    expose:
-      - "27710"
+    ports:
+      - "27710:27710"
     networks:
       - gryag-net
     restart: unless-stopped

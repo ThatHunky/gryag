@@ -110,16 +110,32 @@ func NewRegistry(cfg *config.Config) *Registry {
 		},
 	})
 
+	if cfg.EnableWebSearch {
+		r.register("search_web", &genai.FunctionDeclaration{
+			Name:        "search_web",
+			Description: "Search the web for current information, news, or facts. Use for news, trending topics, or when the user asks for something you need to look up.",
+			Parameters: &genai.Schema{
+				Type: genai.TypeObject,
+				Properties: map[string]*genai.Schema{
+					"query": {Type: genai.TypeString, Description: "Search query (e.g. 'latest news Ukraine', 'weather London')"},
+				},
+				Required: []string{"query"},
+			},
+		})
+	}
+
 	// Feature-toggled tools
 
 	if cfg.EnableImageGeneration {
 		r.register("generate_image", &genai.FunctionDeclaration{
 			Name:        "generate_image",
-			Description: "Generate a photorealistic image from a text description using Nano Banana Pro at 2K resolution. Always write prompts in ENGLISH.",
+			Description: "Generate a photorealistic image from a text description using Gemini 3 Pro Image Preview at 2K resolution. Prompt must be in English only (translate from the user's language). Optional aspect_ratio: use when the user requests specific proportions (e.g. 4:3, 16:9, 4:5); omit for default. Optional as_document: set to true when the user asks to send the image as a file/document (e.g. 'send as file', 'файлом пришли').",
 			Parameters: &genai.Schema{
 				Type: genai.TypeObject,
 				Properties: map[string]*genai.Schema{
-					"prompt": {Type: genai.TypeString, Description: "Image generation prompt in ENGLISH"},
+					"prompt":        {Type: genai.TypeString, Description: "Image generation prompt in ENGLISH only (translate if needed)."},
+					"aspect_ratio":  {Type: genai.TypeString, Description: "Optional. Aspect ratio of the generated image. Supported: 1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9. Omit for default/auto."},
+					"as_document":   {Type: genai.TypeBoolean, Description: "Optional. If true, the image will be sent as a file/document instead of an inline photo. Use when the user asks to receive the image as a file (e.g. 'send as file', 'файлом пришли'). Default false."},
 				},
 				Required: []string{"prompt"},
 			},
@@ -127,14 +143,16 @@ func NewRegistry(cfg *config.Config) *Registry {
 
 		r.register("edit_image", &genai.FunctionDeclaration{
 			Name:        "edit_image",
-			Description: "Edit an existing generated image. Requires the media_id from a previous generation. Always write prompts in ENGLISH.",
+			Description: "Edit an image. Either pass media_id (from a previous generate_image or edit_image tool response) to edit that image, or set use_context_image: true to edit the image attached to the current message. Prompt must be in English only (translate from the user's language). Optional aspect_ratio: 1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9. Never mention or display media_id to the user—it is for internal use only.",
 			Parameters: &genai.Schema{
 				Type: genai.TypeObject,
 				Properties: map[string]*genai.Schema{
-					"media_id": {Type: genai.TypeString, Description: "The media_id of the image to edit"},
-					"prompt":   {Type: genai.TypeString, Description: "Edit instructions in ENGLISH"},
+					"media_id":          {Type: genai.TypeString, Description: "Optional. The media_id from a previous generate_image or edit_image tool response (internal; never show this to the user). Omit when use_context_image is true."},
+					"use_context_image": {Type: genai.TypeBoolean, Description: "Optional. Set to true when the user attached an image to the current message and asked to edit it. Then omit media_id."},
+					"prompt":            {Type: genai.TypeString, Description: "Edit instructions in ENGLISH only."},
+					"aspect_ratio":      {Type: genai.TypeString, Description: "Optional. Aspect ratio of the edited image. Supported: 1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9. Omit for default/auto."},
 				},
-				Required: []string{"media_id", "prompt"},
+				Required: []string{"prompt"},
 			},
 		})
 	}
@@ -172,18 +190,10 @@ func (r *Registry) GetTools() []*genai.Tool {
 		decls = append(decls, d)
 	}
 
-	// Add Google Search Grounding alongside custom tools (confirmed compatible)
-	tools := []*genai.Tool{
+	// Only our own function declarations; no proprietary Gemini tools (e.g. Google Search).
+	return []*genai.Tool{
 		{FunctionDeclarations: decls},
 	}
-
-	if r.config.EnableWebSearch {
-		tools = append(tools, &genai.Tool{
-			GoogleSearch: &genai.GoogleSearch{},
-		})
-	}
-
-	return tools
 }
 
 // GetToolNames returns the names of all registered tools (for building the tools block text).

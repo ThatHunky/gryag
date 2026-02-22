@@ -102,6 +102,23 @@ func (c *Client) RouteIntent(ctx context.Context, message string, tools []*genai
 	return resp, nil
 }
 
+// SearchWithGrounding runs a single Gemini request with Google Search grounding and returns
+// the model's grounded response text. Used by the search_web tool.
+func (c *Client) SearchWithGrounding(ctx context.Context, query string) (string, error) {
+	config := &genai.GenerateContentConfig{
+		Tools: []*genai.Tool{{GoogleSearch: &genai.GoogleSearch{}}},
+		// No system instruction needed for a simple search; the model answers from search results.
+	}
+	contents := []*genai.Content{
+		{Role: "user", Parts: []*genai.Part{genai.NewPartFromText(query)}},
+	}
+	resp, err := c.genai.Models.GenerateContent(ctx, c.config.GeminiModel, contents, config)
+	if err != nil {
+		return "", fmt.Errorf("grounding request: %w", err)
+	}
+	return extractText(resp), nil
+}
+
 // extractText pulls the text content from a Gemini response.
 func extractText(resp *genai.GenerateContentResponse) string {
 	if resp == nil || len(resp.Candidates) == 0 {

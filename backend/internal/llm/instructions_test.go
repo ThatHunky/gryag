@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/ThatHunky/gryag/backend/internal/db"
+	"google.golang.org/genai"
 )
 
 func TestDynamicInstructions_BuildParts(t *testing.T) {
@@ -85,5 +86,31 @@ func TestDynamicInstructions_BuildParts_WithFacts(t *testing.T) {
 	// Should have: time + user facts + current message = 3 parts min
 	if len(parts) < 3 {
 		t.Errorf("expected at least 3 parts, got %d", len(parts))
+	}
+}
+
+func TestDynamicInstructions_BuildParts_WithMediaParts(t *testing.T) {
+	di := &DynamicInstructions{
+		CurrentTime:    "12:00 Tuesday, 25/02/2026",
+		ChatID:         1,
+		CurrentMessage: "Look at this",
+		UserID:         2,
+		FirstName:      "User",
+		MediaParts:     []*genai.Part{genai.NewPartFromBytes([]byte{0x89, 0x50, 0x4e}, "image/png")},
+	}
+	parts := di.BuildParts()
+	// With one MediaPart we get at least 3 parts (time, media, current message)
+	if len(parts) < 3 {
+		t.Errorf("expected at least 3 parts when MediaParts has one element, got %d", len(parts))
+	}
+	hasInline := false
+	for _, p := range parts {
+		if p.InlineData != nil {
+			hasInline = true
+			break
+		}
+	}
+	if !hasInline {
+		t.Error("expected one part to have InlineData from MediaParts")
 	}
 }

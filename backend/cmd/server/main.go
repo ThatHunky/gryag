@@ -16,6 +16,7 @@ import (
 	"github.com/ThatHunky/gryag/backend/internal/i18n"
 	"github.com/ThatHunky/gryag/backend/internal/llm"
 	"github.com/ThatHunky/gryag/backend/internal/middleware"
+	"github.com/ThatHunky/gryag/backend/internal/proactive"
 	"github.com/ThatHunky/gryag/backend/internal/tools"
 )
 
@@ -85,11 +86,11 @@ func main() {
 
 	// ── Tool Registry & Executor ────────────────────────────────────────
 	registry := tools.NewRegistry(cfg)
-	executor := tools.NewExecutor(cfg, database, bundle)
+	executor := tools.NewExecutor(cfg, database, bundle, llmClient)
 	slog.Info("tools loaded", "count", registry.Count(), "names", registry.GetToolNames())
 
 	// ── Request Handler ─────────────────────────────────────────────────
-	h := handler.New(cfg, database, redisCache, llmClient, registry, executor)
+	h := handler.New(cfg, database, redisCache, llmClient, registry, executor, bundle)
 
 	// ── Rate Limiter Middleware ──────────────────────────────────────────
 	rateLimiter := middleware.NewRateLimiter(redisCache, database, cfg)
@@ -97,12 +98,22 @@ func main() {
 	// ── Admin Handler ───────────────────────────────────────────────────
 	adminH := handler.NewAdminHandler(cfg, database)
 
+	// ── Proactive messaging (optional) ───────────────────────────────────
+	if cfg.EnableProactiveMessaging {
+		proactiveRunner := proactive.NewRunner(cfg, database, llmClient, registry, executor, redisCache)
+		go proactive.Scheduler(context.Background(), proactiveRunner, cfg.ProactiveActiveStartHour, cfg.ProactiveActiveEndHour)
+		slog.Info("proactive messaging started", "active_hours_start", cfg.ProactiveActiveStartHour, "active_hours_end", cfg.ProactiveActiveEndHour)
+	}
+
 	// ── HTTP Mux ────────────────────────────────────────────────────────
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handler.HealthCheck)
 	mux.Handle("POST /api/v1/process", rateLimiter.Middleware(http.HandlerFunc(h.Process)))
 	mux.HandleFunc("POST /api/v1/admin/stats", adminH.Stats)
 	mux.HandleFunc("POST /api/v1/admin/reload_persona", adminH.ReloadPersona)
+	if cfg.EnableProactiveMessaging {
+		mux.HandleFunc("GET /api/v1/proactive", h.Proactive)
+	}
 
 	// ── Server with Graceful Shutdown ────────────────────────────────────
 	addr := cfg.ListenAddr()

@@ -3,7 +3,7 @@
     "memory.duplicate": "Memory already exists (duplicate detected).",
     "memory.forgotten": "Memory {0} forgotten.",
     "memory.none": "No memories stored for this user.",
-    "image.not_configured": "Image generation is not configured. Set NANO_BANANA_API_KEY and NANO_BANANA_API_URL.",
+    "image.not_configured": "Image generation is not configured. Set GEMINI_API_KEY for image generation.",
     "image.disabled": "Image generation is currently disabled.",
     "sandbox.disabled": "Code execution is currently disabled.",
     "sandbox.timeout": "Code execution timed out.",
@@ -15,5 +15,8 @@
     "tool.unknown": "Unknown tool: {0}",
     "tool.internal_error": "Internal error in tool {0}",
     "search.no_results": "No messages found.",
-    "error.backend_stub": "Backend stub: message received."
+    "error.backend_stub": "Backend stub: message received.",
+    "error.context_build": "Internal error building context.",
+    "error.generation_failed": "Error generating response.",
+    "tool.search_web_not_configured": "Web search is not configured."
 }

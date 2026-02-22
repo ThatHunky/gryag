@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -9,6 +10,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 )
+
+const proactiveQueueKey = "proactive:queue"
 
 // Cache wraps the Redis client for rate-limiting and state management.
 type Cache struct {
@@ -132,4 +135,35 @@ func (c *Cache) AcquireLock(ctx context.Context, chatID int64, ttl time.Duration
 func (c *Cache) ReleaseLock(ctx context.Context, chatID int64) error {
 	key := fmt.Sprintf("lock:chat:%d", chatID)
 	return c.client.Del(ctx, key).Err()
+
+}
+
+// ── Proactive message queue ─────────────────────────────────────────────
+
+// ProactiveItem is one queued proactive message for the frontend to send.
+type ProactiveItem struct {
+	ChatID int64  `json:"chat_id"`
+	Reply  string `json:"reply"`
+}
+
+// PushProactive pushes a proactive message onto the queue (frontend will pop and send to Telegram).
+func (c *Cache) PushProactive(ctx context.Context, item ProactiveItem) error {
+	b, err := json.Marshal(item)
+	if err != nil {
+		return err
+	}
+	return c.client.LPush(ctx, proactiveQueueKey, string(b)).Err()
+}
+
+// PopProactive blocks up to timeout for an item; returns (chatID, reply, true) or (0, "", false).
+func (c *Cache) PopProactive(ctx context.Context, timeout time.Duration) (chatID int64, reply string, ok bool) {
+	result, err := c.client.BRPop(ctx, timeout, proactiveQueueKey).Result()
+	if err != nil || len(result) != 2 {
+		return 0, "", false
+	}
+	var item ProactiveItem
+	if json.Unmarshal([]byte(result[1]), &item) != nil {
+		return 0, "", false
+	}
+	return item.ChatID, item.Reply, true
 }

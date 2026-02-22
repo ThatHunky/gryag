@@ -20,6 +20,7 @@ All values are configured via environment variables. Copy `.env.example` to `.en
 | `GEMINI_MODEL` | `gemini-2.5-flash` | Model name for generation |
 | `GEMINI_TEMPERATURE` | `0.9` | Creative temperature for responses |
 | `GEMINI_ROUTING_TEMPERATURE` | `0.0` | Deterministic temperature for tool routing |
+| `GEMINI_THINKING_BUDGET` | `0` | Budget for Gemini 2.0 Thinking models (0 = disabled, e.g., 1024) |
 | `OPENAI_API_KEY` | — | Optional OpenAI key for fallback routing |
 | `OPENAI_MODEL` | `gpt-4o-mini` | OpenAI model name |
 

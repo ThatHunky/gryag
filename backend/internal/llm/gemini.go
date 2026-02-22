@@ -64,6 +64,12 @@ func (c *Client) GenerateResponse(ctx context.Context, instructions *DynamicInst
 		Tools:            tools,
 	}
 
+	if c.config.GeminiThinkingBudget > 0 {
+		config.ThinkingConfig = &genai.ThinkingConfig{
+			ThinkingBudget: genai.Ptr(int32(c.config.GeminiThinkingBudget)),
+		}
+	}
+
 	resp, err := c.genai.Models.GenerateContent(ctx, c.config.GeminiModel, []*genai.Content{
 		{
 			Role:  "user",

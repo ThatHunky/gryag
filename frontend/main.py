@@ -14,6 +14,7 @@ import aiohttp
 import structlog
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ChatAction, ContentType, ParseMode
+from aiogram.types import BotCommand
 from aiohttp import web
 
 from md_to_tg import md_to_telegram_html
@@ -205,6 +206,16 @@ async def main() -> None:
         return
 
     log.info("starting_frontend", backend_url=BACKEND_URL)
+
+    # Set up Telegram command hints
+    commands = [
+        BotCommand(command="start", description="Start chatting"),
+        BotCommand(command="help", description="Show what the bot can do"),
+        BotCommand(command="stats", description="Admin: backend stats"),
+        BotCommand(command="reload_persona", description="Admin: reload persona config"),
+    ]
+    await bot.set_my_commands(commands)
+    log.info("commands_set")
 
     # Start health check server
     await start_health_server()

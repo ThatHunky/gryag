@@ -14,10 +14,11 @@ type Config struct {
 	AdminIDs         []int64
 
 	// Gemini
-	GeminiAPIKey            string
-	GeminiModel             string
-	GeminiTemperature       float64
+	GeminiAPIKey             string
+	GeminiModel              string
+	GeminiTemperature        float64
 	GeminiRoutingTemperature float64
+	GeminiThinkingBudget     int
 
 	// OpenAI (Optional)
 	OpenAIAPIKey string
@@ -91,10 +92,11 @@ func Load() (*Config, error) {
 		AdminIDs:         parseAdminIDs(getEnv("ADMIN_IDS", "")),
 
 		// Gemini
-		GeminiAPIKey:            getEnv("GEMINI_API_KEY", ""),
-		GeminiModel:             getEnv("GEMINI_MODEL", "gemini-2.5-flash"),
-		GeminiTemperature:       getEnvFloat("GEMINI_TEMPERATURE", 0.9),
+		GeminiAPIKey:             getEnv("GEMINI_API_KEY", ""),
+		GeminiModel:              getEnv("GEMINI_MODEL", "gemini-2.5-flash"),
+		GeminiTemperature:        getEnvFloat("GEMINI_TEMPERATURE", 0.9),
 		GeminiRoutingTemperature: getEnvFloat("GEMINI_ROUTING_TEMPERATURE", 0.0),
+		GeminiThinkingBudget:     getEnvInt("GEMINI_THINKING_BUDGET", 0),
 
 		// OpenAI
 		OpenAIAPIKey: getEnv("OPENAI_API_KEY", ""),

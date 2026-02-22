@@ -166,3 +166,27 @@ To harness the capabilities of Gemini 2.5 without overflowing the context or cau
     - *Immediate Chat Context*: The raw log of the last `N` messages.
 5. **Current User Context**: Spliced-in facts specifically about the user currently talking (the message author).
 6. **Current Message**: The actual prompt/message triggering the bot.
+
+## 9. Versatility & Security (OpenClaw-style Integration)
+
+To elevate Gryag beyond a simple conversational agent to an **extremely versatile** orchestration layer (similar to the concept behind *OpenClaw* / *Moltbot*), the bot must be able to execute code, format data, and generate high-fidelity media, all while maintaining strict security boundaries.
+
+### 1. The Code Interpreter (Secure Sandbox)
+Gryag needs the ability to write and execute code on the fly to solve math, generate charts, parse files, or scrape unique data.
+*   **The Mechanism**: The LLM uses a `run_python_code` (or similar) tool. The backend receives the raw code.
+*   **Security (CRITICAL)**: Code **must never** execute directly on the host machine or the primary Go backend process. 
+    *   **Dockerized Sandboxing**: Code must be passed to a strictly isolated, ephemeral Docker container (e.g., using a microVM like Firecracker, or a highly restricted Docker network with no internet access and read-only mounts). 
+    *   **Timeouts & Resource Limits**: The execution environment must have hard CPU/RAM limits and a strict execution timeout (e.g., 5 seconds) to prevent infinite loops or denial-of-service.
+    *   **Artifact Return**: If the code generates a chart (e.g., `matplotlib`), the sandbox returns the raw bytes or base64 image back to the Go backend, which forwards it to the Python Telegram frontend to send to the user.
+
+### 2. Advanced Image Generation (Nano Banana Pro)
+The bot will support premium image generation, specifically targeting **Nano Banana Pro at 2K resolution**.
+*   **Execution**: The LLM translates user requests into English (if necessary) and triggers a `generate_image` tool mapped to the Nano Banana Pro API.
+*   **Media Lifecycle & Editing**:
+    *   *High-Quality Persistence*: 2K images are large. When generated, the original high-quality file must be temporarily cached on the backend (e.g., in a Redis-backed blob store or local temporary disk with a TTL of 24-48 hours).
+    *   *Reference ID*: The bot replies with the image and a hidden or internal `media_id`. 
+    *   *Editing*: If the user replies to the generated image asking to "make it darker" or "add a hat", the LLM retrieves the *original 2K quality image* from the temporary cache using the `media_id`, edits it via the appropriate API tool, and returns the result without cumulative compression artifacting.
+*   **File Delivery (Document vs. Photo)**: 
+    *   Telegram heavily compresses standard "Photos".
+    *   By default, the bot sends the image as a standard viewable photo. 
+    *   However, the LLM must understand context: if the user explicitly asks for "high quality", "full resolution", or "as a file", the frontend must send the image as a **Telegram Document (`sendDocument`)** to preserve the raw 2K Nano Banana Pro quality.

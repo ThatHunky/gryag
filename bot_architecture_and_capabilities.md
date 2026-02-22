@@ -164,9 +164,10 @@ To harness the capabilities of Gemini 2.5 without overflowing the context or cau
 4. **Context (Multi-tiered Summary)**:
     - *30-Day Summary*: Overarching themes, memes, and significant past events.
     - *7-Day Summary*: Immediate past behaviors, running jokes, and active plotlines.
-    - *Immediate Chat Context*: The raw log of the last `N` messages.
+    - *Immediate Chat Context*: The raw log of the last `N` messages. 
 5. **Current User Context**: Spliced-in facts specifically about the user currently talking (the message author).
-6. **Current Message**: The actual prompt/message triggering the bot.
+6. **Multi-Media Buffer**: Gemini natively supports massive multimodal payloads. The Dynamic Instructions builder must collect and inject up to **10 recent media files** (images, compressed video frames, audio) referenced in the *Immediate Chat Context* directly into the `genai.Part` array, ensuring the bot sees the full visual/audio scope of the conversation.
+7. **Current Message**: The actual prompt/message triggering the bot.
 
 ## 9. Versatility & Security (OpenClaw-style Integration)
 
@@ -209,6 +210,6 @@ All incoming Telegram updates are intercepted by a highly performant Redis middl
     - **Per-User Throttle**: Restrict individual users from spamming (e.g., max 3 messages per rolling 60-second window).
     - **Expensive Tool Quotas**: Specific constraints placed on slow or costly tools. For instance, Nano Banana Pro image generation might be hard-capped at 5 images per user, per day.
 - **Cost Protection (Circuit Breakers)**: If an API anomaly is detected (e.g., Gemini spinning in an infinite loop or Telegram sending duplicated webhook events), Redis tracks consecutive failures/rapid spikes and temporarily short-circuits execution for that chat/user, notifying Admins directly. 
-- **Strict Silence on Throttle**: If a user hits a throttle, the backend **instantly drops the request**. The bot must **not** respond with any error messages or sassy rejections. It remains completely silent to avoid spamming the chat with its own rate-limit notifications.
-- **Message Queue Locking (Exclusive Processing)**: By default, the bot processes **one message at a time per chat context**. It must lock the ability to queue multiple triggers. If a user sends 5 consecutive messages while the bot is already thinking/generating a response to the 1st, the subsequent 4 are ignored (unless explicitly configured otherwise by an Admin).
+- **Strict Silence on Throttle (Background Logging)**: If a user hits a throttle, the backend **instantly drops the request**. The bot must **not** respond with any error messages, avoiding chat spam. However, the dropped message **must still be written to the PostgreSQL message log**. This ensures that when the bot finally *does* respond to a future valid trigger, it has full context of what was said during its silence.
+- **Message Queue Locking (Exclusive Processing)**: By default, the bot processes **one message at a time per chat context**. It must lock the ability to queue multiple triggers. If a user sends 5 consecutive messages while the bot is already thinking/generating a response to the 1st, the subsequent 4 are ignored for active processing (but are still logged to the DB for context unless explicitly configured otherwise by an Admin).
 - **Action/Typing Indicators**: During the (sometimes lengthy) execution of the Go backend logic, the Python frontend must continuously emit appropriate Telegram Chat Actions (e.g., `typing`, `upload_photo`, `upload_document`) so users know the bot is actively working on the request.

@@ -24,8 +24,8 @@ func TestRegistry_AllToolsRegistered(t *testing.T) {
 
 	// With defaults (sandbox + image gen enabled), we expect:
 	// recall_memories, remember_memory, forget_memory, calculator,
-	// weather, currency, generate_image, edit_image, run_python_code = 9
-	expected := 9
+	// weather, currency, search_messages, generate_image, edit_image, run_python_code = 10
+	expected := 10
 	if r.Count() != expected {
 		t.Errorf("expected %d tools, got %d", expected, r.Count())
 		t.Logf("registered tools: %v", r.GetToolNames())
@@ -47,8 +47,8 @@ func TestRegistry_FeatureToggles(t *testing.T) {
 
 	// With sandbox + image gen disabled, we expect:
 	// recall_memories, remember_memory, forget_memory, calculator,
-	// weather, currency = 6
-	expected := 6
+	// weather, currency, search_messages = 7
+	expected := 7
 	if r.Count() != expected {
 		t.Errorf("expected %d tools, got %d", expected, r.Count())
 		t.Logf("registered tools: %v", r.GetToolNames())

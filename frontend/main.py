@@ -69,6 +69,31 @@ async def handle_message(message: types.Message) -> None:
     typing_task = asyncio.create_task(send_typing_loop(message.chat.id, stop_typing))
 
     try:
+        # Extract file_id from media messages for storage in DB (media recall)
+        file_id = None
+        media_type = None
+        if message.photo:
+            file_id = message.photo[-1].file_id  # Highest resolution
+            media_type = "photo"
+        elif message.video:
+            file_id = message.video.file_id
+            media_type = "video"
+        elif message.document:
+            file_id = message.document.file_id
+            media_type = "document"
+        elif message.voice:
+            file_id = message.voice.file_id
+            media_type = "voice"
+        elif message.video_note:
+            file_id = message.video_note.file_id
+            media_type = "video_note"
+        elif message.sticker:
+            file_id = message.sticker.file_id
+            media_type = "sticker"
+        elif message.animation:
+            file_id = message.animation.file_id
+            media_type = "animation"
+
         # Build the payload for the backend
         payload = {
             "chat_id": message.chat.id,
@@ -78,6 +103,8 @@ async def handle_message(message: types.Message) -> None:
             "text": message.text or message.caption or "",
             "message_id": message.message_id,
             "date": message.date.isoformat() if message.date else None,
+            "file_id": file_id,
+            "media_type": media_type,
         }
 
         async with aiohttp.ClientSession() as session:

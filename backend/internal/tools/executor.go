@@ -16,6 +16,7 @@ type Executor struct {
 	memory   *MemoryTool
 	imageGen *ImageGenTool
 	sandbox  *SandboxTool
+	db       *db.DB
 	config   *config.Config
 	i18n     *i18n.Bundle
 	lang     string
@@ -27,6 +28,7 @@ func NewExecutor(cfg *config.Config, database *db.DB, bundle *i18n.Bundle) *Exec
 		memory:   NewMemoryTool(database, bundle, cfg.DefaultLang),
 		imageGen: NewImageGenTool(cfg),
 		sandbox:  NewSandboxTool(cfg),
+		db:       database,
 		config:   cfg,
 		i18n:     bundle,
 		lang:     cfg.DefaultLang,
@@ -76,6 +78,48 @@ func (e *Executor) Execute(ctx context.Context, name string, args json.RawMessag
 		output, err = e.memory.RememberMemory(ctx, args)
 	case "forget_memory":
 		output, err = e.memory.ForgetMemory(ctx, args)
+
+	// Message search
+	case "search_messages":
+		var params struct {
+			ChatID int64  `json:"chat_id"`
+			Query  string `json:"query"`
+			Limit  int    `json:"limit"`
+		}
+		if jsonErr := json.Unmarshal(args, &params); jsonErr == nil {
+			if params.Limit == 0 {
+				params.Limit = 10
+			}
+			results, searchErr := e.db.SearchMessages(ctx, params.ChatID, params.Query, params.Limit)
+			if searchErr != nil {
+				err = searchErr
+			} else if len(results) == 0 {
+				output = e.t("search.no_results")
+			} else {
+				type searchEntry struct {
+					Text      string  `json:"text,omitempty"`
+					From      string  `json:"from"`
+					FileID    string  `json:"file_id,omitempty"`
+					MediaType string  `json:"media_type,omitempty"`
+					Link      string  `json:"message_link,omitempty"`
+					Rank      float64 `json:"relevance"`
+				}
+				entries := make([]searchEntry, len(results))
+				for i, r := range results {
+					e := searchEntry{Rank: r.Rank, Link: r.MessageLink}
+					if r.Text != nil { e.Text = *r.Text }
+					if r.FirstName != nil { e.From = *r.FirstName }
+					if r.Username != nil { e.From += " (@" + *r.Username + ")" }
+					if r.FileID != nil { e.FileID = *r.FileID }
+					if r.MediaType != nil { e.MediaType = *r.MediaType }
+					entries[i] = e
+				}
+				data, _ := json.Marshal(entries)
+				output = string(data)
+			}
+		} else {
+			err = jsonErr
+		}
 
 	// Calculator — evaluated via sandbox for safety
 	case "calculator":

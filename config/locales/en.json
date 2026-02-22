@@ -14,5 +14,6 @@
     "currency.pending": "Currency conversion {0} {1} → {2}: integration pending.",
     "tool.unknown": "Unknown tool: {0}",
     "tool.internal_error": "Internal error in tool {0}",
+    "search.no_results": "No messages found.",
     "error.backend_stub": "Backend stub: message received."
 }

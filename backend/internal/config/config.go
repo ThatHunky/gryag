@@ -67,6 +67,9 @@ type Config struct {
 	ImmediateContextSize int
 	MediaBufferMax       int
 
+	// Data Retention
+	MessageRetentionDays int
+
 	// Persona
 	PersonaFile string
 
@@ -140,6 +143,9 @@ func Load() (*Config, error) {
 		// Context Window
 		ImmediateContextSize: getEnvInt("IMMEDIATE_CONTEXT_SIZE", 50),
 		MediaBufferMax:       getEnvInt("MEDIA_BUFFER_MAX", 10),
+
+		// Data Retention
+		MessageRetentionDays: getEnvInt("MESSAGE_RETENTION_DAYS", 90),
 
 		// Persona
 		PersonaFile: getEnv("PERSONA_FILE", "config/persona.txt"),

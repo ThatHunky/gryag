@@ -24,6 +24,8 @@ type ProcessRequest struct {
 	Text      string `json:"text"`
 	MessageID int64  `json:"message_id"`
 	Date      string `json:"date"`
+	FileID    string `json:"file_id"`
+	MediaType string `json:"media_type"`
 }
 
 // ProcessResponse holds the reply sent back to the Python frontend.
@@ -90,6 +92,8 @@ func (h *Handler) Process(w http.ResponseWriter, r *http.Request) {
 		Text:      strPtr(req.Text),
 		MessageID: &req.MessageID,
 		RequestID: &requestID,
+		FileID:    strPtr(req.FileID),
+		MediaType: strPtr(req.MediaType),
 	}
 	if _, err := h.db.InsertMessage(ctx, msgRecord); err != nil {
 		logger.Error("failed to store incoming message", "error", err)

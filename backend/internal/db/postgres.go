@@ -20,6 +20,7 @@ type Message struct {
 	Text         *string
 	MessageID    *int64
 	MediaType    *string
+	FileID       *string
 	IsBotReply   bool
 	RequestID    *string
 	WasThrottled bool
@@ -78,14 +79,14 @@ func (d *DB) Pool() *sql.DB {
 // InsertMessage stores a message in the log. Throttled messages use wasThrottled=true.
 func (d *DB) InsertMessage(ctx context.Context, msg *Message) (int64, error) {
 	const query = `
-		INSERT INTO messages (chat_id, user_id, username, first_name, text, message_id, media_type, is_bot_reply, request_id, was_throttled)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO messages (chat_id, user_id, username, first_name, text, message_id, media_type, file_id, is_bot_reply, request_id, was_throttled)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING id`
 
 	var id int64
 	err := d.pool.QueryRowContext(ctx, query,
 		msg.ChatID, msg.UserID, msg.Username, msg.FirstName,
-		msg.Text, msg.MessageID, msg.MediaType,
+		msg.Text, msg.MessageID, msg.MediaType, msg.FileID,
 		msg.IsBotReply, msg.RequestID, msg.WasThrottled,
 	).Scan(&id)
 	if err != nil {

@@ -96,6 +96,20 @@ func NewRegistry(cfg *config.Config) *Registry {
 		},
 	})
 
+	r.register("search_messages", &genai.FunctionDeclaration{
+		Name:        "search_messages",
+		Description: "Search through chat message history. Returns matching messages with links and file IDs for media. Use this to recall what someone said or find a specific message/photo/video. You can include the message link in your reply so the user can jump to it.",
+		Parameters: &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"chat_id": {Type: genai.TypeInteger, Description: "Telegram chat ID to search in"},
+				"query":   {Type: genai.TypeString, Description: "Search query (words to find in messages)"},
+				"limit":   {Type: genai.TypeInteger, Description: "Max results to return (default 10, max 50)"},
+			},
+			Required: []string{"chat_id", "query"},
+		},
+	})
+
 	// Feature-toggled tools
 
 	if cfg.EnableImageGeneration {

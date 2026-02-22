@@ -57,6 +57,17 @@ func main() {
 	}
 	defer database.Close()
 
+	// ── Run Migrations ─────────────────────────────────────────────────
+	if err := db.RunMigrations(database.Pool(), "migrations"); err != nil {
+		slog.Error("failed to run migrations", "error", err)
+		os.Exit(1)
+	}
+
+	// ── Message Retention Cleanup ───────────────────────────────────────
+	if _, err := database.PruneOldMessages(context.Background(), cfg.MessageRetentionDays); err != nil {
+		slog.Warn("message retention cleanup failed", "error", err)
+	}
+
 	// ── Redis ───────────────────────────────────────────────────────────
 	redisCache, err := cache.New(cfg.RedisAddr(), cfg.RedisPassword)
 	if err != nil {
@@ -83,10 +94,15 @@ func main() {
 	// ── Rate Limiter Middleware ──────────────────────────────────────────
 	rateLimiter := middleware.NewRateLimiter(redisCache, database, cfg)
 
+	// ── Admin Handler ───────────────────────────────────────────────────
+	adminH := handler.NewAdminHandler(cfg, database)
+
 	// ── HTTP Mux ────────────────────────────────────────────────────────
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handler.HealthCheck)
 	mux.Handle("POST /api/v1/process", rateLimiter.Middleware(http.HandlerFunc(h.Process)))
+	mux.HandleFunc("POST /api/v1/admin/stats", adminH.Stats)
+	mux.HandleFunc("POST /api/v1/admin/reload_persona", adminH.ReloadPersona)
 
 	// ── Server with Graceful Shutdown ────────────────────────────────────
 	addr := cfg.ListenAddr()

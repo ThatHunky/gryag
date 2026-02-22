@@ -118,3 +118,37 @@ func main() {
 ```
 
 By separating concerns, the highly concurrent Go backend can manage extensive memory and API orchestrations rapidly without blocking the Python-based Telegram polling loops.
+
+## 7. Opportunities for Simplification & Recommended Stack
+
+While the legacy bot was powerful, its 5-layer memory and hybrid local/cloud extraction pipeline were highly complex. For the V2 rewrite, we can **drastically simplify** the conceptual model by leaning into the raw capabilities of modern APIs and a streamlined stack.
+
+### Simplification Strategies
+1. **Flatten the Memory Architecture**: Instead of 5 distinct layers (Immediate, Recent, Semantically Relevant, Background, Episodic), reduce this to **3 layers**.
+    - *Short-Term Context*: The last N messages (handled purely by array slicing).
+    - *Long-Term Facts*: A simple key-value or document store of facts about users. 
+    - *Consolidated Summaries*: Let Gemini 2.5 Flash native large context window (1M+ tokens) do the heavy lifting of summarizing past episodes *on the fly* rather than attempting complex manual grouping logic.
+2. **Native Tool Calling (Function Calling)**: Remove custom extraction pipelines (like Regex matching or Phi-3-mini). Let the Gemini/OpenAI API natively decide when to trigger a tool (e.g., `save_user_fact(user_id, fact)` or `get_weather(city)`).
+3. **Drop Redis (If Possible)**: Unless horizontal scaling is strictly required immediately, `SQLite` is more than fast enough for rate-limiting, caching, and state management in a single-instance Go backend.
+
+### Recommended Simplified Tech Stack
+
+#### The "Frontend" (Telegram Router)
+- **Language**: Python 3.12+
+- **Library**: `aiogram` (Async Telegram bot API framework).
+- **Role**: Purely a dumb pipe. It receives webhooks/polls, downloads media to a temporary local buffer, and makes REST/gRPC calls to the Go backend. It does *no* thinking.
+
+#### The "Backend" (The Brain)
+- **Language**: Go 1.23+
+- **Web Framework**: [`Fiber`](https://gofiber.io/) or the standard `net/http` for receiving requests from the Python frontend.
+- **Database**: `SQLite` (via `cgo` like `mattn/go-sqlite3` or pure Go like `modernc.org/sqlite`).
+    - Use SQLite for *everything*: message logs, user data, API rate limiting, and vector search (via `sqlite-vss` if semantic search is still desired, though standard FTS5 search is often enough).
+- **AI Integration**:
+    - **Google GenAI SDK (`google.golang.org/genai`)**: For the core conversational personality, utilizing Gemini 2.5 Flash's massive context window and native function calling. 
+    - **OpenAI API (Optional)**: If you need extremely fast, cheap, predictable JSON formatting for minor classification tasks, though Gemini Flash is likely sufficient for both.
+
+#### Simplified Toolset (What to Keep vs Change)
+*   **Keep**: `search_web` (via Google Search Grounding natively inside Gemini).
+*   **Change**: Replace manual `remember_memory`/`forget_memory` with native Gemini Tool Calling. 
+*   **Change**: Drop manual image generation plugins if not vital; focus strictly on text/multimodal *understanding* first.
+*   **Add**: A simple internal `Memory Manager` in Go that the LLM accesses strictly via Function Calling (e.g., the LLM decides to format a JSON struct declaring "I should remember that User X likes pizza", and the Go backend intercepts this and writes to SQLite).

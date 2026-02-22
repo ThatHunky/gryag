@@ -13,8 +13,10 @@ import uuid
 import aiohttp
 import structlog
 from aiogram import Bot, Dispatcher, types
-from aiogram.enums import ChatAction, ContentType
+from aiogram.enums import ChatAction, ContentType, ParseMode
 from aiohttp import web
+
+from md_to_tg import md_to_telegram_html
 
 # ── Structured JSON Logging (Section 15.2) ──────────────────────────────
 structlog.configure(
@@ -120,35 +122,46 @@ async def handle_message(message: types.Message) -> None:
                     media_url = data.get("media_url", "")
                     media_type = data.get("media_type", "")
 
+                    # Convert markdown to Telegram HTML
+                    reply_html = md_to_telegram_html(reply_text) if reply_text else ""
+
                     # Handle media responses (image generation results)
                     if media_url and media_type == "photo":
                         try:
                             await message.answer_photo(
                                 photo=media_url,
-                                caption=reply_text[:1024] if reply_text else None,
+                                caption=reply_html[:1024] if reply_html else None,
+                                parse_mode=ParseMode.HTML,
                             )
                             logger.info("photo_sent", media_url=media_url)
                         except Exception as e:
                             logger.error("photo_send_failed", error=str(e))
                             # Fall back to text with URL
-                            if reply_text:
-                                await message.answer(f"{reply_text}\n\n🖼 {media_url}")
+                            if reply_html:
+                                await message.answer(
+                                    f"{reply_html}\n\n🖼 {media_url}",
+                                    parse_mode=ParseMode.HTML,
+                                )
                     elif media_url and media_type == "document":
                         try:
                             await message.answer_document(
                                 document=media_url,
-                                caption=reply_text[:1024] if reply_text else None,
+                                caption=reply_html[:1024] if reply_html else None,
+                                parse_mode=ParseMode.HTML,
                             )
                             logger.info("document_sent", media_url=media_url)
                         except Exception as e:
                             logger.error("document_send_failed", error=str(e))
-                            if reply_text:
-                                await message.answer(f"{reply_text}\n\n📎 {media_url}")
-                    elif reply_text:
+                            if reply_html:
+                                await message.answer(
+                                    f"{reply_html}\n\n📎 {media_url}",
+                                    parse_mode=ParseMode.HTML,
+                                )
+                    elif reply_html:
                         # Split long messages (Telegram limit: 4096 chars)
-                        for i in range(0, len(reply_text), 4096):
-                            chunk = reply_text[i : i + 4096]
-                            await message.answer(chunk)
+                        for i in range(0, len(reply_html), 4096):
+                            chunk = reply_html[i : i + 4096]
+                            await message.answer(chunk, parse_mode=ParseMode.HTML)
                         logger.info("reply_sent", reply_length=len(reply_text))
 
                 elif resp.status == 204:

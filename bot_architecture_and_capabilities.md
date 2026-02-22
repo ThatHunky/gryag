@@ -36,13 +36,85 @@ The LLM dynamically decides when to use external tools:
 - `calculator`, `currency`, `weather`
 - Native memory management tools (`remember_memory`, `forget_memory`)
 
-## 6. Architecture & Deployment
-- **Database**: `SQLite` with extensive schema (`db/schema.sql`) for messages, users, and fact storage.
-- **Caching**: Optional `Redis` for distributed rate-limiting and fast caching.
-- **Containerization**: Deployed via `docker-compose` with optimized build contexts.
 
-## Future Direction (V2)
-For the new iteration, the architectural focus should likely remain on:
-1. **Separation of Concerns**: Clean boundaries between Telegram Handlers, Memory Retrieval, Tool Execution, and LLM formatting.
-2. **Efficiency**: Smart API routing (using OpenAI for fast/cheap tasks and Gemini for heavy reasoning) to save costs.
-3. **Pluggability**: Easier addition of new "tools" for the LLM. 
+## 6. Future Direction (V2): Python Frontend & Go Backend
+For the new iteration, the architecture relies on a strong split between a **Python Telegram "Frontend"** and a **Go "Backend"**.
+
+### Architecture Overview
+1. **Python (Frontend)**: Handles the Telegram API connection via `aiogram`. Responsible for parsing incoming updates, downloading media, maintaining fast websocket connections, and sending formatted responses back to the user. It forwards sanitized requests to the Go backend.
+2. **Go (Backend)**: Handles the heavyweight business logic: memory retrieval, SQLite database operations, Gemini API generation, OpenAI API routing, and tool execution.
+
+### Wiring the Gemini API
+
+#### Python (Frontend - Basic Generation Example)
+While Python will primarily act as the Telegram router, if any direct LLM calls are needed on the frontend, the official Google GenAI SDK is used:
+
+```python
+# pip install google-genai
+import os
+from google import genai
+
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
+response = client.models.generate_content(
+    model='gemini-2.5-flash',
+    contents='Tell me a sarcastic joke about rewriting a codebase.'
+)
+print(response.text)
+```
+
+#### Go (Backend - Core Generation Engine)
+The Go backend acts as the true brain. It requires the official Go GenAI SDK (`google.golang.org/genai`).
+
+**Installation:**
+```bash
+go get google.golang.org/genai
+```
+
+**Implementation Example:**
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+
+	"google.golang.org/genai"
+)
+
+func generateResponse(prompt string) (string, error) {
+	ctx := context.Background()
+	
+	// Ensure GEMINI_API_KEY is set in environment
+	client, err := genai.NewClient(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create client: %v", err)
+	}
+
+	model := "gemini-2.5-flash"
+	resp, err := client.Models.GenerateContent(ctx, model, genai.Text(prompt), nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate content: %v", err)
+	}
+	
+	if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
+		if text, ok := resp.Candidates[0].Content.Parts[0].(genai.Text); ok {
+			return string(text), nil
+		}
+	}
+
+	return "", fmt.Errorf("no output generated")
+}
+
+func main() {
+	response, err := generateResponse("Тестовий запит для Гряга.")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(response)
+}
+```
+
+By separating concerns, the highly concurrent Go backend can manage extensive memory and API orchestrations rapidly without blocking the Python-based Telegram polling loops.

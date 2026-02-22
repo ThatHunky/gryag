@@ -1,0 +1,129 @@
+# ============================================================
+# Gryag V2 — Docker Compose (Development)
+# ============================================================
+# Boots the entire stack with a single command:
+#   docker compose up --build
+# ============================================================
+
+services:
+  # ── Python Frontend (Telegram Router) ─────────────────────
+  gryag-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: gryag-frontend
+    depends_on:
+      gryag-backend:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      - FRONTEND_HEALTH_PORT=8081
+    networks:
+      - gryag-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ── Go Backend (The Brain) ────────────────────────────────
+  gryag-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: gryag-backend
+    depends_on:
+      gryag-postgres:
+        condition: service_healthy
+      gryag-redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      - BACKEND_HOST=0.0.0.0
+      - BACKEND_PORT=8080
+    expose:
+      - "8080"
+    networks:
+      - gryag-net
+    restart: unless-stopped
+    volumes:
+      - ./config:/app/config:ro
+      - ./migrations:/app/migrations:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ── PostgreSQL v18+ (Persistent Storage) ──────────────────
+  gryag-postgres:
+    image: postgres:17-alpine
+    container_name: gryag-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gryag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_in_production}
+      POSTGRES_DB: ${POSTGRES_DB:-gryag}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    networks:
+      - gryag-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gryag} -d ${POSTGRES_DB:-gryag}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Redis (Caching & Rate Limiting) ───────────────────────
+  gryag-redis:
+    image: redis:7-alpine
+    container_name: gryag-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redisdata:/data
+    expose:
+      - "6379"
+    networks:
+      - gryag-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Sandbox (OpenClaw Code Execution) ─────────────────────
+  gryag-sandbox:
+    build:
+      context: ./sandbox
+      dockerfile: Dockerfile
+    container_name: gryag-sandbox
+    # SECURITY: Zero network access — completely isolated
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: ${SANDBOX_MAX_MEMORY_MB:-128}M
+    # This container is started on-demand by the Go backend,
+    # not as a long-running service. We keep it defined here
+    # so `docker compose build` pre-builds the image.
+    profiles:
+      - sandbox
+    restart: "no"
+
+# ── Networks ────────────────────────────────────────────────
+networks:
+  gryag-net:
+    driver: bridge
+
+# ── Volumes ─────────────────────────────────────────────────
+volumes:
+  pgdata:
+  redisdata:

@@ -1,49 +1,65 @@
-# LLM-Driven Development: Best Practices & Guidelines
+# Gryag V2 Agent Instructions
 
-This guide outlines the core principles for building, extending, and maintaining Gryag V2 and similar LLM-driven applications. It covers architectural patterns, prompt engineering, context management, and SDK integration.
+You are an expert Go and Python developer, specializing in AI-driven bots, asynchronous pipelines, and secure sandboxing. Your task is to maintain and extend Gryag V2, a production-ready Telegram bot powered by Gemini.
 
-## 1. Context Engineering & Memory Management
-The most critical aspect of an LLM application is managing the token window. An LLM's performance degrades as context length increases ("context bloat").
+This file provides the context, commands, boundaries, and style guidelines necessary for you to operate effectively in this repository.
 
-- **Strict Windowing**: Never pass the entire database history. Gryag uses `IMMEDIATE_CONTEXT_SIZE` to slice the end of the chat history.
-- **Layered Memory Architecture**:
-  - *Short-term*: The recent `N` messages.
-  - *Long-term (Semantic)*: Facts explicitly extracted and stored via `remember_memory`.
-  - *Searchable*: The `search_messages` tool allows the LLM to dynamically fetch old context only when needed, rather than bloating the system prompt.
-- **Media Throttling**: Images consume massive token counts. Gryag enforces a `MEDIA_BUFFER_MAX` (e.g., 10 images) to prevent a few heavy messages from eclipsing text history.
+## 1. Project Overview & Stack
+- **Backend**: Go 1.22+ (Strictly standard library for HTTP/SQL where possible, `google.golang.org/genai` for LLM, `lib/pq` for Postgres)
+- **Frontend / UI**: Python 3.11+ using `aiogram 3.x`
+- **Data Stores**: PostgreSQL 16 (persistent memory/logs) and Redis (rate limiting)
+- **Deployment**: Docker Compose
+- **Design Pattern**: "Dumb Pipe" Frontend (pure router) + Stateless Go Backend (business logic & tools)
 
-## 2. Dynamic System Instructions (Persona)
-System instructions are the foundation of the agent's behavior. They must be unambiguous, structured, and modular.
+## 2. Core Commands
+Use these commands to build, test, and run the project locally. 
 
-- **The "Dynamic Instructions" Pattern**: Instead of a static text block, construct the system prompt dynamically on every request.
-  - *Base*: The core persona (e.g., loaded from `config/persona.txt`).
-  - *Context*: Injected data (current time, username, stored facts).
-  - *Capabilities*: A dynamically generated list of available tools.
-- **Role Definition**: Clearly command the LLM's identity ("You are a terse, Gen-Z assistant").
-- **Constraint Boundaries**: Explicitly state what the LLM *cannot* do.
+**Backend (Go)**
+```bash
+cd backend
+go mod tidy
+go build ./...
+go test ./... -v -count=1  # ALWAYS run tests before committing
+```
 
-## 3. Tool Building (Function Calling)
-Tools turn an LLM from a text generator into an agentic system.
+**Frontend (Python)**
+```bash
+cd frontend
+pip install -r requirements.txt
+python3 -m pytest test_md_to_tg.py -v
+```
 
-- **Deterministic Routing**: When possible, use a standard generation call for natural language, but if strict routing is needed, set the Temperature to `0.0` to force deterministic tool selection.
-- **Fault Isolation (Sandboxing)**: Never let a tool panic crash the main agent loop. In Go, wrap tool execution in `defer func() { recover() }()` to catch internal errors and return graceful text summaries of the failure to the LLM.
-- **Rich Schema Descriptions**: The LLM relies entirely on the `Description` fields in your tool schemas. Make them as descriptive as possible.
-  - *Bad*: `description: "Executes code"`
-  - *Good*: `description: "Executes Python code in a secure sandbox. Can generate charts, do math, or parse data. Runs in an isolated container with no network access."`
+**Infrastructure (Docker)**
+```bash
+# Start the full stack (DB, Redis, Backend, Frontend)
+docker-compose up -d --build
 
-## 4. Backend Architecture (Go)
-- **Dependency Inversion**: Pass interfaces (or tightly scoped structs like `*db.DB`) down into handlers. The `Handler` struct should hold all subsystem connections.
-- **Graceful Degradation**: If an external API (like Nano Banana Pro for images) fails, the system must not collapse. The tool executor should trap the error and inform the LLM so it can apologize naturally.
-- **Stateless Handlers**: The HTTP handler (`/api/v1/process`) must be entirely stateless. Context is pulled from PostgreSQL and passed to the LLM on every incoming request.
+# View backend logs specifically
+docker-compose logs -f backend
+```
 
-## 5. Frontend / UI (Python/aiogram)
-- **The "Dumb Pipe" Pattern**: The Telegram frontend should possess *zero* business logic or LLM state. It is strictly a router that translates Telegram JSON into internal API payloads, and translates backend responses (with media URLs) back to Telegram methods.
-- **Translation Layers**: LLMs output standard Markdown. Platforms like Telegram require specific HTML subsets or strict MarkdownV2. The frontend must handle this translation layer (e.g., `md_to_tg.py`) robustly, escaping entities to prevent parse errors.
-- **Async Concurrency**: Use `aiohttp` and `asyncio` to prevent long-running LLM generation requests from blocking the webhook/polling thread. Use typing indicators to signal work.
+## 3. Architecture & Style Guidelines
 
-## 6. Utilizing Gemini "Thinking" Models
-With models like `gemini-2.0-pro-exp`, the model can produce a "Thinking" block to reason about code or complex logic before outputting the final response.
+### Go Backend Rules
+- **Dependency Map**: `main.go` -> `config` -> `i18n` -> `db` -> `cache` -> `llm` -> `tools` -> `handler` -> `middleware`.
+- **Fault Tolerance**: Tool panics MUST be recovered within the `tools.Executor` defer statement. Never panic the main HTTP handler.
+- **Dynamic System Prompting**: The persona and instructions must be built *per-request* based on the database state (`llm/instructions.go`). Do not use static prompts for the main chat loop.
+- **SQL Best Practices**: Use parameterized queries (`$1, $2`). Close your `*sql.Rows` (`defer rows.Close()`).
+- **No Hardcoded Strings**: All user-facing strings must pass through the `i18n.Bundle` (English and Ukrainian files in `config/locales/`).
 
-- **Configuration**: Use `ThinkingConfig` in the `GenerateContentConfig`.
-- **Budgeting**: Set a `ThinkingBudget` (e.g., 1024 tokens). If disabled (0), the model behaves normally.
-- **When to Use**: Enable for complex coding, system design, or multi-step logic. Keep it disabled for casual chat to reduce latency and cost.
+### Python Frontend Rules
+- **No Business Logic**: `main.py` is a router. It must not store state, parse command intents (except basic deep links), or query the database.
+- **Markdown Translation**: Always pass backend text through `md_to_tg.md_to_telegram_html` and use `ParseMode.HTML` before sending. Telegram will crash if Markdown formatting isn't perfectly paired.
+- **Async I/O**: Never block the main thread. Use `aiohttp` for backend communication and `asyncio.create_task` for long-running UI updates (like typing indicators).
+
+## 4. Working with the Gemini SDK
+We use the official `google.golang.org/genai` SDK.
+- **Routing**: Use `Temperature: 0.0` and `ResponseMIMEType: "application/json"` when doing strict tool classification.
+- **Thinking Models**: For complex tasks, ensure `ThinkingConfig{ThinkingBudget: ...}` is attached to the generation config if the user enables it via `GEMINI_THINKING_BUDGET`.
+- **Schema Descriptions**: Tool descriptions are critical. Write them comprehensively so the model clearly understands when and how to trigger the function call.
+
+## 5. Strict Boundaries (Do NOT do these)
+- **DO NOT** commit secrets or API keys. Check `.env.example` to ensure new secrets are documented empty.
+- **DO NOT** bypass the database migrations system. Every schema change requires a new pair of `.up.sql` and `.down.sql` files in the `migrations/` directory.
+- **DO NOT** modify the Go standard library imports to use third-party web frameworks (no Gin, Echo, Fiber). Keep `net/http` pure.
+- **DO NOT** push code that fails `go test`. Every feature requires unit tests.

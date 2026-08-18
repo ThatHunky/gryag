@@ -41,6 +41,7 @@ class GateInput:
     throttle_step: int = 20
     own_commands: tuple[str, ...] = ()
     sender_banned: bool = False
+    chat_muted: bool = False
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,8 @@ def foreign_command(text: str, own_commands: tuple[str, ...]) -> bool:
 def should_speak(g: GateInput) -> GateDecision:
     if not g.chat_enabled:
         return GateDecision(False, "chat_disabled")
+    if g.chat_muted:
+        return GateDecision(False, "chat_muted")
     if g.is_self:
         return GateDecision(False, "sender_is_self")
     if foreign_command(g.text, g.own_commands):

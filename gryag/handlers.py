@@ -271,6 +271,11 @@ async def handle_message(
             throttle_after=await config.get_int(db, "throttle_after", chat_id),
             throttle_step=await config.get_int(db, "throttle_step", chat_id),
             own_commands=OWN_COMMANDS,
+            chat_muted=bool(
+                await store.muted_until(
+                    db, chat_id, _utcnow().isoformat(timespec="seconds")
+                )
+            ),
             sender_banned=bool(
                 sender
                 and await store.ban_until(
@@ -362,7 +367,7 @@ async def handle_message(
             result = await llm.generate(
                 client,
                 model=model,
-                system=persona,
+                system=persona["text"] if isinstance(persona, dict) else persona,
                 user=prompt,
                 max_output_tokens=await config.get_int(db, "max_output_tokens", chat_id),
                 thinking_budget=await config.get_int(db, "thinking_budget", chat_id),

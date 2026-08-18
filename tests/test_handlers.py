@@ -384,3 +384,61 @@ async def test_a_whole_batch_arriving_at_once_produces_one_reply(db, monkeypatch
 
     assert calls == 1
     assert [r for r in results if r] == ["одна відповідь"]
+
+
+async def test_a_muted_chat_stays_silent_but_keeps_listening(db, monkeypatch):
+    await enable_chat(db)
+    from datetime import datetime, timedelta, timezone
+
+    await store.set_mute(
+        db, -100, (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(timespec="seconds")
+    )
+    quiet = FakeLlm()
+    monkeypatch.setattr(handlers.llm, "generate", quiet.generate)
+
+    reply = await handlers.handle_message(
+        FakeMessage(text="гряг агов"), db, client=None, persona="p", bot_id=77
+    )
+
+    assert reply is None
+    assert quiet.calls == []
+    rows = await store.recent_messages(db, -100, limit=5)
+    assert [r["text"] for r in rows] == ["гряг агов"]
+
+
+async def test_the_mute_expires(db, monkeypatch):
+    await enable_chat(db)
+    from datetime import datetime, timedelta, timezone
+
+    await store.set_mute(
+        db, -100, (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(timespec="seconds")
+    )
+    monkeypatch.setattr(handlers.llm, "generate", FakeLlm("знову тут").generate)
+
+    reply = await handlers.handle_message(
+        FakeMessage(text="гряг агов"), db, client=None, persona="p", bot_id=77
+    )
+
+    assert reply == "знову тут"
+
+
+async def test_the_persona_can_be_swapped_without_a_restart(db, monkeypatch):
+    await enable_chat(db)
+    seen = []
+
+    async def capture(client, **kwargs):
+        seen.append(kwargs["system"])
+        return llm.LlmResult("ага", 0, 100, 0, 5, 10, 100, 0.0001)
+
+    monkeypatch.setattr(handlers.llm, "generate", capture)
+    box = {"text": "перша версія"}
+
+    await handlers.handle_message(
+        FakeMessage(text="гряг раз", message_id=1), db, client=None, persona=box, bot_id=77
+    )
+    box["text"] = "друга версія"
+    await handlers.handle_message(
+        FakeMessage(text="гряг два", message_id=2), db, client=None, persona=box, bot_id=77
+    )
+
+    assert seen == ["перша версія", "друга версія"]

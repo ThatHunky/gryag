@@ -471,6 +471,28 @@ async def active_bans(
         return [tuple(r) for r in await cur.fetchall()]
 
 
+async def set_mute(db: aiosqlite.Connection, chat_id: int, until_ts: str | None) -> None:
+    await db.execute(
+        """
+        INSERT INTO chat_state (chat_id, muted_until) VALUES (?, ?)
+        ON CONFLICT (chat_id) DO UPDATE SET muted_until = excluded.muted_until
+        """,
+        (chat_id, until_ts),
+    )
+    await db.commit()
+
+
+async def muted_until(
+    db: aiosqlite.Connection, chat_id: int, now_ts: str
+) -> str | None:
+    async with db.execute(
+        "SELECT muted_until FROM chat_state WHERE chat_id = ? AND muted_until > ?",
+        (chat_id, now_ts),
+    ) as cur:
+        row = await cur.fetchone()
+    return row[0] if row else None
+
+
 async def record_usage(
     db: aiosqlite.Connection,
     *,

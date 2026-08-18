@@ -18,7 +18,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
-from gryag import admin, config, handlers, llm, store
+from gryag import admin, config, digest, handlers, llm, store
 
 WEBHOOK_PATH = "/webhook"
 PERSONA_PATH = Path(__file__).resolve().parent.parent / "eval" / "persona-v3.txt"
@@ -33,14 +33,27 @@ async def build(secrets: config.Secrets) -> tuple[Bot, Dispatcher]:
     """
     db = await store.connect(secrets.db_path)
     client = llm.build_client(secrets.gemini_api_key)
-    persona = PERSONA_PATH.read_text()
+
+    # The persona lives in a mutable box so the menu can swap it without a restart.
+    # Editing it and waiting for a deploy is how a voice never gets tuned.
+    persona = {"text": PERSONA_PATH.read_text()}
+
+    def reload_persona() -> int:
+        persona["text"] = PERSONA_PATH.read_text()
+        logging.info("persona reloaded, %s characters", len(persona["text"]))
+        return len(persona["text"]) // 3
+
+    async def rerun_digest(conn, chat_id: int) -> None:
+        await digest.run(conn, client, day=digest.yesterday())
 
     bot = Bot(secrets.bot_token, default=DefaultBotProperties(parse_mode=None))
     me = await bot.get_me()
     logging.info("running as @%s (id %s)", me.username, me.id)
 
     dispatcher = Dispatcher(db=db, client=client, persona=persona, bot_id=me.id)
-    dispatcher.include_router(admin.build_router(secrets.admin_ids))
+    dispatcher.include_router(
+        admin.build_router(secrets.admin_ids, on_reload=reload_persona, on_digest=rerun_digest)
+    )
     dispatcher.include_router(handlers.build_router())
     return bot, dispatcher
 

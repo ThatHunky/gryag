@@ -57,6 +57,11 @@ DEFAULTS: dict[str, str] = {
     # The admin edits the list with /nb in reply to somebody.
     "image_model": "gemini-3.1-flash-image",
     "image_whitelist": "392817811",
+    # Quiet hours, local time. They suppress ambient and proactive speech only — being
+    # addressed directly works around the clock, because ignoring somebody who writes to
+    # you at three in the morning is just broken.
+    "quiet_from": "2",
+    "quiet_to": "8",
 }
 
 

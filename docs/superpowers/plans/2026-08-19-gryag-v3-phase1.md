@@ -1681,7 +1681,9 @@ git commit -m "feat: native gemini client with usage capture and cost arithmetic
   - `def media_kind_and_file_id(message) -> tuple[str | None, str | None]`
   - `async def persist(db, message, *, is_bot: bool = False) -> None`
   - `async def handle_message(message, db, client, persona: str, bot_id: int) -> str | None` —
-    returns the reply text it sent, or `None` when it stayed silent
+    returns the reply text it sent, or `None` when it stayed silent. Answers with
+    `message.reply`, so every reply quotes what triggered it, and holds a `typing…`
+    action for the ~2 seconds generation takes
   - `def build_router() -> aiogram.Router`
 
 `handle_message` is written to take its dependencies as arguments so it can be tested
@@ -2024,7 +2026,7 @@ async def handle_message(
         cost_usd=result.cost_usd,
     )
 
-    sent = await message.answer(result.text)
+    sent = await message.reply(result.text)
     await persist(db, sent, is_bot=True)
     return result.text
 
@@ -2047,7 +2049,7 @@ Expected: PASS, 8 tests
 - [ ] **Step 5: Run the whole suite**
 
 Run: `.venv/bin/python -m pytest -v`
-Expected: PASS, 65 tests
+Expected: PASS, 66 tests
 
 - [ ] **Step 6: Commit**
 
@@ -2493,7 +2495,7 @@ git commit -m "feat: entrypoint, systemd unit and caddy config"
 
 ## Done when
 
-- `.venv/bin/python -m pytest` passes, 70 tests.
+- `.venv/bin/python -m pytest` passes, 71 tests.
 - The bot answers `гряг ...` in the enabled chat, in character, in one message.
 - It stays silent for everything else, and `journalctl` shows why.
 - `/gryag` switches the model, and the next reply's `usage` row records the new one.

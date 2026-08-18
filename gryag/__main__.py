@@ -1,9 +1,16 @@
-"""Entrypoint. Webhook mode behind Caddy."""
+"""Entrypoint.
+
+Two delivery modes. Webhook is the design's choice (spec §13), but it needs a DNS record
+for WEBHOOK_BASE that did not exist when phase 1 shipped, so polling is the default until
+that record is created. At ~35 replies a day the difference is not observable; the mode is
+one environment variable, and nothing else in the bot depends on it.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
@@ -17,54 +24,64 @@ WEBHOOK_PATH = "/webhook"
 PERSONA_PATH = Path(__file__).resolve().parent.parent / "eval" / "persona-v3.txt"
 
 
-async def build_app() -> web.Application:
+async def build(secrets: config.Secrets) -> tuple[Bot, Dispatcher]:
     """Everything is constructed inside the running loop.
 
-    The database connection, the aiohttp app and the bot session must all belong to the
-    same event loop. Building the app with `asyncio.run` and then handing it to
-    `web.run_app` would create them in a loop that is closed before the server starts.
+    The database connection, the bot session and the aiohttp app must all belong to the
+    same event loop, so none of this may happen at import time or in a separate
+    `asyncio.run`.
     """
-    secrets = config.secrets()
-    logging.basicConfig(level=logging.INFO)
-
     db = await store.connect(secrets.db_path)
     client = llm.build_client(secrets.gemini_api_key)
     persona = PERSONA_PATH.read_text()
 
     bot = Bot(secrets.bot_token, default=DefaultBotProperties(parse_mode=None))
     me = await bot.get_me()
+    logging.info("running as @%s (id %s)", me.username, me.id)
 
     dispatcher = Dispatcher(db=db, client=client, persona=persona, bot_id=me.id)
     dispatcher.include_router(admin.build_router(secrets.admin_ids))
     dispatcher.include_router(handlers.build_router())
+    return bot, dispatcher
 
+
+async def serve_webhook(secrets: config.Secrets) -> None:
+    bot, dispatcher = await build(secrets)
     await bot.set_webhook(
         f"{secrets.webhook_base}{WEBHOOK_PATH}",
         secret_token=secrets.webhook_secret,
         drop_pending_updates=True,
         allowed_updates=["message", "callback_query"],
     )
-
     app = web.Application()
     SimpleRequestHandler(
         dispatcher=dispatcher, bot=bot, secret_token=secrets.webhook_secret
     ).register(app, path=WEBHOOK_PATH)
     setup_application(app, dispatcher, bot=bot)
-    return app
 
-
-async def serve() -> None:
-    app = await build_app()
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, host="127.0.0.1", port=8081)
-    await site.start()
-    logging.info("listening on 127.0.0.1:8081")
+    await web.TCPSite(runner, host="127.0.0.1", port=8081).start()
+    logging.info("webhook mode, listening on 127.0.0.1:8081")
     await asyncio.Event().wait()
 
 
+async def serve_polling(secrets: config.Secrets) -> None:
+    bot, dispatcher = await build(secrets)
+    await bot.delete_webhook(drop_pending_updates=True)
+    logging.info("polling mode")
+    await dispatcher.start_polling(
+        bot, allowed_updates=["message", "callback_query"]
+    )
+
+
 def main() -> None:
-    asyncio.run(serve())
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    secrets = config.secrets()
+    mode = os.environ.get("MODE", "polling")
+    asyncio.run(serve_webhook(secrets) if mode == "webhook" else serve_polling(secrets))
 
 
 if __name__ == "__main__":

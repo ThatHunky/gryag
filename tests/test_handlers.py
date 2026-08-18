@@ -29,11 +29,15 @@ class FakeMessage:
         self.entities = entities or []
         self.photo = self.voice = self.video = None
         self.video_note = self.sticker = self.document = None
-        self.answers: list[str] = []
+        self.bot = None  # disables the typing indicator; see handlers._typing
+        self.replies: list[str] = []
 
-    async def answer(self, text):
-        self.answers.append(text)
-        return FakeMessage(text=text, message_id=self.message_id + 1000, is_bot=True)
+    async def reply(self, text):
+        """The bot always answers as a Telegram reply, quoting what triggered it."""
+        self.replies.append(text)
+        sent = FakeMessage(text=text, message_id=self.message_id + 1000, is_bot=True)
+        sent.reply_to_message = self
+        return sent
 
 
 class FakeLlm:
@@ -85,7 +89,7 @@ async def test_answers_when_a_keyword_is_used(db, monkeypatch):
     reply = await handlers.handle_message(message, db, client=None, persona="p", bot_id=77)
 
     assert reply == "та лінух то діагноз"
-    assert message.answers == ["та лінух то діагноз"]
+    assert message.replies == ["та лінух то діагноз"]
 
 
 async def test_stays_silent_in_a_chat_that_was_never_enabled(db, monkeypatch):
@@ -136,7 +140,7 @@ async def test_a_failed_generation_posts_nothing(db, monkeypatch):
     reply = await handlers.handle_message(message, db, client=None, persona="p", bot_id=77)
 
     assert reply is None
-    assert message.answers == []
+    assert message.replies == []
 
 
 async def test_the_daily_cap_silences_the_bot(db, monkeypatch):
@@ -159,3 +163,15 @@ async def test_media_kind_is_detected():
     kind, file_id = handlers.media_kind_and_file_id(message)
 
     assert (kind, file_id) == ("photo", "abc")
+
+
+async def test_the_reply_quotes_the_message_that_triggered_it(db, monkeypatch):
+    await enable_chat(db)
+    monkeypatch.setattr(handlers.llm, "generate", FakeLlm("ага").generate)
+    message = FakeMessage(text="гряг шо там", message_id=42)
+
+    await handlers.handle_message(message, db, client=None, persona="p", bot_id=77)
+
+    rows = await store.recent_messages(db, -100, limit=10)
+    bot_row = [r for r in rows if r["is_bot"]][0]
+    assert bot_row["reply_to"] == 42

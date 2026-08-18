@@ -8,11 +8,14 @@ would summarise an incomplete day.
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
 import aiosqlite
 from aiogram import F, Router
 from aiogram.types import Message
+from aiogram.utils.chat_action import ChatActionSender
 
 from gryag import config, context, gate, llm, store
 
@@ -62,6 +65,22 @@ async def _chat_enabled(db: aiosqlite.Connection, chat_id: int) -> bool:
     ) as cur:
         row = await cur.fetchone()
     return bool(row and row[0])
+
+
+@asynccontextmanager
+async def _typing(message) -> AsyncIterator[None]:
+    """Show "typing…" while the model works.
+
+    Generation takes about two seconds, which is long enough for the room to wonder
+    whether the bot is alive. Degrades to a no-op when the message carries no bot, which
+    is how the tests drive the handler.
+    """
+    bot = getattr(message, "bot", None)
+    if bot is None:
+        yield
+        return
+    async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
+        yield
 
 
 async def handle_message(
@@ -133,14 +152,15 @@ async def handle_message(
     )
 
     model = await config.get(db, "speak_model", chat_id)
-    result = await llm.generate(
-        client,
-        model=model,
-        system=persona,
-        user=prompt,
-        max_output_tokens=await config.get_int(db, "max_output_tokens", chat_id),
-        thinking_budget=await config.get_int(db, "thinking_budget", chat_id),
-    )
+    async with _typing(message):
+        result = await llm.generate(
+            client,
+            model=model,
+            system=persona,
+            user=prompt,
+            max_output_tokens=await config.get_int(db, "max_output_tokens", chat_id),
+            thinking_budget=await config.get_int(db, "thinking_budget", chat_id),
+        )
     if result is None:
         return None
 
@@ -157,7 +177,7 @@ async def handle_message(
         cost_usd=result.cost_usd,
     )
 
-    sent = await message.answer(result.text)
+    sent = await message.reply(result.text)
     await persist(db, sent, is_bot=True)
     return result.text
 

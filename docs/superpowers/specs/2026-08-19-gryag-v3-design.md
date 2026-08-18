@@ -404,7 +404,7 @@ reply in 16 was malformed (§4.4).
 
 The keyword list is a per-chat config row seeded with that default, so it can be changed
 from the menu without a deploy. It needs to be: in the export chat `чат матсурі`, "гряг" is
-also **a human being** (`user6560599034`, 117 messages), and there the bot would answer
+also **a human being** (a real person with 117 messages in the export), and there the bot would answer
 every mention of that person. Accepted deliberately — that chat is not a deployment target,
 and where it becomes one, the keyword gets edited.
 

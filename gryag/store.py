@@ -414,6 +414,20 @@ async def facts_for_users(
     return [(r[0] or "хтось", r[1]) for r in rows if r[3] <= per_user]
 
 
+async def forget_chat(db: aiosqlite.Connection, chat_id: int) -> dict[str, int]:
+    """Erase everything recorded about one chat.
+
+    Used to clean up chats that were recorded before the whitelist governed storage as
+    well as speech, and available for any chat the bot should never have been in.
+    """
+    removed: dict[str, int] = {}
+    for table in ("messages", "users", "facts", "summaries", "usage", "bans", "chat_state"):
+        cur = await db.execute(f"DELETE FROM {table} WHERE chat_id = ?", (chat_id,))
+        removed[table] = cur.rowcount
+    await db.commit()
+    return {k: v for k, v in removed.items() if v}
+
+
 async def enabled_chats(db: aiosqlite.Connection) -> list[int]:
     async with db.execute("SELECT chat_id FROM chats WHERE enabled = 1") as cur:
         return [r[0] for r in await cur.fetchall()]

@@ -211,3 +211,22 @@ async def test_an_edit_updates_the_stored_text(db):
 
 async def test_editing_a_message_we_never_saw_changes_nothing(db):
     assert await store.update_message_text(db, -100, 999, "щось") is False
+
+
+async def test_forgetting_a_chat_erases_every_trace(db):
+    await _seed_user(db)
+    await store.save_message(
+        db, chat_id=-100, message_id=1, user_id=1, ts="2026-08-19T10:00:00",
+        text="щось", media_kind=None, file_id=None, reply_to=None, is_bot=False,
+    )
+    await store.record_usage(
+        db, chat_id=-100, purpose="reply", model="m", prompt_tok=1, cached_tok=0,
+        visible_tok=1, thought_tok=0, latency_ms=1, cost_usd=0.0,
+    )
+
+    removed = await store.forget_chat(db, -100)
+
+    assert removed["messages"] == 1
+    assert await store.recent_messages(db, -100, limit=10) == []
+    async with db.execute("SELECT COUNT(*) FROM usage WHERE chat_id = -100") as cur:
+        assert (await cur.fetchone())[0] == 0

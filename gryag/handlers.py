@@ -241,6 +241,14 @@ async def handle_message(
     bot_id: int,
 ) -> str | None:
     chat_id = message.chat.id
+
+    # The whitelist governs storage, not just speech. Being added to a group is not
+    # consent to have it recorded: until somebody switches the chat on, nothing about it
+    # is written down. Inside an enabled chat the message is still stored before the gate
+    # runs, so history has no holes where the bot chose to stay quiet.
+    if not await _chat_enabled(db, chat_id):
+        log.debug("ignoring %s entirely: not on the whitelist", chat_id)
+        return None
     await persist(db, message)
 
     now = message.date
@@ -272,7 +280,7 @@ async def handle_message(
             text=text,
             is_bot=bool(sender and getattr(sender, "is_bot", False)),
             is_self=bool(sender and sender.id == bot_id),
-            chat_enabled=await _chat_enabled(db, chat_id),
+            chat_enabled=True,  # checked above, before anything was written down
             mentions_bot=any(
                 text[e.offset : e.offset + e.length].lstrip("@").lower().endswith("gryag_bot")
                 for e in (message.entities or [])

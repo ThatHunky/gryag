@@ -139,23 +139,29 @@ async def _menu_markup(db: aiosqlite.Connection, chat_id: int, section: str) -> 
         for name, (label, _s) in menu.SECTIONS.items()
     ])
     enabled = await chat_is_enabled(db, chat_id)
+    muted = await store.muted_until(db, chat_id, _now())
+
     rows.append([
         InlineKeyboardButton(
-            text="чат: увімкнено" if enabled else "чат: вимкнено",
+            text=("✅ чат увімкнено" if enabled else "❌ чат вимкнено"),
             callback_data="chat:toggle",
-        ),
-        InlineKeyboardButton(text="витрати", callback_data="panel"),
+        )
     ])
+    # Four buttons per row is the practical maximum before Telegram starts truncating,
+    # which is why these read "1 год" rather than "замовкни на 1 годину".
     rows.append(
         [
-            InlineKeyboardButton(text=f"замовкни {c.label}", callback_data=f"mute:{c.value}")
+            InlineKeyboardButton(
+                text=("🔇 " if muted else "") + c.label, callback_data=f"mute:{c.value}"
+            )
             for c in menu.MUTE_CHOICES
         ]
-        + [InlineKeyboardButton(text="говори", callback_data="mute:0")]
+        + [InlineKeyboardButton(text="🔊", callback_data="mute:0")]
     )
     rows.append([
-        InlineKeyboardButton(text="перечитати персону", callback_data="reload"),
-        InlineKeyboardButton(text="перегенерувати самарі", callback_data="digest"),
+        InlineKeyboardButton(text="💰 витрати", callback_data="panel"),
+        InlineKeyboardButton(text="↻ персона", callback_data="reload"),
+        InlineKeyboardButton(text="↻ самарі", callback_data="digest"),
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -177,13 +183,17 @@ def build_router(admin_ids: tuple[int, ...], on_reload=None, on_digest=None) -> 
     router.callback_query.filter(F.from_user.id.in_(admin_ids))
 
     async def show(target, db, section: str, edit: bool) -> None:
-        text = f"Розділ: {menu.SECTIONS[section][0]}"
-        muted = await store.muted_until(db, target.chat.id, _now())
+        chat_id = target.chat.id
+        lines = [f"⚙️ {menu.SECTIONS[section][0]}"]
+        if not await chat_is_enabled(db, chat_id):
+            lines.append("Цей чат вимкнений — бот тут мовчить.")
+        muted = await store.muted_until(db, chat_id, _now())
         if muted:
-            text += f"\nМовчить до {muted[11:16]} UTC"
+            lines.append(f"Мовчить до {muted[11:16]} UTC")
         warning = await drift_warning(db)
         if warning:
-            text += f"\n{warning}"
+            lines.append(warning)
+        text = "\n".join(lines)
         markup = await _menu_markup(db, target.chat.id, section)
         if not edit:
             await target.answer(text, reply_markup=markup)

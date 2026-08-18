@@ -442,3 +442,31 @@ async def test_the_persona_can_be_swapped_without_a_restart(db, monkeypatch):
     )
 
     assert seen == ["перша версія", "друга версія"]
+
+
+async def test_nothing_is_recorded_about_a_chat_nobody_switched_on(db, monkeypatch):
+    """Being added to a group is not consent to record it. The whitelist governs storage,
+    not only speech."""
+    quiet = FakeLlm()
+    monkeypatch.setattr(handlers.llm, "generate", quiet.generate)
+
+    reply = await handlers.handle_message(
+        FakeMessage(text="гряг привіт", chat_id=-777), db,
+        client=None, persona="p", bot_id=77,
+    )
+
+    assert reply is None
+    assert quiet.calls == []
+    assert await store.recent_messages(db, -777, limit=10) == []
+
+
+async def test_an_enabled_chat_is_still_recorded_even_when_the_bot_says_nothing(db, monkeypatch):
+    await enable_chat(db)
+    monkeypatch.setattr(handlers.llm, "generate", FakeLlm().generate)
+
+    await handlers.handle_message(
+        FakeMessage(text="балачки без звертання"), db, client=None, persona="p", bot_id=77
+    )
+
+    rows = await store.recent_messages(db, -100, limit=10)
+    assert [r["text"] for r in rows] == ["балачки без звертання"]

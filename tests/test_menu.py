@@ -32,3 +32,17 @@ def test_labels_fall_back_to_the_raw_value():
 
     assert setting.label_for("gemini-2.5-flash") == "2.5 flash"
     assert setting.label_for("gemini-9") == "gemini-9"
+
+
+def test_button_labels_stay_short_enough_not_to_be_truncated():
+    """Telegram ellipsises anything much past eight characters when several buttons share
+    a row, which is how "замовкни 1 год" became "замовкни …" three times over."""
+    for choice in menu.MUTE_CHOICES:
+        assert len(choice.label) <= 8, choice.label
+
+
+def test_setting_titles_and_values_fit_on_one_button():
+    for _title, settings in menu.SECTIONS.values():
+        for setting in settings:
+            for choice in setting.choices:
+                assert len(f"{setting.title}: {choice.label}") <= 34

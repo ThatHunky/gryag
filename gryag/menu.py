@@ -99,6 +99,8 @@ SECTIONS: dict[str, tuple[str, tuple[Setting, ...]]] = {
 }
 
 MUTE_CHOICES = _numbers(1, 3, 8, suffix=" год")
+"""Labels stay short on purpose: four buttons in a row, and Telegram truncates anything
+longer than roughly eight characters into an ellipsis."""
 
 
 def cycle(setting: Setting, current: str) -> str:

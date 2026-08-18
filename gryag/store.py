@@ -493,6 +493,57 @@ async def muted_until(
     return row[0] if row else None
 
 
+async def last_message_ts(
+    db: aiosqlite.Connection, chat_id: int, *, from_bot: bool | None = None
+) -> str | None:
+    clause = "" if from_bot is None else f" AND is_bot = {int(from_bot)}"
+    async with db.execute(
+        f"SELECT MAX(ts) FROM messages WHERE chat_id = ?{clause}", (chat_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    return row[0]
+
+
+async def ambient_candidates_per_day(db: aiosqlite.Connection, chat_id: int) -> int:
+    """How many messages a day would even be worth interrupting over.
+
+    The interjection probability is derived from this rather than pinned to a constant,
+    so a quiet chat is not left silent and a loud one is not swamped. Spec §16 left this
+    open precisely because it cannot be guessed in advance.
+    """
+    async with db.execute(
+        """
+        SELECT COUNT(*) FROM messages
+        WHERE chat_id = ? AND is_bot = 0 AND sender_is_bot = 0
+          AND ts >= datetime('now', '-1 day')
+          AND LENGTH(COALESCE(text, '')) >= 30
+          AND reply_to IS NULL
+        """,
+        (chat_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    return int(row[0])
+
+
+async def last_proactive_ts(db: aiosqlite.Connection, chat_id: int) -> str | None:
+    async with db.execute(
+        "SELECT last_ambient_ts FROM chat_state WHERE chat_id = ?", (chat_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    return row[0] if row else None
+
+
+async def mark_proactive(db: aiosqlite.Connection, chat_id: int, ts: str) -> None:
+    await db.execute(
+        """
+        INSERT INTO chat_state (chat_id, last_ambient_ts) VALUES (?, ?)
+        ON CONFLICT (chat_id) DO UPDATE SET last_ambient_ts = excluded.last_ambient_ts
+        """,
+        (chat_id, ts),
+    )
+    await db.commit()
+
+
 async def record_usage(
     db: aiosqlite.Connection,
     *,

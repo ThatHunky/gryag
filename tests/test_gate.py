@@ -240,3 +240,143 @@ def test_a_slash_in_the_middle_is_not_a_command():
     from gryag.gate import foreign_command
 
     assert foreign_command("це 50/50", ("gryag",)) is False
+
+
+# ── ambient interjection ────────────────────────────────────────────────────────
+
+def ambient(**overrides):
+    base = dict(
+        text="досить довге повідомлення про щось конкретне і цікаве",
+        ambient_enabled=True,
+        ambient_roll=0.0,
+        ambient_probability=0.01,
+        seconds_since_bot_spoke=9999,
+        local_hour=14,
+    )
+    base.update(overrides)
+    return make(**base)
+
+
+def test_ambient_fires_when_the_dice_land():
+    decision = should_speak(ambient())
+
+    assert decision.speak is True
+    assert decision.reason == "ambient"
+
+
+def test_ambient_stays_off_until_it_is_enabled():
+    assert should_speak(ambient(ambient_enabled=False)).reason == "not_addressed"
+
+
+def test_ambient_respects_the_dice():
+    assert should_speak(ambient(ambient_roll=0.9)).speak is False
+
+
+def test_ambient_is_silent_during_quiet_hours():
+    decision = should_speak(ambient(local_hour=4))
+
+    assert decision.reason == "quiet_hours"
+
+
+def test_ambient_waits_out_its_cooldown():
+    decision = should_speak(ambient(seconds_since_bot_spoke=60))
+
+    assert decision.reason == "ambient_cooldown"
+
+
+def test_ambient_skips_short_messages():
+    """Median message here is 19 characters; rolling on those spends interjections on 'ага'."""
+    assert should_speak(ambient(text="ага")).reason == "not_worth_it"
+
+
+def test_ambient_skips_media_with_no_words():
+    assert should_speak(ambient(text="", media_only=True)).reason == "not_worth_it"
+
+
+def test_ambient_does_not_butt_into_a_two_person_exchange():
+    assert should_speak(ambient(is_reply_to_other=True)).reason == "not_worth_it"
+
+
+def test_being_addressed_still_wins_over_every_ambient_rule():
+    decision = should_speak(ambient(mentions_bot=True, local_hour=4, text="ага"))
+
+    assert decision.speak is True
+    assert decision.reason == "mention"
+
+
+def test_quiet_hours_wrap_around_midnight():
+    from gryag.gate import in_quiet_hours
+
+    assert in_quiet_hours(23, 22, 6) is True
+    assert in_quiet_hours(3, 22, 6) is True
+    assert in_quiet_hours(12, 22, 6) is False
+    assert in_quiet_hours(4, 2, 8) is True
+    assert in_quiet_hours(9, 2, 8) is False
+
+
+def test_quiet_hours_can_be_switched_off_by_equal_bounds():
+    from gryag.gate import in_quiet_hours
+
+    assert in_quiet_hours(3, 0, 0) is False
+
+
+# ── proactive ───────────────────────────────────────────────────────────────────
+
+def proactive(**overrides):
+    from gryag.gate import ProactiveInput
+
+    base = dict(
+        chat_enabled=True,
+        chat_muted=False,
+        local_hour=10,
+        quiet_from=2,
+        quiet_to=8,
+        silent_seconds=4 * 3600,
+        silence_needed=3 * 3600,
+        seconds_since_proactive=99999,
+        proactive_cooldown=6 * 3600,
+        has_context=True,
+    )
+    base.update(overrides)
+    return ProactiveInput(**base)
+
+
+def test_speaks_into_a_long_silence():
+    from gryag.gate import should_start_talking
+
+    decision = should_start_talking(proactive())
+
+    assert decision.speak is True
+    assert decision.reason == "proactive"
+
+
+def test_does_not_speak_into_a_short_pause():
+    from gryag.gate import should_start_talking
+
+    assert should_start_talking(proactive(silent_seconds=600)).reason == "not_silent_enough"
+
+
+def test_does_not_wake_the_chat_at_night():
+    from gryag.gate import should_start_talking
+
+    assert should_start_talking(proactive(local_hour=4)).reason == "quiet_hours"
+
+
+def test_does_not_speak_twice_in_a_row():
+    from gryag.gate import should_start_talking
+
+    decision = should_start_talking(proactive(seconds_since_proactive=600))
+
+    assert decision.reason == "proactive_cooldown"
+
+
+def test_says_nothing_into_an_empty_chat():
+    from gryag.gate import should_start_talking
+
+    assert should_start_talking(proactive(has_context=False)).reason == "nothing_to_talk_about"
+
+
+def test_a_muted_chat_is_left_alone():
+    from gryag.gate import should_start_talking
+
+    assert should_start_talking(proactive(chat_muted=True)).reason == "chat_muted"

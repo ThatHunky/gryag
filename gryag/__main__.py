@@ -18,7 +18,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
-from gryag import admin, config, digest, handlers, llm, store
+from gryag import admin, config, digest, handlers, llm, proactive, store
 
 WEBHOOK_PATH = "/webhook"
 PERSONA_PATH = Path(__file__).resolve().parent.parent / "eval" / "persona-v3.txt"
@@ -60,6 +60,8 @@ async def build(secrets: config.Secrets) -> tuple[Bot, Dispatcher]:
 
 async def serve_webhook(secrets: config.Secrets) -> None:
     bot, dispatcher = await build(secrets)
+    asyncio.create_task(proactive.loop(db, client, bot, persona))
+
     await bot.set_webhook(
         f"{secrets.webhook_base}{WEBHOOK_PATH}",
         secret_token=secrets.webhook_secret,
@@ -86,6 +88,7 @@ async def serve_polling(secrets: config.Secrets) -> None:
     # the chat went missing across six restarts. The backlog is replayed and stored;
     # `max_reply_age` in the gate is what stops the bot answering stale messages.
     await bot.delete_webhook(drop_pending_updates=False)
+    asyncio.create_task(proactive.loop(db, client, bot, persona))
     logging.info("polling mode")
     await dispatcher.start_polling(
         bot, allowed_updates=["message", "edited_message", "callback_query"]

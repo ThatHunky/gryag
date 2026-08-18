@@ -73,9 +73,27 @@ SECTIONS: dict[str, tuple[str, tuple[Setting, ...]]] = {
             Setting("context_messages", "Контекст", _numbers(30, 60, 100, suffix=" повід.")),
             Setting("throttle_after", "Безкоштовних відповідей", _numbers(3, 6, 12)),
             Setting("throttle_step", "Крок паузи", _numbers(10, 15, 30, suffix=" с")),
-            Setting("hourly_reply_cap", "Стеля за годину", _numbers(30, 120, 300)),
+            Setting("hourly_reply_cap", "Стеля за годину", _numbers(120, 300, 600)),
             Setting("quiet_from", "Тиша з", _numbers(0, 2, 4, suffix=":00")),
             Setting("quiet_to", "Тиша до", _numbers(6, 8, 10, suffix=":00")),
+        ),
+    ),
+    "ambient": (
+        "Сам",
+        (
+            Setting(
+                "ambient_enabled",
+                "Втручається",
+                (Choice("ні", "0"), Choice("так", "1")),
+            ),
+            Setting("ambient_per_day", "Скільки разів на добу", _numbers(3, 10, 25)),
+            Setting("ambient_cooldown", "Пауза між", _numbers(600, 1200, 3600, suffix=" с")),
+            Setting(
+                "proactive_enabled",
+                "Заговорює в тишу",
+                (Choice("ні", "0"), Choice("так", "1")),
+            ),
+            Setting("proactive_silence", "Після тиші", _numbers(3600, 10800, 21600, suffix=" с")),
         ),
     ),
 }

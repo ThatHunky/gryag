@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -26,8 +27,36 @@ OWN_COMMANDS = ("gryag", "nb", "unban")
 """Everything else starting with a slash belongs to another bot; see gate.foreign_command."""
 
 
+LOCAL_TZ = timezone(timedelta(hours=3))
+"""Kyiv. The measured quiet window — 03:00-07:00 carrying 0-11 messages an hour against a
+peak of 958 at 22:00 — is in the chat's local time, not UTC."""
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _local_hour() -> int:
+    return _utcnow().astimezone(LOCAL_TZ).hour
+
+
+async def _since(ts: str | None) -> float:
+    if not ts:
+        return 1e9
+    parsed = datetime.fromisoformat(ts)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max((_utcnow() - parsed).total_seconds(), 0.0)
+
+
+async def _ambient_probability(db, chat_id: int) -> float:
+    """Chance per candidate message, derived from how many candidates a day this chat
+    actually produces. Pinning a constant would swamp a quiet chat and vanish in a loud one."""
+    wanted = await config.get_int(db, "ambient_per_day", chat_id)
+    candidates = await store.ambient_candidates_per_day(db, chat_id)
+    if candidates <= 0:
+        return 0.0
+    return min(wanted / candidates, 1.0)
 
 
 _busy: set[int] = set()
@@ -271,6 +300,20 @@ async def handle_message(
             throttle_after=await config.get_int(db, "throttle_after", chat_id),
             throttle_step=await config.get_int(db, "throttle_step", chat_id),
             own_commands=OWN_COMMANDS,
+            ambient_enabled=await config.get(db, "ambient_enabled", chat_id) == "1",
+            ambient_roll=random.random(),
+            ambient_probability=await _ambient_probability(db, chat_id),
+            seconds_since_bot_spoke=await _since(
+                await store.last_message_ts(db, chat_id, from_bot=True)
+            ),
+            ambient_cooldown=await config.get_int(db, "ambient_cooldown", chat_id),
+            is_reply_to_other=bool(
+                replied and replied.from_user and replied.from_user.id != bot_id
+            ),
+            media_only=not text.strip() and bool(media_kind_and_file_id(message)[0]),
+            local_hour=_local_hour(),
+            quiet_from=await config.get_int(db, "quiet_from", chat_id),
+            quiet_to=await config.get_int(db, "quiet_to", chat_id),
             chat_muted=bool(
                 await store.muted_until(
                     db, chat_id, _utcnow().isoformat(timespec="seconds")

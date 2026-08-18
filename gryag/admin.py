@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
@@ -184,10 +185,16 @@ def build_router(admin_ids: tuple[int, ...], on_reload=None, on_digest=None) -> 
         if warning:
             text += f"\n{warning}"
         markup = await _menu_markup(db, target.chat.id, section)
-        if edit:
-            await target.edit_text(text, reply_markup=markup)
-        else:
+        if not edit:
             await target.answer(text, reply_markup=markup)
+            return
+        try:
+            await target.edit_text(text, reply_markup=markup)
+        except TelegramBadRequest as exc:
+            # Tapping the section you are already in produces identical content, and
+            # Telegram treats an edit that changes nothing as an error.
+            if "message is not modified" not in str(exc):
+                raise
 
     @router.message(Command("gryag"))
     async def open_menu(message: Message, db) -> None:

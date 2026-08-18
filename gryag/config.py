@@ -32,10 +32,13 @@ DEFAULTS: dict[str, str] = {
     # fires hundreds a minute, while people poking a new bot in a chat that runs at
     # 3,000 messages a day comfortably pass twenty in an hour. The first values here
     # were 60/10 and the hourly one silenced the bot within the first evening; 30/hour
-    # was still being approached within an hour of raising it. A runaway gate fires
-    # hundreds a minute, so these stay a real backstop while never binding real use.
-    "daily_reply_cap": "800",
-    "hourly_reply_cap": "120",
+    # was still being approached within an hour of raising it, and 120 was hit outright
+    # on the first evening people spent playing with it. A runaway gate fires hundreds a
+    # MINUTE — these are sized against that, not against enthusiasm. The per-person
+    # throttle is what paces normal use; this is only the wall behind it.
+    # At roughly $0.0014 a reply, 300/hour is about $0.42 in the worst hour.
+    "daily_reply_cap": "1500",
+    "hourly_reply_cap": "300",
     # How many bot messages may pile up before gryag stops answering other bots.
     # Any human line resets the count, so this only ever bites a bot-to-bot loop.
     "bot_exchange_limit": "3",
@@ -62,6 +65,15 @@ DEFAULTS: dict[str, str] = {
     # you at three in the morning is just broken.
     "quiet_from": "2",
     "quiet_to": "8",
+    # Ambient interjection: speaking without being spoken to.
+    "ambient_enabled": "0",
+    "ambient_per_day": "10",
+    "ambient_cooldown": "1200",
+    # Proactive: speaking into a silence. Measured, this fires almost only in the
+    # morning — two days of this chat held just 18 gaps longer than fifteen minutes.
+    "proactive_enabled": "0",
+    "proactive_silence": "10800",
+    "proactive_cooldown": "21600",
 }
 
 

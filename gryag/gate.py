@@ -42,6 +42,17 @@ class GateInput:
     own_commands: tuple[str, ...] = ()
     sender_banned: bool = False
     chat_muted: bool = False
+    # ambient interjection
+    ambient_enabled: bool = False
+    ambient_roll: float = 1.0
+    ambient_probability: float = 0.0
+    seconds_since_bot_spoke: float = 1e9
+    ambient_cooldown: int = 1200
+    is_reply_to_other: bool = False
+    media_only: bool = False
+    local_hour: int = 12
+    quiet_from: int = 2
+    quiet_to: int = 8
 
 
 @dataclass(frozen=True)
@@ -85,6 +96,32 @@ def foreign_command(text: str, own_commands: tuple[str, ...]) -> bool:
         return False
     word = text[1:].split()[0] if len(text) > 1 else ""
     return word.split("@")[0].lower() not in own_commands
+
+
+def in_quiet_hours(hour: int, quiet_from: int, quiet_to: int) -> bool:
+    """Quiet hours wrap midnight, so 22->6 is a range, not an empty set."""
+    if quiet_from == quiet_to:
+        return False
+    if quiet_from < quiet_to:
+        return quiet_from <= hour < quiet_to
+    return hour >= quiet_from or hour < quiet_to
+
+
+def is_ambient_candidate(g: GateInput) -> bool:
+    """Whether a message is worth interrupting over, decided without a model call.
+
+    Measured on the real chat: the median message is 19 characters, 17% carry no text at
+    all, and 39% are replies. Rolling dice on every message would spend most interjections
+    on "ага" and a sticker, which is precisely what makes a bot look stupid.
+    """
+    if g.media_only:
+        return False
+    if len(g.text.strip()) < 30:
+        return False
+    if g.is_reply_to_other:
+        # Two people mid-exchange are having a conversation, not leaving a gap.
+        return False
+    return True
 
 
 def should_speak(g: GateInput) -> GateDecision:
@@ -138,4 +175,49 @@ def should_speak(g: GateInput) -> GateDecision:
     if mentions_keyword(g.text, g.keywords):
         return GateDecision(True, "keyword")
 
-    return GateDecision(False, "not_addressed")
+    if not g.ambient_enabled:
+        return GateDecision(False, "not_addressed")
+    if in_quiet_hours(g.local_hour, g.quiet_from, g.quiet_to):
+        return GateDecision(False, "quiet_hours")
+    if g.seconds_since_bot_spoke < g.ambient_cooldown:
+        return GateDecision(False, "ambient_cooldown")
+    if not is_ambient_candidate(g):
+        return GateDecision(False, "not_worth_it")
+    if g.ambient_roll >= g.ambient_probability:
+        return GateDecision(False, "not_addressed")
+    return GateDecision(True, "ambient")
+
+
+@dataclass(frozen=True)
+class ProactiveInput:
+    chat_enabled: bool
+    chat_muted: bool
+    local_hour: int
+    quiet_from: int
+    quiet_to: int
+    silent_seconds: float
+    silence_needed: int
+    seconds_since_proactive: float
+    proactive_cooldown: int
+    has_context: bool
+
+
+def should_start_talking(p: ProactiveInput) -> GateDecision:
+    """Whether to say something into a silent chat.
+
+    Measured, this fires almost only in the morning: two days of the real chat held just
+    18 gaps longer than fifteen minutes, against a median gap of six seconds.
+    """
+    if not p.chat_enabled:
+        return GateDecision(False, "chat_disabled")
+    if p.chat_muted:
+        return GateDecision(False, "chat_muted")
+    if not p.has_context:
+        return GateDecision(False, "nothing_to_talk_about")
+    if in_quiet_hours(p.local_hour, p.quiet_from, p.quiet_to):
+        return GateDecision(False, "quiet_hours")
+    if p.silent_seconds < p.silence_needed:
+        return GateDecision(False, "not_silent_enough")
+    if p.seconds_since_proactive < p.proactive_cooldown:
+        return GateDecision(False, "proactive_cooldown")
+    return GateDecision(True, "proactive")

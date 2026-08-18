@@ -14,21 +14,31 @@ class FakeUsage:
 
 
 class FakeCandidate:
-    def __init__(self, queries=()):
+    def __init__(self, queries=(), calls=()):
         self.grounding_metadata = (
             pytypes.SimpleNamespace(web_search_queries=list(queries)) if queries else None
+        )
+        self.content = pytypes.SimpleNamespace(
+            parts=[pytypes.SimpleNamespace(function_call=c) for c in calls]
         )
 
 
 class FakeResponse:
-    def __init__(self, text="ага", usage=None, queries=()):
+    def __init__(self, text="ага", usage=None, queries=(), calls=()):
         self.text = text
         self.usage_metadata = usage or FakeUsage()
-        self.candidates = [FakeCandidate(queries)]
+        self.candidates = [FakeCandidate(queries, calls)]
+
+
+class FakeCall:
+    def __init__(self, name, args):
+        self.name = name
+        self.args = args
 
 
 class FakeClient:
-    def __init__(self, response=None, error=None):
+    def __init__(self, response=None, error=None, responses=None):
+        self._responses = list(responses) if responses else None
         self._response = response
         self._error = error
         self.calls: list[dict] = []
@@ -38,6 +48,8 @@ class FakeClient:
         self.calls.append({"model": model, "contents": contents, "config": config})
         if self._error is not None:
             raise self._error
+        if self._responses:
+            return self._responses.pop(0)
         return self._response
 
 
@@ -227,7 +239,58 @@ async def test_media_is_sent_before_the_prompt():
         media=(b"gifbytes", "video/mp4"),
     )
 
-    contents = client.calls[0]["contents"]
-    assert isinstance(contents, list)
-    assert contents[0].inline_data.mime_type == "video/mp4"
-    assert contents[1] == "гряг як тобі"
+    parts = client.calls[0]["contents"][0].parts
+    assert parts[0].inline_data.mime_type == "video/mp4"
+    assert parts[1].text == "гряг як тобі"
+
+
+async def test_a_tool_call_is_executed_and_the_model_then_speaks():
+    """The model asking to ban somebody returns no text of its own, so the result is fed
+    back and it gets a second turn to say something."""
+    client = FakeClient(responses=[
+        FakeResponse("", calls=[FakeCall("ban_user", {"minutes": 60, "reason": "спам"})]),
+        FakeResponse("іди проспись, годину тебе не чую"),
+    ])
+    handled = []
+
+    async def handler(name, args):
+        handled.append((name, args))
+        return "ok"
+
+    result = await llm.generate(
+        client, model="gemini-flash-latest", system="p", user="здохни",
+        max_output_tokens=1500, thinking_budget=0, tool_handler=handler,
+    )
+
+    assert handled == [("ban_user", {"minutes": 60, "reason": "спам"})]
+    assert result.text == "іди проспись, годину тебе не чую"
+
+
+async def test_usage_from_both_turns_is_summed():
+    client = FakeClient(responses=[
+        FakeResponse("", usage=FakeUsage(prompt=1000, visible=5),
+                     calls=[FakeCall("ban_user", {"minutes": 60})]),
+        FakeResponse("сказав", usage=FakeUsage(prompt=1200, visible=15)),
+    ])
+
+    async def handler(name, args):
+        return "ok"
+
+    result = await llm.generate(
+        client, model="gemini-flash-latest", system="p", user="x",
+        max_output_tokens=1500, thinking_budget=0, tool_handler=handler,
+    )
+
+    assert result.prompt_tokens == 2200
+    assert result.visible_tokens == 20
+
+
+async def test_without_a_handler_a_tool_call_is_left_alone():
+    client = FakeClient(FakeResponse("текст", calls=[FakeCall("ban_user", {"minutes": 1})]))
+
+    result = await llm.generate(
+        client, model="gemini-flash-latest", system="p", user="x",
+        max_output_tokens=1500, thinking_budget=0,
+    )
+
+    assert result.text == "текст"

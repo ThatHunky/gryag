@@ -84,6 +84,14 @@ CREATE TABLE IF NOT EXISTS usage (
     searched    INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS bans (
+    chat_id  INTEGER NOT NULL,
+    user_id  INTEGER NOT NULL,
+    until_ts TEXT NOT NULL,
+    reason   TEXT,
+    PRIMARY KEY (chat_id, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS chat_state (
     chat_id         INTEGER PRIMARY KEY,
     last_spoke_ts   TEXT,
@@ -409,6 +417,58 @@ async def facts_for_users(
 async def enabled_chats(db: aiosqlite.Connection) -> list[int]:
     async with db.execute("SELECT chat_id FROM chats WHERE enabled = 1") as cur:
         return [r[0] for r in await cur.fetchall()]
+
+
+async def ban_user(
+    db: aiosqlite.Connection, chat_id: int, user_id: int, until_ts: str, reason: str
+) -> None:
+    await db.execute(
+        """
+        INSERT INTO bans (chat_id, user_id, until_ts, reason) VALUES (?, ?, ?, ?)
+        ON CONFLICT (chat_id, user_id) DO UPDATE SET
+            until_ts = excluded.until_ts, reason = excluded.reason
+        """,
+        (chat_id, user_id, until_ts, reason),
+    )
+    await db.commit()
+
+
+async def unban_user(db: aiosqlite.Connection, chat_id: int, user_id: int) -> bool:
+    cur = await db.execute(
+        "DELETE FROM bans WHERE chat_id = ? AND user_id = ?", (chat_id, user_id)
+    )
+    await db.commit()
+    return cur.rowcount > 0
+
+
+async def ban_until(
+    db: aiosqlite.Connection, chat_id: int, user_id: int, now_ts: str
+) -> str | None:
+    """When this person's ban expires, or None if they are free.
+
+    A ban only stops gryag answering. Their messages are stored and stay in the context
+    window exactly as before — being ignored is not the same as being erased.
+    """
+    async with db.execute(
+        "SELECT until_ts FROM bans WHERE chat_id = ? AND user_id = ? AND until_ts > ?",
+        (chat_id, user_id, now_ts),
+    ) as cur:
+        row = await cur.fetchone()
+    return row[0] if row else None
+
+
+async def active_bans(
+    db: aiosqlite.Connection, chat_id: int, now_ts: str
+) -> list[tuple[str, str, str]]:
+    async with db.execute(
+        """
+        SELECT COALESCE(u.alias, CAST(b.user_id AS TEXT)), b.until_ts, COALESCE(b.reason, '')
+        FROM bans b LEFT JOIN users u ON u.chat_id = b.chat_id AND u.user_id = b.user_id
+        WHERE b.chat_id = ? AND b.until_ts > ? ORDER BY b.until_ts
+        """,
+        (chat_id, now_ts),
+    ) as cur:
+        return [tuple(r) for r in await cur.fetchall()]
 
 
 async def record_usage(

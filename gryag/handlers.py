@@ -22,7 +22,7 @@ from gryag import config, context, gate, images, llm, media, store
 
 log = logging.getLogger(__name__)
 
-OWN_COMMANDS = ("gryag", "nb")
+OWN_COMMANDS = ("gryag", "nb", "unban")
 """Everything else starting with a slash belongs to another bot; see gate.foreign_command."""
 
 
@@ -86,6 +86,28 @@ async def _chat_enabled(db: aiosqlite.Connection, chat_id: int) -> bool:
     ) as cur:
         row = await cur.fetchone()
     return bool(row and row[0])
+
+
+def _ban_handler(db, chat_id: int, sender):
+    """Let the bot ignore somebody for a while, capped at two days.
+
+    The length is the model's call; the ceiling is not. A ban only stops replies — the
+    person's messages keep being stored and keep appearing in the context window.
+    """
+
+    async def handle(name: str, args: dict) -> str:
+        if name != "ban_user" or sender is None:
+            return "не вийшло"
+        minutes = max(1, min(int(args.get("minutes") or 60), llm.MAX_BAN_MINUTES))
+        reason = str(args.get("reason") or "")
+        until = _utcnow() + timedelta(minutes=minutes)
+        await store.ban_user(
+            db, chat_id, sender.id, until.isoformat(timespec="seconds"), reason
+        )
+        log.info("banned %s in %s for %s minutes: %s", sender.id, chat_id, minutes, reason)
+        return f"заблоковано на {minutes} хв"
+
+    return handle
 
 
 async def _maybe_draw(message, db, client, text: str, payload) -> str | None:
@@ -238,6 +260,12 @@ async def handle_message(
             throttle_after=await config.get_int(db, "throttle_after", chat_id),
             throttle_step=await config.get_int(db, "throttle_step", chat_id),
             own_commands=OWN_COMMANDS,
+            sender_banned=bool(
+                sender
+                and await store.ban_until(
+                    db, chat_id, sender.id, _utcnow().isoformat(timespec="seconds")
+                )
+            ),
         )
     )
     if not decision.speak:
@@ -252,6 +280,8 @@ async def handle_message(
                 replies_today,
                 replies_this_hour,
             )
+        elif decision.reason == "user_banned":
+            log.info("ignoring %s in %s: banned", sender.id if sender else "?", chat_id)
         elif decision.reason == "throttled":
             log.info(
                 "throttling %s in %s: %s replies in the window, %.0fs since the last",
@@ -320,6 +350,7 @@ async def handle_message(
             thinking_budget=await config.get_int(db, "thinking_budget", chat_id),
             media=payload,
             use_tools=await config.get(db, "tools_enabled", chat_id) == "1",
+            tool_handler=_ban_handler(db, chat_id, sender),
         )
     if result is None:
         return None

@@ -40,6 +40,7 @@ class GateInput:
     throttle_after: int = 3
     throttle_step: int = 20
     own_commands: tuple[str, ...] = ()
+    sender_banned: bool = False
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,10 @@ def should_speak(g: GateInput) -> GateDecision:
         return GateDecision(False, "sender_is_self")
     if foreign_command(g.text, g.own_commands):
         return GateDecision(False, "foreign_command")
+    if g.sender_banned:
+        # Ignored, not erased: their messages are still stored and still appear in the
+        # context window, so the conversation reads correctly to everyone else.
+        return GateDecision(False, "user_banned")
     if g.age_seconds > g.max_reply_age:
         # A backlog replayed after downtime must be stored but not answered: nobody wants
         # the bot waking up and replying to an argument that ended an hour ago.

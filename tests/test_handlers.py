@@ -306,3 +306,58 @@ async def test_someone_not_on_the_list_gets_words_not_pictures(db, monkeypatch):
     reply = await handlers.handle_message(message, db, client=None, persona="p", bot_id=77)
 
     assert reply == "малюй сам"
+
+
+async def test_the_bot_can_ban_someone_and_then_ignores_them(db, monkeypatch):
+    await enable_chat(db)
+
+    async def generate_with_ban(client, **kwargs):
+        await kwargs["tool_handler"]("ban_user", {"minutes": 60, "reason": "спам"})
+        return llm.LlmResult("годину тебе не чую", 0, 600, 0, 10, 100, 1200, 0.0005)
+
+    monkeypatch.setattr(handlers.llm, "generate", generate_with_ban)
+    first = FakeMessage(text="гряг здохни", message_id=1, user_id=5)
+    assert await handlers.handle_message(first, db, client=None, persona="p", bot_id=77)
+
+    quiet = FakeLlm()
+    monkeypatch.setattr(handlers.llm, "generate", quiet.generate)
+    second = FakeMessage(text="гряг ну шо ти", message_id=2, user_id=5)
+    reply = await handlers.handle_message(second, db, client=None, persona="p", bot_id=77)
+
+    assert reply is None
+    assert quiet.calls == []
+
+
+async def test_a_banned_person_still_appears_in_the_context(db, monkeypatch):
+    """Being ignored is not being erased — the conversation must still read correctly."""
+    await enable_chat(db)
+
+    async def generate_with_ban(client, **kwargs):
+        await kwargs["tool_handler"]("ban_user", {"minutes": 60, "reason": "спам"})
+        return llm.LlmResult("тихо", 0, 600, 0, 10, 100, 1200, 0.0005)
+
+    monkeypatch.setattr(handlers.llm, "generate", generate_with_ban)
+    await handlers.handle_message(
+        FakeMessage(text="гряг здохни", message_id=1, user_id=5), db,
+        client=None, persona="p", bot_id=77,
+    )
+    await handlers.handle_message(
+        FakeMessage(text="я все одно пишу", message_id=2, user_id=5), db,
+        client=None, persona="p", bot_id=77,
+    )
+
+    rows = await store.recent_messages(db, -100, limit=10)
+    assert "я все одно пишу" in [r["text"] for r in rows]
+
+
+async def test_a_ban_is_capped_at_two_days(db):
+    from datetime import datetime, timezone
+
+    sender = pytypes.SimpleNamespace(id=5)
+    handler = handlers._ban_handler(db, -100, sender)
+
+    await handler("ban_user", {"minutes": 999999})
+
+    until = await store.ban_until(db, -100, 5, datetime.now(timezone.utc).isoformat())
+    days = (datetime.fromisoformat(until) - datetime.now(timezone.utc)).days
+    assert days <= 2

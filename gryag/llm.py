@@ -47,6 +47,29 @@ class LlmResult:
     cost_usd: float
 
 
+MAX_BAN_MINUTES = 2880
+"""Two days. The model picks the length; this is the ceiling it cannot argue past."""
+
+BAN_TOOL = types.FunctionDeclaration(
+    name="ban_user",
+    description=(
+        "Заблокувати співрозмовника, щоб не відповідати йому певний час. "
+        "Використовуй, коли хтось реально задовбав: спамить, чіпляється, "
+        "повторює одне й те саме. Його повідомлення все одно лишаються в чаті, "
+        "ти просто перестаєш йому відповідати."
+    ),
+    parameters=types.Schema(
+        type="OBJECT",
+        properties={
+            "minutes": types.Schema(
+                type="INTEGER", description=f"Скільки хвилин, максимум {MAX_BAN_MINUTES}"
+            ),
+            "reason": types.Schema(type="STRING", description="Коротко, за що"),
+        },
+        required=["minutes"],
+    ),
+)
+
 SEARCH_FREE_PER_MONTH = 5000
 """Gemini 3.x allowance, shared across 3.x models; $14 per 1,000 after that. At this
 chat's volume even searching on every reply stays inside it, but the panel counts anyway."""
@@ -56,6 +79,7 @@ def build_tools() -> list[types.Tool]:
     """Server-side tools: they cost nothing in the prompt, unlike a tool manifest in the
     persona, which is exactly why the 137-token manifest was cut from it."""
     return [
+        types.Tool(function_declarations=[BAN_TOOL]),
         types.Tool(google_search=types.GoogleSearch()),
         types.Tool(url_context=types.UrlContext()),
         types.Tool(code_execution=types.ToolCodeExecution()),
@@ -82,6 +106,22 @@ def cost_usd(
     ) / 1_000_000
 
 
+def _function_calls(response) -> list:
+    candidate = (getattr(response, "candidates", None) or [None])[0]
+    parts = getattr(getattr(candidate, "content", None), "parts", None) or []
+    return [p.function_call for p in parts if getattr(p, "function_call", None)]
+
+
+def _add_usage(totals: list[int], response) -> None:
+    usage = getattr(response, "usage_metadata", None)
+    if usage is None:
+        return
+    totals[0] += usage.prompt_token_count or 0
+    totals[1] += usage.cached_content_token_count or 0
+    totals[2] += usage.candidates_token_count or 0
+    totals[3] += usage.thoughts_token_count or 0
+
+
 def build_client(api_key: str) -> genai.Client:
     return genai.Client(api_key=api_key)
 
@@ -96,6 +136,7 @@ async def generate(
     thinking_budget: int,
     media: tuple[bytes, str] | None = None,
     use_tools: bool = True,
+    tool_handler=None,
 ) -> LlmResult | None:
     """Returns None on any failure or empty reply — silence is the correct behaviour.
 
@@ -112,21 +153,58 @@ async def generate(
         ],
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         tools=build_tools() if use_tools else None,
+        # Mixing our own function with Google's server-side tools is refused outright
+        # without this flag: "Please enable tool_config.include_server_side_tool_invocations".
+        tool_config=(
+            types.ToolConfig(include_server_side_tool_invocations=True)
+            if use_tools
+            else None
+        ),
     )
 
-    contents: object = user
+    parts: list[object] = []
     if media is not None:
         payload, mime_type = media
-        contents = [types.Part.from_bytes(data=payload, mime_type=mime_type), user]
+        parts.append(types.Part.from_bytes(data=payload, mime_type=mime_type))
+    parts.append(types.Part.from_text(text=user))
+    history: list[types.Content] = [types.Content(role="user", parts=parts)]
 
     started = time.monotonic()
-    try:
-        response = await client.aio.models.generate_content(
-            model=model, contents=contents, config=config
-        )
-    except Exception:
-        log.exception("gemini call failed for model %s", model)
+    totals = [0, 0, 0, 0]  # prompt, cached, visible, thoughts — summed across both turns
+
+    async def call() -> object | None:
+        try:
+            return await client.aio.models.generate_content(
+                model=model, contents=history, config=config
+            )
+        except Exception:
+            log.exception("gemini call failed for model %s", model)
+            return None
+
+    response = await call()
+    if response is None:
         return None
+    _add_usage(totals, response)
+
+    calls = _function_calls(response)
+    if calls and tool_handler is not None:
+        # One round only. The model asked to do something, we do it and let it speak;
+        # a second request to act is ignored rather than looped on.
+        history.append(response.candidates[0].content)
+        responses = []
+        for call_part in calls:
+            outcome = await tool_handler(call_part.name, dict(call_part.args or {}))
+            responses.append(
+                types.Part.from_function_response(
+                    name=call_part.name, response={"result": outcome}
+                )
+            )
+        history.append(types.Content(role="user", parts=responses))
+        second = await call()
+        if second is not None:
+            _add_usage(totals, second)
+            response = second
+
     latency_ms = int((time.monotonic() - started) * 1000)
 
     candidate = (response.candidates or [None])[0]
@@ -136,11 +214,7 @@ async def generate(
         log.info("grounded on: %s", ", ".join(queries))
 
     text = (response.text or "").strip()
-    usage = response.usage_metadata
-    prompt_tokens = usage.prompt_token_count or 0
-    cached_tokens = usage.cached_content_token_count or 0
-    visible_tokens = usage.candidates_token_count or 0
-    thought_tokens = usage.thoughts_token_count or 0
+    prompt_tokens, cached_tokens, visible_tokens, thought_tokens = totals
 
     if not text:
         log.warning(

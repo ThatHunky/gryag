@@ -138,6 +138,27 @@ def build_router(admin_ids: tuple[int, ...]) -> Router:
         )
         await message.reply(verdict)
 
+    @router.message(Command("unban"))
+    async def lift_ban(message: Message, db) -> None:
+        """Reply to somebody with /unban to let them talk to gryag again."""
+        from datetime import datetime, timezone
+
+        from gryag import store
+
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        target = message.reply_to_message.from_user if message.reply_to_message else None
+        if target is None:
+            bans = await store.active_bans(db, message.chat.id, now)
+            await message.reply(
+                "Заблоковані: "
+                + (", ".join(f"{who} до {until[11:16]}" for who, until, _ in bans) or "ніхто")
+            )
+            return
+        lifted = await store.unban_user(db, message.chat.id, target.id)
+        await message.reply(
+            f"{target.full_name} розблокований" if lifted else "він і не був заблокований"
+        )
+
     @router.callback_query(F.data.startswith("model:"))
     async def switch_model(query: CallbackQuery, db) -> None:
         model = query.data.split(":", 1)[1]

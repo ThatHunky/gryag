@@ -22,9 +22,12 @@ DEFAULTS: dict[str, str] = {
     # trigger
     "keywords": "гряг",
     "context_messages": "30",
-    # safety valves — these exist for bugs, not for money
-    "daily_reply_cap": "60",
-    "hourly_reply_cap": "10",
+    # Safety valves. These exist to stop a runaway gate, not to ration replies: a bug
+    # fires hundreds a minute, while people poking a new bot in a chat that runs at
+    # 3,000 messages a day comfortably pass twenty in an hour. The first values here
+    # were 60/10 and the hourly one silenced the bot within the first evening.
+    "daily_reply_cap": "200",
+    "hourly_reply_cap": "30",
     # How many bot messages may pile up before gryag stops answering other bots.
     # Any human line resets the count, so this only ever bites a bot-to-bot loop.
     "bot_exchange_limit": "3",

@@ -148,7 +148,19 @@ async def handle_message(
         )
     )
     if not decision.speak:
-        log.debug("silent in %s: %s", chat_id, decision.reason)
+        # "not addressed" is the normal case and would drown the log. A safety valve
+        # firing is not normal: it means the bot went quiet for a reason nobody in the
+        # chat can see, which is exactly the failure that must be visible here.
+        if decision.reason in ("daily_cap", "hourly_cap", "bot_exchange_limit"):
+            log.warning(
+                "silenced in %s by %s (today=%s, hour=%s)",
+                chat_id,
+                decision.reason,
+                replies_today,
+                replies_this_hour,
+            )
+        else:
+            log.debug("silent in %s: %s", chat_id, decision.reason)
         return None
 
     window = await config.get_int(db, "context_messages", chat_id)

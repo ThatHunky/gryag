@@ -1,5 +1,5 @@
 import types as pytypes
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from gryag import config, handlers, llm, store
 
@@ -16,9 +16,12 @@ class FakeMessage:
         is_bot=False,
         reply_to=None,
         entities=None,
+        date=None,
     ):
         self.message_id = message_id
-        self.date = datetime(2026, 8, 19, 10, 0, 0)
+        # Telegram always sends tz-aware timestamps; the staleness guard subtracts
+        # them from utcnow, so a naive datetime here would not exercise the real path.
+        self.date = date or datetime.now(timezone.utc)
         self.text = text
         self.caption = None
         self.chat = pytypes.SimpleNamespace(id=chat_id, title="матсурі")
@@ -190,3 +193,23 @@ async def test_a_partial_quote_reaches_the_prompt(db, monkeypatch):
     await handlers.handle_message(message, db, client=None, persona="p", bot_id=77)
 
     assert "«Нікос»" in fake.calls[0]["user"]
+
+
+async def test_a_message_from_the_backlog_is_stored_but_not_answered(db, monkeypatch):
+    """After downtime Telegram replays up to 24 hours of updates. They must land in the
+    database — that hole was a quarter of the chat — without the bot answering an
+    argument that ended an hour ago."""
+    await enable_chat(db)
+    fake = FakeLlm()
+    monkeypatch.setattr(handlers.llm, "generate", fake.generate)
+    stale = FakeMessage(
+        text="гряг шо там",
+        date=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+
+    reply = await handlers.handle_message(stale, db, client=None, persona="p", bot_id=77)
+
+    assert reply is None
+    assert fake.calls == []
+    rows = await store.recent_messages(db, -100, limit=10)
+    assert [r["text"] for r in rows] == ["гряг шо там"]

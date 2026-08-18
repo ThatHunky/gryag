@@ -35,6 +35,9 @@ DEFAULTS: dict[str, str] = {
     # How many bot messages may pile up before gryag stops answering other bots.
     # Any human line resets the count, so this only ever bites a bot-to-bot loop.
     "bot_exchange_limit": "3",
+    # Seconds. Older messages are still stored, just never answered — this is what makes
+    # replaying the restart backlog safe.
+    "max_reply_age": "300",
     # Google Search grounding and URL fetching. Server-side, so they cost no prompt
     # tokens; search is free to 5,000/month, fetched pages bill as input tokens.
     "tools_enabled": "1",

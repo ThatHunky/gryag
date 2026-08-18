@@ -50,7 +50,7 @@ async def serve_webhook(secrets: config.Secrets) -> None:
     await bot.set_webhook(
         f"{secrets.webhook_base}{WEBHOOK_PATH}",
         secret_token=secrets.webhook_secret,
-        drop_pending_updates=True,
+        drop_pending_updates=False,
         allowed_updates=["message", "callback_query"],
     )
     app = web.Application()
@@ -68,7 +68,11 @@ async def serve_webhook(secrets: config.Secrets) -> None:
 
 async def serve_polling(secrets: config.Secrets) -> None:
     bot, dispatcher = await build(secrets)
-    await bot.delete_webhook(drop_pending_updates=True)
+    # Do NOT drop pending updates. Telegram holds them for 24 hours, and dropping them
+    # punched 11-16 message holes in the stored history at every restart — a quarter of
+    # the chat went missing across six restarts. The backlog is replayed and stored;
+    # `max_reply_age` in the gate is what stops the bot answering stale messages.
+    await bot.delete_webhook(drop_pending_updates=False)
     logging.info("polling mode")
     await dispatcher.start_polling(
         bot, allowed_updates=["message", "callback_query"]

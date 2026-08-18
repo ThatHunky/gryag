@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 from aiogram import F, Router
@@ -20,6 +20,10 @@ from aiogram.utils.chat_action import ChatActionSender
 from gryag import config, context, gate, llm, media, store
 
 log = logging.getLogger(__name__)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def media_kind_and_file_id(message) -> tuple[str | None, str | None]:
@@ -145,13 +149,15 @@ async def handle_message(
             hourly_cap=await config.get_int(db, "hourly_reply_cap", chat_id),
             bot_streak=await store.bot_streak(db, chat_id),
             bot_exchange_limit=await config.get_int(db, "bot_exchange_limit", chat_id),
+            age_seconds=max((_utcnow() - now).total_seconds(), 0.0),
+            max_reply_age=await config.get_int(db, "max_reply_age", chat_id),
         )
     )
     if not decision.speak:
         # "not addressed" is the normal case and would drown the log. A safety valve
         # firing is not normal: it means the bot went quiet for a reason nobody in the
         # chat can see, which is exactly the failure that must be visible here.
-        if decision.reason in ("daily_cap", "hourly_cap", "bot_exchange_limit"):
+        if decision.reason in ("daily_cap", "hourly_cap", "bot_exchange_limit", "too_old"):
             log.warning(
                 "silenced in %s by %s (today=%s, hour=%s)",
                 chat_id,
@@ -233,7 +239,10 @@ async def handle_message(
 def build_router() -> Router:
     router = Router(name="chat")
 
-    @router.message(F.text | F.caption | F.photo | F.voice | F.video | F.sticker)
+    # No content filter. An earlier one listed six types and silently dropped GIFs,
+    # video notes, documents and audio — they never reached the database at all, so the
+    # conversation had holes the bot could not see.
+    @router.message()
     async def on_message(message: Message, db, client, persona, bot_id) -> None:
         await handle_message(message, db, client, persona, bot_id)
 

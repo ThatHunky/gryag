@@ -132,3 +132,22 @@ def test_disabled_chat_is_checked_before_anything_else():
 
 def test_empty_text_with_a_reply_to_the_bot_still_speaks():
     assert should_speak(make(text="", replies_to_bot=True)).speak is True
+
+
+def test_a_stale_message_is_not_answered():
+    decision = should_speak(make(mentions_bot=True, age_seconds=600, max_reply_age=300))
+
+    assert decision.speak is False
+    assert decision.reason == "too_old"
+
+
+def test_a_fresh_message_is_answered():
+    assert should_speak(make(mentions_bot=True, age_seconds=10)).speak is True
+
+
+def test_staleness_is_checked_before_the_caps():
+    decision = should_speak(
+        make(mentions_bot=True, age_seconds=999, replies_today=999, daily_cap=1)
+    )
+
+    assert decision.reason == "too_old"

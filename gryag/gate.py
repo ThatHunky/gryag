@@ -32,6 +32,8 @@ class GateInput:
     hourly_cap: int
     bot_streak: int
     bot_exchange_limit: int
+    age_seconds: float = 0.0
+    max_reply_age: int = 300
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,10 @@ def should_speak(g: GateInput) -> GateDecision:
         return GateDecision(False, "chat_disabled")
     if g.is_self:
         return GateDecision(False, "sender_is_self")
+    if g.age_seconds > g.max_reply_age:
+        # A backlog replayed after downtime must be stored but not answered: nobody wants
+        # the bot waking up and replying to an argument that ended an hour ago.
+        return GateDecision(False, "too_old")
     if g.replies_today >= g.daily_cap:
         return GateDecision(False, "daily_cap")
     if g.replies_this_hour >= g.hourly_cap:

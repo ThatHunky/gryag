@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 import aiosqlite
 
-from gryag import config, context, gate, llm, store
+from gryag import config, context, gate, handlers, llm, store
 from gryag.handlers import _render_now
 
 log = logging.getLogger(__name__)
@@ -65,62 +65,76 @@ async def run_once(db: aiosqlite.Connection, client, bot, persona) -> int:
             log.debug("not speaking into %s: %s", chat_id, decision.reason)
             continue
 
-        messages = await store.recent_messages(
-            db, chat_id, limit=await config.get_int(db, "context_messages", chat_id)
-        )
-        prompt = context.build(
-            messages=messages,
-            chain=[],
-            trigger={"text": "", "alias": "", "is_bot": False, "message_id": None},
-            now=_render_now(now),
-            chat_title="",
-            week_summary=await store.latest_summary(db, chat_id, "week"),
-            today_summary=await store.latest_summary(db, chat_id, "day"),
-        ).rsplit("---", 1)[0] + PROMPT_SUFFIX
-
-        model = await config.get(db, "speak_model", chat_id)
-        result = await llm.generate(
-            client,
-            model=model,
-            system=persona["text"] if isinstance(persona, dict) else persona,
-            user=prompt,
-            max_output_tokens=await config.get_int(db, "max_output_tokens", chat_id),
-            thinking_budget=await config.get_int(db, "thinking_budget", chat_id),
-            use_tools=await config.get(db, "tools_enabled", chat_id) == "1",
-        )
-        if result is None:
+        # Take the chat the same way a reply does. Without this a tick could post "the
+        # chat has been quiet" into a room a handler was mid-answer in, and its own
+        # message silently consumed the handler's reply caps without ever being checked
+        # against them.
+        if not handlers._claim(chat_id):
+            log.debug("not speaking into %s: a reply is in flight", chat_id)
             continue
-
-        sent = await bot.send_message(chat_id, result.text)
-        await store.save_message(
-            db,
-            chat_id=chat_id,
-            message_id=sent.message_id,
-            user_id=sent.from_user.id if sent.from_user else None,
-            ts=sent.date.isoformat(timespec="seconds"),
-            text=result.text,
-            media_kind=None,
-            file_id=None,
-            reply_to=None,
-            is_bot=True,
-        )
-        await store.mark_proactive(db, chat_id, now.isoformat(timespec="seconds"))
-        await store.record_usage(
-            db,
-            chat_id=chat_id,
-            purpose="proactive",
-            model=model,
-            prompt_tok=result.prompt_tokens,
-            cached_tok=result.cached_tokens,
-            visible_tok=result.visible_tokens,
-            thought_tok=result.thought_tokens,
-            latency_ms=result.latency_ms,
-            cost_usd=result.cost_usd,
-            searched=result.searched,
-        )
-        log.info("spoke into the silence in %s", chat_id)
-        spoken += 1
+        try:
+            spoken += await _speak_into(db, client, bot, persona, chat_id, now)
+        finally:
+            handlers._release(chat_id)
     return spoken
+
+
+async def _speak_into(db, client, bot, persona, chat_id: int, now) -> int:
+    messages = await store.recent_messages(
+        db, chat_id, limit=await config.get_int(db, "context_messages", chat_id)
+    )
+    prompt = context.build(
+        messages=messages,
+        chain=[],
+        trigger={"text": "", "alias": "", "is_bot": False, "message_id": None},
+        now=_render_now(now),
+        chat_title="",
+        week_summary=await store.latest_summary(db, chat_id, "week"),
+        today_summary=await store.latest_summary(db, chat_id, "day"),
+    ).rsplit("---", 1)[0] + PROMPT_SUFFIX
+
+    model = await config.get(db, "speak_model", chat_id)
+    result = await llm.generate(
+        client,
+        model=model,
+        system=persona["text"] if isinstance(persona, dict) else persona,
+        user=prompt,
+        max_output_tokens=await config.get_int(db, "max_output_tokens", chat_id),
+        thinking_budget=await config.get_int(db, "thinking_budget", chat_id),
+        use_tools=await config.get(db, "tools_enabled", chat_id) == "1",
+    )
+    if result is None:
+        return 0
+
+    sent = await bot.send_message(chat_id, result.text)
+    await store.save_message(
+        db,
+        chat_id=chat_id,
+        message_id=sent.message_id,
+        user_id=sent.from_user.id if sent.from_user else None,
+        ts=sent.date.isoformat(timespec="seconds"),
+        text=result.text,
+        media_kind=None,
+        file_id=None,
+        reply_to=None,
+        is_bot=True,
+    )
+    await store.mark_proactive(db, chat_id, now.isoformat(timespec="seconds"))
+    await store.record_usage(
+        db,
+        chat_id=chat_id,
+        purpose="proactive",
+        model=model,
+        prompt_tok=result.prompt_tokens,
+        cached_tok=result.cached_tokens,
+        visible_tok=result.visible_tokens,
+        thought_tok=result.thought_tokens,
+        latency_ms=result.latency_ms,
+        cost_usd=result.cost_usd,
+        searched=result.searched,
+    )
+    log.info("spoke into the silence in %s", chat_id)
+    return 1
 
 
 async def loop(db: aiosqlite.Connection, client, bot, persona) -> None:

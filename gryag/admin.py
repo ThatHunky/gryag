@@ -7,6 +7,8 @@ than the environment.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 
 import aiosqlite
@@ -166,17 +168,6 @@ async def _menu_markup(db: aiosqlite.Connection, chat_id: int, section: str) -> 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _header(db: aiosqlite.Connection, chat_id: int) -> str:
-    muted = await store.muted_until(db, chat_id, _now())
-    parts = [f"Розділ: {menu.SECTIONS['model'][0]}"]
-    if muted:
-        parts.append(f"Мовчить до {muted[11:16]}")
-    warning = await drift_warning(db)
-    if warning:
-        parts.append(warning)
-    return "\n".join(parts)
-
-
 def build_router(admin_ids: tuple[int, ...], on_reload=None, on_digest=None) -> Router:
     router = Router(name="admin")
     router.message.filter(F.from_user.id.in_(admin_ids))
@@ -196,6 +187,11 @@ def build_router(admin_ids: tuple[int, ...], on_reload=None, on_digest=None) -> 
         text = "\n".join(lines)
         markup = await _menu_markup(db, target.chat.id, section)
         if not edit:
+            await target.answer(text, reply_markup=markup)
+            return
+        if not hasattr(target, "edit_text"):
+            # A menu older than 48 hours arrives as InaccessibleMessage, which has no
+            # edit_text. Answer fresh rather than raising into the callback.
             await target.answer(text, reply_markup=markup)
             return
         try:
@@ -268,8 +264,11 @@ def build_router(admin_ids: tuple[int, ...], on_reload=None, on_digest=None) -> 
             await query.answer("недоступно")
             return
         await query.answer("рахую, це небистро")
-        await on_digest(db, query.message.chat.id)
-        await query.message.answer("Самарі перегенеровано.")
+        # Not awaited: a multi-chunk day takes tens of seconds, and holding the callback
+        # open that long makes Telegram redeliver it — which used to start a second
+        # concurrent digest on the same connection.
+        chat = query.message.chat
+        _spawn(_rerun_and_report(on_digest, db, chat))
 
     @router.message(Command("nb"))
     async def toggle_whitelist(message: Message, db) -> None:

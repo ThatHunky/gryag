@@ -19,6 +19,8 @@ def _clear_busy_chats():
 
     handlers._busy.clear()
     handlers._pending.clear()
+    handlers._tasks.clear()
     yield
     handlers._busy.clear()
     handlers._pending.clear()
+    handlers._tasks.clear()

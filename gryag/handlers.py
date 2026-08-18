@@ -13,6 +13,7 @@ import random
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import aiosqlite
 from aiogram import F, Router
@@ -27,9 +28,15 @@ OWN_COMMANDS = ("gryag", "nb", "unban")
 """Everything else starting with a slash belongs to another bot; see gate.foreign_command."""
 
 
-LOCAL_TZ = timezone(timedelta(hours=3))
+try:
+    LOCAL_TZ = ZoneInfo("Europe/Kyiv")
+except Exception:  # pragma: no cover - only if tzdata is missing
+    LOCAL_TZ = timezone(timedelta(hours=3))
 """Kyiv. The measured quiet window — 03:00-07:00 carrying 0-11 messages an hour against a
-peak of 958 at 22:00 — is in the chat's local time, not UTC."""
+peak of 958 at 22:00 — is in the chat's local time, not UTC.
+
+A fixed +3 offset was wrong from the last Sunday of October onwards, which would have
+shifted quiet hours by an hour without anything failing visibly."""
 
 
 def _utcnow() -> datetime:
@@ -102,14 +109,35 @@ def _release(chat_id: int) -> None:
 
 _pending: dict[int, tuple[object, datetime]] = {}
 
+_tasks: set[asyncio.Task] = set()
 
-def _remember_missed(chat_id: int, message) -> None:
+
+def _spawn(coro) -> None:
+    """Run something after the reply without holding the webhook request open.
+
+    The reference matters: asyncio keeps only a weak one, so a bare create_task can be
+    collected while suspended.
+    """
+    task = asyncio.create_task(coro)
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+
+
+def _remember_missed(chat_id: int, message, max_age: int = 60) -> None:
     """Keep the one message that lost the race, so it can be picked up afterwards.
 
     Only ever one: catching up on a backlog of five would recreate exactly the burst the
     claim exists to prevent.
+
+    Stale entries from other chats are dropped here. The drain only runs after a
+    successful reply in the same chat, so a chat that then goes quiet — or hits a cap —
+    would otherwise pin a live Message object, and its whole update payload, forever.
     """
-    _pending[chat_id] = (message, _utcnow())
+    now = _utcnow()
+    for other, (_msg, seen_at) in list(_pending.items()):
+        if (now - seen_at).total_seconds() > max_age:
+            del _pending[other]
+    _pending[chat_id] = (message, now)
 
 
 def _take_missed(chat_id: int, max_age: int) -> object | None:
@@ -213,9 +241,13 @@ async def _maybe_draw(message, db, client, text: str, payload) -> str | None:
         if replied is not None
         else ""
     )
-    recent = await store.recent_messages(db, chat_id, limit=6)
+    # The trigger is already persisted by the time we get here, so it would otherwise
+    # come back as its own subject and the model would draw the words "гряг намалюй".
+    recent = await store.recent_messages(db, chat_id, limit=7)
     recent_text = " ".join(
-        (m.get("text") or "").strip() for m in recent if (m.get("text") or "").strip()
+        (m.get("text") or "").strip()
+        for m in recent
+        if (m.get("text") or "").strip() and m.get("message_id") != message.message_id
     )
     subject = images.subject_from(
         asked, getattr(quote, "text", None), parent_text, recent_text or None
@@ -249,11 +281,15 @@ async def _maybe_draw(message, db, client, text: str, payload) -> str | None:
         visible_tok=result.output_tokens,
         thought_tok=0,
         latency_ms=result.latency_ms,
-        cost_usd=0.0,
+        cost_usd=images.PRICE_PER_IMAGE,
     )
-    await message.reply_photo(
+    sent = await message.reply_photo(
         BufferedInputFile(result.payload, filename="gryag.jpg")
     )
+    # Persist it like any other reply. Skipping this left the drawing out of history —
+    # so the next prompt showed a request nobody answered and the model apologised for
+    # not having drawn it — and out of the caps, the throttle and the ambient cooldown.
+    await persist(db, sent, is_bot=True)
     log.info(
         "drew %s KB for %s in %s ms", len(result.payload) // 1024, sender.id, result.latency_ms
     )
@@ -333,8 +369,15 @@ async def handle_message(
     await persist(db, message)
 
     now = message.date
+    # Midnight means the chat's midnight. On UTC the daily budget rolled over at 03:00
+    # Kyiv, in the hours where a runaway would be least visible.
+    local_midnight = (
+        now.astimezone(LOCAL_TZ)
+        .replace(hour=0, minute=0, second=0, microsecond=0)
+        .astimezone(timezone.utc)
+    )
     replies_today = await store.count_replies_since(
-        db, chat_id, now.replace(hour=0, minute=0, second=0).isoformat(timespec="seconds")
+        db, chat_id, local_midnight.isoformat(timespec="seconds")
     )
     replies_this_hour = await store.count_replies_since(
         db, chat_id, (now - timedelta(hours=1)).isoformat(timespec="seconds")
@@ -356,8 +399,12 @@ async def handle_message(
 
     text = message.text or message.caption or ""
     replied = message.reply_to_message
+    # Entity offsets are UTF-16 code units, not Python characters. Slicing the string
+    # directly shifts by one per emoji before the mention, so "😀 @gryag_bot" read as
+    # "gryag_bot " and the bot ignored a direct address. aiogram ships extract_from for
+    # exactly this.
     mentions_bot = any(
-        text[e.offset : e.offset + e.length].lstrip("@").lower().endswith("gryag_bot")
+        e.extract_from(text).lstrip("@").lower().endswith("gryag_bot")
         for e in (message.entities or [])
         if e.type == "mention"
     )
@@ -474,7 +521,9 @@ async def handle_message(
             "text": text,
             "media_kind": media_kind_and_file_id(message)[0],
             "is_bot": False,
-            "alias": context.alias_for(message.from_user.full_name),
+            # A channel post or automatic forward carries no from_user; the same guard
+            # is applied three lines down and was missed here.
+            "alias": context.alias_for(sender.full_name) if sender else "хтось",
         }
         present = {m["user_id"] for m in messages if m.get("user_id")}
         if sender is not None:
@@ -545,7 +594,11 @@ async def handle_message(
     finally:
         _release(chat_id)
         if not deferred:
-            await _maybe_answer_missed(message, db, client, persona, bot_id, chat_id)
+            # Deliberately not awaited here. Awaiting a second generation inside `finally`
+            # replaced any propagating exception with the deferred one, and held the
+            # webhook request open for both replies — long enough for Telegram to time
+            # out, redeliver, and get answered twice.
+            _spawn(_maybe_answer_missed(message, db, client, persona, bot_id, chat_id))
 
 
 async def handle_edit(message, db) -> bool:

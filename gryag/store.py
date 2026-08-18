@@ -119,8 +119,12 @@ async def _migrate(db: aiosqlite.Connection) -> None:
     for statement in MIGRATIONS:
         try:
             await db.execute(statement)
-        except aiosqlite.OperationalError:
-            pass  # already applied
+        except aiosqlite.OperationalError as exc:
+            # "duplicate column name" means it ran before. "database is locked" means it
+            # did NOT, and swallowing that records a migration as applied against a schema
+            # that never got the column — surfacing hours later as a mystery INSERT error.
+            if "duplicate column" not in str(exc).lower():
+                raise
     await db.commit()
 
 
@@ -315,7 +319,9 @@ async def messages_for_day(
         WHERE m.chat_id = ? AND m.ts >= ? AND m.ts < ?
         ORDER BY m.ts, m.message_id
         """,
-        (chat_id, f"{day}T00:00:00", f"{day}T23:59:59.999"),
+        # Stored timestamps carry a +00:00 offset, so the upper bound needs a character
+        # that sorts above it rather than relying on '+' < '.' by accident.
+        (chat_id, f"{day}T00:00:00", f"{day}T24"),
     ) as cur:
         return [dict(r) for r in await cur.fetchall()]
 
@@ -376,6 +382,10 @@ async def replace_facts(
     db: aiosqlite.Connection, chat_id: int, day: str, facts: list[tuple[int, str]]
 ) -> None:
     """Facts for one day, rewritten wholesale so a re-run cannot duplicate them."""
+    # One transaction. Every other helper here commits on its own, and any of them
+    # landing between the delete and the insert would commit the delete alone — losing
+    # a day's facts if the insert then failed.
+    await db.execute("BEGIN IMMEDIATE")
     await db.execute(
         "DELETE FROM facts WHERE chat_id = ? AND source_day = ?", (chat_id, day)
     )
@@ -403,7 +413,12 @@ async def facts_for_users(
     async with db.execute(
         f"""
         SELECT u.alias, f.text, f.user_id,
-               ROW_NUMBER() OVER (PARTITION BY f.user_id ORDER BY f.created_at DESC) AS rn
+               -- created_at is written by one executemany, so a whole day shares one
+               -- second and ordering by it alone leaves the planner to break ties. The
+               -- id makes "the most recent four" mean the same thing twice running.
+               ROW_NUMBER() OVER (
+                   PARTITION BY f.user_id ORDER BY f.created_at DESC, f.id DESC
+               ) AS rn
         FROM facts f
         LEFT JOIN users u ON u.chat_id = f.chat_id AND u.user_id = f.user_id
         WHERE f.chat_id = ? AND f.user_id IN ({marks})
@@ -529,7 +544,11 @@ async def ambient_candidates_per_day(db: aiosqlite.Connection, chat_id: int) -> 
         """
         SELECT COUNT(*) FROM messages
         WHERE chat_id = ? AND is_bot = 0 AND sender_is_bot = 0
-          AND ts >= datetime('now', '-1 day')
+          -- Messages are stored ISO-8601 with a 'T'; SQLite's datetime() uses a space,
+          -- and 'T' > ' ', so comparing against datetime('now','-1 day') let anything
+          -- sharing that calendar date through — a 35-hour-old message counted as
+          -- "today", inflating the divisor and halving the ambient rate.
+          AND ts >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-1 day')
           AND LENGTH(COALESCE(text, '')) >= 30
           AND reply_to IS NULL
         """,

@@ -503,6 +503,9 @@ async def test_a_direct_address_lost_to_the_race_is_sometimes_answered_afterward
     await asyncio.sleep(0.01)
     assert await handlers.handle_message(second, db, client=None, persona="p", bot_id=77) is None
     await task
+    # The deferred reply is spawned rather than awaited, so the webhook request is not
+    # held open for two generations. Drain it here.
+    await asyncio.gather(*handlers._tasks)
 
     assert second.replies == ["ага"]
 
@@ -527,6 +530,7 @@ async def test_it_does_not_always_come_back(db, monkeypatch):
     await asyncio.sleep(0.01)
     await handlers.handle_message(second, db, client=None, persona="p", bot_id=77)
     await task
+    await asyncio.gather(*handlers._tasks)
 
     assert second.replies == []
 
@@ -551,6 +555,7 @@ async def test_an_ambient_message_that_lost_the_race_is_not_worth_returning_to(d
     await asyncio.sleep(0.01)
     await handlers.handle_message(passerby, db, client=None, persona="p", bot_id=77)
     await task
+    await asyncio.gather(*handlers._tasks)
 
     assert passerby.replies == []
 
@@ -643,3 +648,15 @@ async def test_an_explicit_prompt_still_wins(db, monkeypatch):
     await handlers.handle_message(message, db, client=None, persona="p", bot_id=77)
 
     assert asked[0] == "пінгвіна на скейті"
+
+
+def test_local_time_follows_daylight_saving():
+    """A fixed +3 offset was right in August and an hour wrong from late October, which
+    would have shifted quiet hours with nothing failing visibly."""
+    from datetime import datetime, timezone
+
+    summer = handlers._render_now(datetime(2026, 8, 18, 23, 35, tzinfo=timezone.utc))
+    winter = handlers._render_now(datetime(2026, 12, 18, 23, 35, tzinfo=timezone.utc))
+
+    assert summer.startswith("2026-08-19 02:35")
+    assert winter.startswith("2026-12-19 01:35")

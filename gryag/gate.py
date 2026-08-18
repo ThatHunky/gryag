@@ -69,7 +69,10 @@ def mentions_keyword(text: str, keywords: tuple[str, ...]) -> bool:
     words that merely contain it, like `шпаргалка`.
     """
     for keyword in keywords:
-        if re.search(rf"\b{re.escape(keyword)}", text, re.IGNORECASE):
+        # `\b` before a keyword starting with @ or ! requires a word character in front
+        # of it, so `@gryag_bot` would never match. Anchor on "start, or a non-word
+        # character" instead, which behaves the same for ordinary words.
+        if re.search(rf"(?:^|(?<=\W)){re.escape(keyword)}", text, re.IGNORECASE):
             return True
     return False
 
@@ -94,7 +97,8 @@ def foreign_command(text: str, own_commands: tuple[str, ...]) -> bool:
     """
     if not text.startswith("/"):
         return False
-    word = text[1:].split()[0] if len(text) > 1 else ""
+    parts = text[1:].split()
+    word = parts[0] if parts else ""  # "/" alone, or "/ ", used to raise IndexError
     return word.split("@")[0].lower() not in own_commands
 
 

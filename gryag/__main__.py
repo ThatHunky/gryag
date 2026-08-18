@@ -57,7 +57,15 @@ async def build(secrets: config.Secrets) -> "Runtime":
         return len(persona["text"]) // 3
 
     async def rerun_digest(conn, chat_id: int) -> None:
-        await digest.run(conn, client, day=digest.yesterday())
+        """One chat, the one whose button was tapped.
+
+        This used to call digest.run, which loops every enabled chat and bills for each,
+        while the toast claimed only this chat had been regenerated.
+        """
+        day = digest.yesterday()
+        model = await config.get(conn, "digest_model", chat_id)
+        if await digest.summarise_day(conn, client, chat_id, day, model):
+            await digest.rebuild_week(conn, client, chat_id, model)
 
     bot = Bot(secrets.bot_token, default=DefaultBotProperties(parse_mode=None))
     me = await bot.get_me()
@@ -71,10 +79,28 @@ async def build(secrets: config.Secrets) -> "Runtime":
     return Runtime(bot=bot, dispatcher=dispatcher, db=db, client=client, persona=persona)
 
 
-async def serve_webhook(secrets: config.Secrets) -> None:
+_background: set[asyncio.Task] = set()
+
+
+async def start(secrets: config.Secrets) -> "Runtime":
+    """Build everything and start the proactive loop.
+
+    Both transports go through here. Having two copies of this is what broke polling:
+    the Runtime fix was applied to the webhook path and its twin kept unpacking a
+    dataclass as a tuple, so the default MODE could not start at all.
+    """
     rt = await build(secrets)
+    task = asyncio.create_task(proactive.loop(rt.db, rt.client, rt.bot, rt.persona))
+    # Keep a reference: asyncio only holds a weak one, and a bare task can be collected
+    # mid-flight.
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+    return rt
+
+
+async def serve_webhook(secrets: config.Secrets) -> None:
+    rt = await start(secrets)
     bot, dispatcher = rt.bot, rt.dispatcher
-    asyncio.create_task(proactive.loop(rt.db, rt.client, rt.bot, rt.persona))
 
     await bot.set_webhook(
         f"{secrets.webhook_base}{WEBHOOK_PATH}",

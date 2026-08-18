@@ -32,6 +32,10 @@ DRAW_WORDS = (
     "перемалюй",
 )
 
+PRICE_PER_IMAGE = 0.039
+"""USD per generated image. Nano Banana bills per image, not per token, so it is absent
+from llm.PRICES and the spend panel showed $0.0000 however many were drawn."""
+
 EDIT_WORDS = ("перемалюй", "додай", "прибери", "заміни", "зміни", "переробі", "зроби з")
 
 
@@ -139,20 +143,24 @@ async def generate(
         )
         return None
 
+    # A safety-blocked response carries a candidate whose content is None. These derefs
+    # sit outside the try, so without the guards a refused draw crashed the handler
+    # instead of falling back to silence, which is what this function promises.
+    content = getattr(response.candidates[0], "content", None)
     images = [
         part.inline_data
-        for part in (response.candidates[0].content.parts or [])
+        for part in (getattr(content, "parts", None) or [])
         if getattr(part, "inline_data", None)
     ]
     if not images:
         log.warning("image request produced no image on %s", model)
         return None
 
-    usage = response.usage_metadata
+    usage = getattr(response, "usage_metadata", None)
     return ImageResult(
         payload=images[0].data,
         mime_type=images[0].mime_type,
         latency_ms=latency_ms,
-        prompt_tokens=usage.prompt_token_count or 0,
-        output_tokens=usage.candidates_token_count or 0,
+        prompt_tokens=getattr(usage, "prompt_token_count", 0) or 0,
+        output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
     )

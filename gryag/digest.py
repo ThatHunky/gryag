@@ -114,7 +114,9 @@ def chunk_transcript(messages: list[dict], max_tokens: int = CHUNK_TOKENS) -> li
     return chunks
 
 
-async def _generate_json(client, model: str, prompt: str, schema: dict) -> dict | None:
+async def _generate_json(
+    client, model: str, prompt: str, schema: dict
+) -> tuple[dict, object] | None:
     cfg = types.GenerateContentConfig(
         max_output_tokens=4000,
         thinking_config=types.ThinkingConfig(thinking_budget=0),

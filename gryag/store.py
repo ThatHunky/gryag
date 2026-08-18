@@ -258,6 +258,27 @@ async def bot_streak(db: aiosqlite.Connection, chat_id: int) -> int:
     return int(row[0])
 
 
+async def replies_to_user(
+    db: aiosqlite.Connection, chat_id: int, user_id: int, since_ts: str
+) -> tuple[int, str | None]:
+    """(how many times gryag answered this person recently, when it last did).
+
+    Joins the bot's replies back to the messages they quote, which is possible only
+    because every reply is sent with `message.reply`.
+    """
+    async with db.execute(
+        """
+        SELECT COUNT(*), MAX(b.ts)
+        FROM messages b
+        JOIN messages t ON t.chat_id = b.chat_id AND t.message_id = b.reply_to
+        WHERE b.chat_id = ? AND b.is_bot = 1 AND t.user_id = ? AND b.ts >= ?
+        """,
+        (chat_id, user_id, since_ts),
+    ) as cur:
+        row = await cur.fetchone()
+    return int(row[0]), row[1]
+
+
 async def record_usage(
     db: aiosqlite.Connection,
     *,

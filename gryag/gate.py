@@ -34,6 +34,11 @@ class GateInput:
     bot_exchange_limit: int
     age_seconds: float = 0.0
     max_reply_age: int = 300
+    busy: bool = False
+    user_recent_replies: int = 0
+    seconds_since_user_reply: float = 1e9
+    throttle_after: int = 3
+    throttle_step: int = 20
 
 
 @dataclass(frozen=True)
@@ -55,6 +60,17 @@ def mentions_keyword(text: str, keywords: tuple[str, ...]) -> bool:
     return False
 
 
+def required_gap(recent_replies: int, throttle_after: int, throttle_step: int) -> int:
+    """Seconds one person must wait, given how much they have already been answered.
+
+    Free until `throttle_after` replies in the window, then a gap that grows by
+    `throttle_step` each time: 20s, 40s, 60s. Someone chatting gets answered; someone
+    hammering the bot gets answered more and more slowly, without ever being cut off.
+    """
+    over = recent_replies - throttle_after + 1
+    return max(over, 0) * throttle_step
+
+
 def should_speak(g: GateInput) -> GateDecision:
     if not g.chat_enabled:
         return GateDecision(False, "chat_disabled")
@@ -64,6 +80,10 @@ def should_speak(g: GateInput) -> GateDecision:
         # A backlog replayed after downtime must be stored but not answered: nobody wants
         # the bot waking up and replying to an argument that ended an hour ago.
         return GateDecision(False, "too_old")
+    if g.busy:
+        # Already writing an answer in this chat. Answering two people at once produces
+        # two replies to a conversation that has moved on between them.
+        return GateDecision(False, "busy")
     if g.replies_today >= g.daily_cap:
         return GateDecision(False, "daily_cap")
     if g.replies_this_hour >= g.hourly_cap:
@@ -82,6 +102,10 @@ def should_speak(g: GateInput) -> GateDecision:
             return GateDecision(False, "bot_not_addressed")
         if g.bot_streak >= g.bot_exchange_limit:
             return GateDecision(False, "bot_exchange_limit")
+
+    gap = required_gap(g.user_recent_replies, g.throttle_after, g.throttle_step)
+    if gap and g.seconds_since_user_reply < gap:
+        return GateDecision(False, "throttled")
 
     if g.mentions_bot:
         return GateDecision(True, "mention")

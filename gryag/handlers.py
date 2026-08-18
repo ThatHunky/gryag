@@ -7,6 +7,7 @@ would summarise an incomplete day.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -24,6 +25,22 @@ log = logging.getLogger(__name__)
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+_busy: dict[int, asyncio.Lock] = {}
+
+
+def _chat_lock(chat_id: int) -> asyncio.Lock:
+    """One reply at a time per chat.
+
+    Generation takes about two seconds. In a chat with a median gap of six seconds
+    between messages, three people can address the bot inside one generation, and it
+    would answer all three about a conversation that has already moved on.
+    """
+    lock = _busy.get(chat_id)
+    if lock is None:
+        lock = _busy[chat_id] = asyncio.Lock()
+    return lock
 
 
 def media_kind_and_file_id(message) -> tuple[str | None, str | None]:
@@ -121,9 +138,22 @@ async def handle_message(
         db, chat_id, (now - timedelta(hours=1)).isoformat(timespec="seconds")
     )
 
+    window_start = (
+        now - timedelta(seconds=await config.get_int(db, "throttle_window", chat_id))
+    ).isoformat(timespec="seconds")
+    sender = message.from_user
+    user_replies, last_user_reply = await store.replies_to_user(
+        db, chat_id, sender.id if sender else 0, window_start
+    )
+    since_user_reply = 1e9
+    if last_user_reply:
+        parsed = datetime.fromisoformat(last_user_reply)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        since_user_reply = max((_utcnow() - parsed).total_seconds(), 0.0)
+
     text = message.text or message.caption or ""
     replied = message.reply_to_message
-    sender = message.from_user
     decision = gate.should_speak(
         gate.GateInput(
             text=text,
@@ -151,6 +181,11 @@ async def handle_message(
             bot_exchange_limit=await config.get_int(db, "bot_exchange_limit", chat_id),
             age_seconds=max((_utcnow() - now).total_seconds(), 0.0),
             max_reply_age=await config.get_int(db, "max_reply_age", chat_id),
+            busy=_chat_lock(chat_id).locked(),
+            user_recent_replies=user_replies,
+            seconds_since_user_reply=since_user_reply,
+            throttle_after=await config.get_int(db, "throttle_after", chat_id),
+            throttle_step=await config.get_int(db, "throttle_step", chat_id),
         )
     )
     if not decision.speak:
@@ -164,6 +199,14 @@ async def handle_message(
                 decision.reason,
                 replies_today,
                 replies_this_hour,
+            )
+        elif decision.reason == "throttled":
+            log.info(
+                "throttling %s in %s: %s replies in the window, %.0fs since the last",
+                sender.id if sender else "?",
+                chat_id,
+                user_replies,
+                since_user_reply,
             )
         else:
             log.debug("silent in %s: %s", chat_id, decision.reason)
@@ -203,7 +246,7 @@ async def handle_message(
     payload = await _look_at_media(message)
 
     model = await config.get(db, "speak_model", chat_id)
-    async with _typing(message):
+    async with _chat_lock(chat_id), _typing(message):
         result = await llm.generate(
             client,
             model=model,

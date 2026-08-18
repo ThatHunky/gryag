@@ -1,3 +1,4 @@
+import asyncio
 import types as pytypes
 from datetime import datetime, timedelta, timezone
 
@@ -213,3 +214,31 @@ async def test_a_message_from_the_backlog_is_stored_but_not_answered(db, monkeyp
     assert fake.calls == []
     rows = await store.recent_messages(db, -100, limit=10)
     assert [r["text"] for r in rows] == ["гряг шо там"]
+
+
+async def test_a_second_message_is_ignored_while_the_first_is_being_answered(db, monkeypatch):
+    """Generation takes ~2s; in this chat three people can address the bot inside that
+    window. Answering all of them replies to a conversation that has already moved on."""
+    await enable_chat(db)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow(client, **kwargs):
+        started.set()
+        await release.wait()
+        return llm.LlmResult("повільна", 0, 600, 0, 10, 100, 1200, 0.0005)
+
+    monkeypatch.setattr(handlers.llm, "generate", slow)
+    first = FakeMessage(text="гряг раз", message_id=1)
+    task = asyncio.create_task(
+        handlers.handle_message(first, db, client=None, persona="p", bot_id=77)
+    )
+    await started.wait()
+
+    second = FakeMessage(text="гряг два", message_id=2)
+    ignored = await handlers.handle_message(second, db, client=None, persona="p", bot_id=77)
+
+    release.set()
+    assert await task == "повільна"
+    assert ignored is None
+    assert second.replies == []

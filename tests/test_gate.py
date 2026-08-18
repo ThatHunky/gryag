@@ -151,3 +151,50 @@ def test_staleness_is_checked_before_the_caps():
     )
 
     assert decision.reason == "too_old"
+
+
+def test_says_nothing_while_it_is_already_writing():
+    decision = should_speak(make(mentions_bot=True, busy=True))
+
+    assert decision.speak is False
+    assert decision.reason == "busy"
+
+
+def test_the_first_few_replies_to_one_person_are_free():
+    from gryag.gate import required_gap
+
+    assert required_gap(0, 3, 20) == 0
+    assert required_gap(2, 3, 20) == 0
+
+
+def test_the_gap_grows_with_each_further_reply():
+    from gryag.gate import required_gap
+
+    assert required_gap(3, 3, 20) == 20
+    assert required_gap(4, 3, 20) == 40
+    assert required_gap(5, 3, 20) == 60
+
+
+def test_a_person_leaning_on_the_bot_is_slowed_down():
+    decision = should_speak(
+        make(mentions_bot=True, user_recent_replies=5, seconds_since_user_reply=10)
+    )
+
+    assert decision.speak is False
+    assert decision.reason == "throttled"
+
+
+def test_the_throttle_lets_them_through_once_they_wait():
+    decision = should_speak(
+        make(mentions_bot=True, user_recent_replies=5, seconds_since_user_reply=90)
+    )
+
+    assert decision.speak is True
+
+
+def test_a_quiet_person_is_never_throttled():
+    decision = should_speak(
+        make(mentions_bot=True, user_recent_replies=1, seconds_since_user_reply=0)
+    )
+
+    assert decision.speak is True

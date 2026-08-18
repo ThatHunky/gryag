@@ -38,6 +38,11 @@ DEFAULTS: dict[str, str] = {
     # Seconds. Older messages are still stored, just never answered — this is what makes
     # replaying the restart backlog safe.
     "max_reply_age": "300",
+    # Dynamic throttle, per person. Free for the first `throttle_after` replies inside
+    # the window, then each further one demands a gap that grows by `throttle_step`.
+    "throttle_after": "3",
+    "throttle_step": "20",
+    "throttle_window": "600",
     # Google Search grounding and URL fetching. Server-side, so they cost no prompt
     # tokens; search is free to 5,000/month, fetched pages bill as input tokens.
     "tools_enabled": "1",

@@ -1,0 +1,7 @@
+aiogram>=3.30
+google-genai>=2.18
+aiosqlite>=0.22
+python-dotenv>=1.0
+pyyaml>=6.0
+pytest>=9.0
+pytest-asyncio>=1.4

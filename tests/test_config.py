@@ -53,5 +53,5 @@ async def test_all_for_chat_merges_every_layer(db):
 async def test_reply_caps_are_high_enough_for_a_busy_chat(db):
     """Regression: the first values, 60/day and 10/hour, silenced the bot within an
     evening of people trying it out. The valve is for runaway loops, not for rationing."""
-    assert await config.get_int(db, "hourly_reply_cap") >= 30
-    assert await config.get_int(db, "daily_reply_cap") >= 200
+    assert await config.get_int(db, "hourly_reply_cap") >= 120
+    assert await config.get_int(db, "daily_reply_cap") >= 800

@@ -21,13 +21,17 @@ DEFAULTS: dict[str, str] = {
     "max_output_tokens": "1500",
     # trigger
     "keywords": "гряг",
-    "context_messages": "30",
+    # 30 messages is only ~4.4 minutes of wall clock in a chat that runs at a median of
+    # 6 seconds between messages. 60 buys ~14 minutes and 98% of reply targets, measured.
+    "context_messages": "60",
     # Safety valves. These exist to stop a runaway gate, not to ration replies: a bug
     # fires hundreds a minute, while people poking a new bot in a chat that runs at
     # 3,000 messages a day comfortably pass twenty in an hour. The first values here
-    # were 60/10 and the hourly one silenced the bot within the first evening.
-    "daily_reply_cap": "200",
-    "hourly_reply_cap": "30",
+    # were 60/10 and the hourly one silenced the bot within the first evening; 30/hour
+    # was still being approached within an hour of raising it. A runaway gate fires
+    # hundreds a minute, so these stay a real backstop while never binding real use.
+    "daily_reply_cap": "800",
+    "hourly_reply_cap": "120",
     # How many bot messages may pile up before gryag stops answering other bots.
     # Any human line resets the count, so this only ever bites a bot-to-bot loop.
     "bot_exchange_limit": "3",

@@ -1,8 +1,14 @@
 # Gryag V3 — Design Spec
 
 **Date:** 2026-08-19
-**Status:** approved, ready for implementation planning
+**Status:** built and running. Phases 1–3 are implemented; phase 3 ships switched off.
 **Supersedes:** `HANDOFF.md` (deleted; its surviving content is folded in below)
+**Last synced with the code:** 2026-08-19, after the phase 3 deploy.
+
+Sections 1–4 are the evidence the design rests on and have not changed. Sections 5 onward
+describe what is actually running, including several things the original design did not
+anticipate — tools, images, bans — and several places where a measurement in production
+overruled a decision made on paper. Those are called out where they occur.
 
 ---
 
@@ -241,17 +247,27 @@ gryag-digest.timer  →  gryag-digest.service    once a day at 04:00, exits
 
 | module | responsibility | depends on |
 |---|---|---|
-| `handlers` | receive updates, persist messages | `store` |
-| `gate` | pure code: speak or not | config, chat state |
-| `context` | assemble the prompt from its layers | `store` |
-| `llm` | native Gemini call, usage telemetry | — |
-| `admin` | inline-keyboard menu | `store`, config |
+| `handlers` | receive updates, persist messages, route a reply | everything below |
+| `gate` | pure code: speak or not | nothing |
+| `context` | assemble the prompt from its layers | — |
+| `llm` | native Gemini call, tools, usage telemetry | — |
+| `media` | detect, fetch and type attachments | — |
+| `images` | Nano Banana generation and editing, whitelist | `llm` |
+| `menu` | the admin menu's shape, as data | `config` |
+| `admin` | inline keyboard, spend panel, `/nb`, `/unban` | `store`, `config`, `menu` |
 | `digest` | daily job: summaries + fact extraction | `store`, `llm` |
+| `proactive` | the loop that speaks into a silence | `store`, `llm` |
 | `store` | SQLite, schema, migrations | — |
+| `config` | layered settings, secrets | `store` |
+
+`menu` exists apart from `admin` so the layout can be tested without a Telegram client;
+a test asserts every menu entry names a real config key and every default is among the
+offered choices.
 
 `gate` has no network and no LLM access by construction. It is a pure function of config
 and chat state, fully testable offline. This is the structural difference from legacy,
-where deciding whether to answer itself cost money.
+where deciding whether to answer itself cost money. It now carries fifteen reasons to stay
+quiet and five to speak, and every one of them is covered by a table-driven test.
 
 ### 5.2 Message path
 
@@ -262,11 +278,20 @@ persist row in messages   (always, even when the bot will stay silent)
    ↓
 gate.should_speak() ── no ──→ done
    ↓ yes
-context.build() → llm.generate() → send → persist reply + usage row
+claim the chat ── already claimed ──→ done
+   ↓
+build context → look at media if asked → draw, or generate → reply → persist + usage
 ```
 
 Messages are stored **before** the gate decides. Otherwise history has holes exactly where
 the bot stayed quiet, and the digest job summarises an incomplete day.
+
+**The claim is not a lock, and that distinction cost a bug.** The first version checked an
+`asyncio.Lock` while building the gate input and acquired it a dozen awaits later. A
+restart replays the update backlog, so a batch all saw the chat free, queued on the lock,
+and each produced a reply — five landed in the same second. It is now a set, checked and
+added with no await in between, which on a single-threaded loop is atomic. Whoever loses
+says nothing.
 
 ### 5.3 Configuration lives in the database
 
@@ -289,13 +314,14 @@ chats       (chat_id PK, title, enabled, added_at)
 users       (chat_id, user_id, display_name, alias, pronouns,
              PRIMARY KEY (chat_id, user_id))
 messages    (chat_id, message_id, user_id, ts, text,
-             media_kind, file_id, reply_to, is_bot,
+             media_kind, file_id, reply_to, is_bot, sender_is_bot,
              PRIMARY KEY (chat_id, message_id))
 facts       (id PK, chat_id, user_id, text, source_day, created_at)
 summaries   (chat_id, kind, period_start, period_end, text, tokens)
 config      (scope, chat_id, key, value)
 usage       (id PK, ts, chat_id, purpose, model, prompt_tok, cached_tok,
-             visible_tok, thought_tok, latency_ms, cost_usd)
+             visible_tok, thought_tok, latency_ms, cost_usd, searched)
+bans        (chat_id, user_id, until_ts, reason, PRIMARY KEY (chat_id, user_id))
 chat_state  (chat_id PK, last_spoke_ts, last_ambient_ts, muted_until)
 
 CREATE INDEX ON messages (chat_id, ts);
@@ -303,7 +329,17 @@ CREATE INDEX ON messages (chat_id, reply_to);
 ```
 
 `summaries.kind` is `'day'` or `'week'`. `config.scope` is `'global'` or `'chat'`.
-`usage.purpose` is `'reply'` or `'digest'`.
+`usage.purpose` is `'reply'`, `'digest'`, `'image'` or `'proactive'`.
+
+**`is_bot` and `sender_is_bot` are different questions**, and conflating them was a bug.
+`is_bot` means "gryag said this" and drives the reply caps; `sender_is_bot` means the
+author is any bot at all. Without the second, messages from the three other bots in the
+chat were stored as human and the bot-to-bot loop guard could not see them. Added by
+migration, since the table already had live data.
+
+Migrations are a list of `ALTER TABLE` statements applied at connect and ignored when they
+have already run. There is no version table: at this size, attempting each statement and
+swallowing the duplicate-column error is less machinery than tracking which ran.
 
 **Every message is kept forever.** At 3,087/day that is ~1.1M rows and 10–15 MB of text per
 year — nothing for SQLite. The payoff is that summaries and facts can be regenerated from
@@ -346,6 +382,11 @@ photos, voice, video and video notes alike.
 **Facts are selected by presence** — only about people appearing in the context window, not
 all 27 participants. That is why 150 tokens is enough.
 
+**A partial quote is rendered separately.** Telegram lets a person quote part of a message
+when replying, and that selection is the whole point of the reply: somebody quoting two
+words out of a long message is asking about those two words. Before this was handled the
+model received the entire parent message and had to guess which fragment mattered.
+
 **The context ends with an explicit boundary marker** after which the model writes only its
 own next line: no name, no brackets, no continuation of the log. Without this marker, 1
 reply in 16 was malformed (§4.4).
@@ -369,36 +410,104 @@ and where it becomes one, the keyword gets edited.
 
 ### 8.2 Ambient interjection — target ~10 per day
 
-A die is rolled on each message, with the probability derived from the chat's measured
-rate. A candidate then passes local filters, none of which call the model:
+**Built, and shipped switched off.** `ambient_enabled` defaults to `0`.
+
+A die is rolled on each message. The probability is **derived per chat from the last 24
+hours** rather than pinned to a constant: `ambient_per_day` divided by however many
+messages that chat produced which were worth interrupting over. A constant would swamp a
+quiet chat and vanish in a loud one. Measured on the live chat, that came to 63 candidates
+a day and a probability of 0.159, which is the requested ten.
+
+A candidate must pass filters, none of which call the model:
 
 - not from a bot (three other bots produce 6% of traffic)
 - not an empty media message (17%)
 - text longer than 30 characters — at a median of 19 this discards "ага" and "в"
-- not inside a rapid reply exchange between two other people
-- at least 20 minutes since the bot last spoke
+- not a reply to somebody else — two people mid-exchange are talking, not leaving a gap
+  (39% of messages are replies)
+- at least `ambient_cooldown` seconds since the bot last spoke, default 20 minutes
 
 ### 8.3 Proactive after silence
+
+**Built, and shipped switched off.** `proactive_enabled` defaults to `0`.
 
 Speaks unprompted when the chat has been quiet for ≥3 hours, local time is inside the
 allowed window, and it has not spoken proactively for ≥6 hours. Measured, this will fire
 almost exclusively in the morning: only 18 gaps longer than 15 minutes occurred in two days.
 
+**This is the only path with a loop of its own.** Every other decision starts from an
+incoming message, and here by definition none is arriving, so `proactive` ticks every ten
+minutes and asks each enabled chat whether it has gone quiet. Quiet hours are evaluated in
+**Kyiv time**, not UTC: the measured dead zone of 03:00–07:00 is local, and running it
+against UTC would put the silence in the wrong part of the day.
+
 ### 8.4 Never speaks
 
-Chat disabled, mute active, message from a bot, or a safety valve tripped.
+The full list, each with a stable reason slug that appears in the log:
+
+| reason | why |
+|---|---|
+| `chat_disabled` | the chat was never switched on |
+| `chat_muted` | the admin told it to shut up for N hours |
+| `sender_is_self` | its own message |
+| `foreign_command` | a slash command belonging to one of the other bots |
+| `user_banned` | it banned this person itself (§8.7) |
+| `too_old` | a message replayed from the backlog after downtime |
+| `busy` | already writing an answer in this chat |
+| `daily_cap` / `hourly_cap` | safety valve |
+| `throttled` | this person has been answered a lot, very recently |
+| `bot_not_addressed` / `bot_exchange_limit` | another bot talking, or a loop forming |
+| `quiet_hours` / `ambient_cooldown` / `not_worth_it` | ambient rules |
+| `not_addressed` | nobody was talking to it |
+
+**A safety valve firing is logged at warning level; `not_addressed` at debug.** The first
+version logged everything at debug, so when the hourly cap silenced the bot there was no
+line above debug to say why — from inside the chat it looked simply broken.
 
 ### 8.5 Safety valves, separate from the logic
 
-Ceilings per hour and per day (default 60 replies/day). These exist for bugs, not for
-money: if the gate breaks and starts firing on everything, the ceiling stops it before
-anyone wakes up. **Direct addresses count towards the ceiling too** — otherwise it is
-trivially bypassed by everyone calling the bot at once.
+Ceilings per hour and per day. These exist for bugs, not for rationing: a runaway gate
+fires hundreds a **minute**, while people enjoying a new bot comfortably pass a hundred an
+hour. **Direct addresses count towards the ceiling too** — otherwise it is trivially
+bypassed by everyone calling the bot at once.
 
-### 8.6 Quiet hours
+The defaults were wrong three times, each caught in production:
 
-02:00–08:00 suppress **ambient and proactive only**. Direct address works around the clock:
-if someone writes to the bot at three in the morning, silence is the wrong answer.
+| set to | outcome |
+|---|---|
+| 60/day, 10/hour | silenced the bot within its first evening |
+| 200/day, 30/hour | reached 24 within an hour of raising it |
+| 800/day, 120/hour | hit outright the same evening |
+| **1500/day, 300/hour** | current; roughly $0.42 in the worst hour |
+
+The lesson is recorded in the code as a comment and a regression test, because the numbers
+look arbitrary and invite being "tidied" back down.
+
+### 8.6 Dynamic throttle, per person
+
+The cap is a wall; this is the pacing. A person gets `throttle_after` replies free inside
+a rolling window, after which each further reply demands a gap that grows by
+`throttle_step`: 15s, 30s, 45s. Someone chatting never notices; someone hammering the bot
+is answered more and more slowly and is never cut off entirely.
+
+The first values — 3 free per 10 minutes with a 20s step — silenced normal conversation
+within an evening, because one person easily earns five replies in ten minutes without
+being a nuisance. Now 6 free per 5 minutes with a 15s step.
+
+### 8.7 The bot can ignore someone itself
+
+`ban_user(minutes, reason)` is the one client-side tool. The model decides who and for how
+long; the two-day ceiling is not negotiable. A ban stops replies and nothing else — the
+person's messages are still stored and still appear in the context window, so the
+conversation reads correctly to everyone else. Being ignored is not being erased.
+
+`/unban` in reply lifts it; `/unban` alone lists who is serving one.
+
+### 8.8 Quiet hours
+
+02:00–08:00 Kyiv time suppress **ambient and proactive only**. Direct address works around
+the clock: if someone writes to the bot at three in the morning, silence is the wrong
+answer. The window wraps midnight correctly, and setting both bounds equal disables it.
 
 ---
 
@@ -407,7 +516,7 @@ if someone writes to the bot at three in the morning, silence is the wrong answe
 Runs at 04:00 per active chat:
 
 1. Read yesterday's messages (~28,500 tokens).
-2. One call to a cheap model: today's summary plus extracted facts about participants.
+2. **Send them in ~2,000-token chunks**, each producing a partial summary and facts.
 3. Regenerate the weekly summary **from the seven daily summaries, not from raw messages** —
    2,100 tokens of input instead of 200,000, a hundredfold cheaper and more stable, since it
    does not rewrite history from scratch each time.
@@ -425,18 +534,91 @@ has no voice requirement. At 0.86M tokens/month the difference is $0.64 on 3.7 F
 call a day.
 
 Memory extraction happens here and only here. The bot never calls memory tools while
-replying; it receives finished facts in its prompt.
+replying; it receives finished facts in its prompt. Facts about **gryag itself** are
+excluded: the persona already says who it is, and storing "гряг is sarcastic" would feed
+the bot its own description as something to live up to.
+
+### 9.1 Why the day is chunked
+
+Sending a whole day at once was **refused outright**. The response carried no candidates
+at all and `prompt_feedback.block_reason: PROHIBITED_CONTENT`. That filter is not
+configurable — the `BLOCK_NONE` settings that make the persona possible do not touch it —
+and it fires on the aggregate, which is why the reply path never trips it: a short window
+wrapped in a persona passes where 8,000 tokens of raw transcript does not.
+
+Chunking means a refused stretch costs that stretch. The live run put 5 of 6 chunks
+through and produced a usable summary and twelve facts.
+
+Two failures were found the same way, both silent:
+
+- An empty response body was parsed as `{}` and stored as a blank summary, which the
+  weekly pass then dutifully summarised — in English, reporting that there were no
+  messages. **An empty body is now a failure, not an empty result.**
+- A day where every chunk fails writes nothing rather than an empty summary.
 
 ---
+
+## 9a. What the bot can do besides talk
+
+Four capabilities were added after the original design. Three are **server-side Gemini
+tools**, which matters: they cost nothing in the prompt, unlike the 137-token tool
+manifest that was cut from the persona in §4.4.
+
+| capability | how | cost |
+|---|---|---|
+| Google Search grounding | server-side tool | 5,000 free/month on 3.x, then $14/1,000 |
+| Reading a URL | server-side tool | billed as input tokens, so a large page inflates the prompt |
+| Running code | server-side tool | ordinary tokens |
+| Banning someone | client-side function | a second round trip, only when it fires |
+| Drawing and editing images | separate model call | per image, whitelist only |
+
+**Mixing a client-side function with the server-side tools is refused** unless
+`tool_config.include_server_side_tool_invocations` is set — the API says so in the error,
+and it is the only reason the combination works.
+
+**A tool call returns no text of its own.** The model asking to ban somebody produces an
+empty reply, so the result is fed back and it gets a second turn to speak. That is the
+only place in the reply path costing two round trips.
+
+### 9a.1 Images
+
+Nano Banana 2 (`gemini-3.1-flash-image`) generates and edits. Measured 2026-08-19:
+generation ~8s, editing ~7s, ~900 KB per JPEG. Nano Banana Pro (`gemini-3-pro-image`)
+takes ~16s for no visible gain at this size; Lite manages ~3s.
+
+Billed per image rather than per token, so unlike the tools above it cannot be open to a
+room of 33 people. The whitelist starts as the admin alone and is edited with `/nb` in
+reply to somebody. Neither `/nb` nor `/unban` is registered with `setMyCommands`, so
+neither appears in anyone's menu.
+
+**Whether a message is a draw request is decided in plain code**, by looking for verbs
+like `намалюй`. Routing it through the model would cost a round trip on every message to
+answer a question that is almost always "no".
+
+### 9a.2 Media the bot is asked to look at
+
+Context always carries a two-token marker — `[фото]`, `[голосове]`, `[відео]`. Actually
+looking is the expensive path and happens only when the bot is addressed about a specific
+file, either attached to the triggering message or to the one it replies to.
+
+Without this the model bluffs. Asked "як тобі" about a GIF it had never seen, it reviewed
+it anyway, and then described its contents when pressed.
+
+Animated stickers are refused: they are `.tgs`, a gzipped Lottie file, which no model
+reads.
 
 ## 10. Model configuration
 
 ### 10.1 Default
 
-Speaking model: `gemini-flash-latest` (currently 3.7 Flash), `thinkingBudget: 0`.
-Digest model: `gemini-2.5-flash-lite`.
+Speaking model: `gemini-flash-latest` (currently 3.7 Flash), `thinking_budget: 0`.
+Digest model: `gemini-2.5-flash-lite`. Image model: `gemini-3.1-flash-image`.
 
-Both are `config` rows, changeable from the menu without a restart.
+All are `config` rows. **Twenty-four settings now live there**, and the menu is generated
+from a table of them, so adding a knob to the bot adds it to the menu. Nothing in the
+running system requires a restart to change — including the persona, which is held in a
+mutable box the menu can swap. Editing a voice and waiting for a deploy is how a voice
+never gets tuned.
 
 ### 10.2 Quality is judged live, not blind
 
@@ -502,31 +684,73 @@ the only place they contend.
 
 **Telegram send fails** — logged, not retried, to avoid duplicate posts.
 
+**A prompt refused outright** — `PROHIBITED_CONTENT` with no candidates. Handled where it
+happens: the digest drops that chunk (§9.1), an image request is dropped silently.
+
+**Editing a menu message to identical content** — Telegram treats an edit that changes
+nothing as an error, which tapping the section you are already in produces. Swallowed by
+message, not by blanket catch.
+
+**Deleted messages** — the Bot API sends ordinary bots no deletion update at all, so a
+deleted message stays in the transcript forever and the bot may bring it up. This cannot
+be fixed from here; it is a property of the platform worth knowing.
+
+**Edited messages** — followed and applied to the stored text, but never answered.
+Answering edits would let anyone re-trigger the bot by editing an old message.
+
 ---
 
 ## 12. Testing
 
-The gate is a pure function, so it carries most of the test value: a table of input states
-against expected decisions, with no network, no database and no model. All of the
-behavioural complexity lives there.
+190 tests, none of which make a live call.
 
-The context builder is tested against a fixture database **seeded from the real export** —
-6,573 genuine messages already on disk. The central assertion: no block ever exceeds its
-cap, at any slice of history.
+The gate carries most of the value, as intended: 54 tests over a pure function, covering
+every reason to speak and every reason not to. It has no network, no database and no
+model, so the whole of the bot's behaviour can be exercised for free.
 
-The LLM layer is tested against recorded responses. No test makes a live call.
+The context builder asserts that **no block ever exceeds its cap**, on any slice of
+history. The LLM layer runs against fake clients, including one that returns a refusal
+with no candidates and one that returns a tool call.
+
+Three kinds of test exist here that are not about correctness in the usual sense, and each
+was added after the mistake it now prevents:
+
+- **Regression tests on defaults.** Reply caps and throttle thresholds are asserted to be
+  at least as generous as the values production forced. The numbers look arbitrary and
+  invite tidying.
+- **A test on the menu's shape** — every entry names a real config key, every default is
+  among its offered choices, and every label is short enough that Telegram will not
+  ellipsise it. Menus fail visually, where no assertion normally looks.
+- **A test that reads the entrypoint's source** to confirm the proactive loop is handed
+  the objects it needs. It was once started with three names that did not exist there;
+  the process died on boot and systemd restarted it into the same crash. No unit test
+  catches that, because the wiring is the bug.
 
 ---
 
 ## 13. Deployment
 
+**Live since 2026-08-19.**
+
 - `gryag-bot.service` — systemd, webhook mode, restart on failure.
-- Caddy terminates TLS on a new subdomain of `dobrovolskyi.com.ua` and reverse-proxies to
-  the bot's local port. Caddy already serves a dozen subdomains on that domain.
+- `gryag.dobrovolskyi.com.ua` — A record to 152.53.101.121, proxied, created via the
+  Cloudflare API. Caddy terminates TLS and reverse-proxies to **127.0.0.1:8137**.
+- **The port is configurable and is not 8080 or 8081.** Both are held by docker-proxy on
+  this host: binding failed, and Telegram meanwhile received a `302` from whichever
+  container answered instead, which reads as a webhook fault rather than a port clash.
+- `MODE=webhook|polling` in `.env`. Polling needs nothing external and is the fallback if
+  DNS or TLS ever misbehave; at ~35 replies a day the difference is not observable.
+- Verified end to end rather than by eye: a POST without the secret is refused with 401,
+  one with the secret is accepted with 200, and the pending queue drained to zero.
 - `gryag-digest.timer` — daily at 04:00, persistent so a missed run catches up.
-- Python 3.13, `.venv` in place. New dependencies: `aiogram`, `google-genai`, `aiosqlite`.
-  The current `requirements.txt` (`openai`, `pyyaml`, `python-dotenv`) serves the eval
-  harness only.
+- Python 3.13, `.venv` in place. `aiogram` 3.30, `google-genai` 2.18, `aiosqlite` 0.22,
+  `pytest` 9 with `pytest-asyncio`.
+
+**The update backlog is deliberately not dropped.** `drop_pending_updates=True` punched
+11–16 message holes in the stored history at every restart; six restarts lost 81 of 329
+messages, a quarter of the chat. Telegram holds updates for 24 hours, they are replayed
+and stored, and `max_reply_age` is what stops the bot answering an argument that ended an
+hour ago.
 - Code lands on branch `main` of `ThatHunky/gryag`, overwriting the discarded V2
   architecture. `legacy` is left untouched.
 
@@ -565,6 +789,19 @@ pricing error corrected in §3.4; read them for context, not for numbers.
 
 ## 14. Cost model
 
+**The usage assumption was wrong, and by a lot.** The design assumed ~35 replies a day.
+The first evening in the real chat produced 130, with 120 inside a single hour, because
+people play with a new bot. Measured cost per reply is **$0.0014** at a ~1,460-token
+prompt on `flash-latest`.
+
+At a hundred replies a day that is ~$4.20/month; at three hundred, ~$12.60. The $10
+prepaid covers weeks rather than months if the current pace holds. The two levers, in
+order of size: switch the speaking model to 2.5 Flash from the menu (input 2.5× cheaper,
+thinking 9× cheaper), or lower the hourly cap.
+
+The table below keeps the original per-reply arithmetic, which is still correct — only the
+volume assumption changed.
+
 Assumptions: ~1,890-token prompt, ~35 replies/day (~1,100/month), thinking disabled,
 no cache credit.
 
@@ -586,15 +823,23 @@ this was measured.
 
 ## 15. Rollout
 
-1. **Phase 1** — one chat, direct address only, no ambient, no proactive. Includes
-   `usage` telemetry and a model/effort switch, because §10.2 makes those the instruments
-   the voice is judged with. Verify voice, cost and latency against the numbers in §14.
-2. **Phase 2** — digest job, summaries, facts.
-3. **Phase 3** — ambient and proactive triggers.
-4. **Phase 4** — full admin menu, media on demand.
+1. **Phase 1 — done.** Direct address, `usage` telemetry, model switch.
+2. **Phase 2 — done.** Digest job, summaries, facts, on a daily timer.
+3. **Phase 3 — built, switched off.** Ambient and proactive both default to `0`. They are
+   the features most likely to annoy a room, and they should be turned on one at a time
+   with somebody watching.
+4. **Phase 4 — done.** Full menu, mute, persona hot reload, media on demand.
 
-Phase 1 is deliberately the smallest thing that can be judged. Ambient interjection is the
-feature most likely to annoy people, and it should not ship before the voice is known good.
+Delivered outside the plan, in response to what the chat actually needed: search, URL
+reading and code execution; image generation and editing; the ban tool; partial quotes;
+edit handling; ignoring other bots' commands; the per-person throttle; per-chat
+serialisation.
+
+**Everything above shipped in one session, which is why several defaults were wrong on
+first contact.** The pattern is worth naming: every value that had to be guessed — reply
+caps, throttle thresholds, `max_output_tokens` — was wrong the first time and was corrected
+from production evidence within the hour. Each correction carries a comment and a
+regression test, because the corrected values look arbitrary and invite being tidied back.
 
 ---
 
@@ -613,8 +858,19 @@ All four open questions were closed on 2026-08-19.
    effect: the balance drains roughly twice as fast from 1 January until the model is
    changed, so the cost panel is what should prompt the decision, not the calendar.
 
-The only genuinely unknown quantity left is whether the persona holds in live traffic —
-which is, by construction, what phase 1 answers.
+**Answered in production on 2026-08-19: the persona holds.** It stayed in voice across
+war jokes, insults, provocations and a jailbreak attempt, picked up running threads from
+the context window, and used search and code execution without narrating them. No refusals,
+no moralising, no assistant drift.
+
+What is genuinely open now:
+
+1. **Ambient and proactive are untested with real people.** Both are off.
+2. **Cost at the observed pace**, not the assumed one — see §14.
+3. **The digest has never run on its own schedule.** Every run so far was manual; the first
+   automatic one is at 04:00.
+4. **The `PROHIBITED_CONTENT` refusal rate over time.** One chunk in six on the first day.
+   If it climbs, the chunk size is the knob.
 
 ---
 
@@ -623,6 +879,9 @@ which is, by construction, what phase 1 answers.
 Every model or persona change, and what it did. Fill this in as phase 1 runs — without it,
 "the voice got worse" is unattributable to anything.
 
-| Date | Change | Replies/day | $/day | p50 latency | Verdict on the voice |
+| Date | Change | Replies | $/reply | p50 latency | Verdict |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-08-19 | Phase 1 live, `flash-latest`, thinking off | 130 first evening | $0.0014 | ~2.0s | In voice. Held under provocation. |
+| 2026-08-19 | Compressed persona 1,792 → 637 tokens | — | — | — | Replies got shorter and sharper; the format leak disappeared. |
+| 2026-08-19 | Phase 2, digest on Flash-Lite | 6 chunks/day | $0.0027/day | — | Usable summary, 12 facts, 1 chunk refused. |
+| 2026-08-19 | Phase 3 built, left off | — | — | — | Untested with people. |

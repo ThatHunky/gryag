@@ -86,6 +86,28 @@ def _release(chat_id: int) -> None:
     _busy.discard(chat_id)
 
 
+_pending: dict[int, tuple[object, datetime]] = {}
+
+
+def _remember_missed(chat_id: int, message) -> None:
+    """Keep the one message that lost the race, so it can be picked up afterwards.
+
+    Only ever one: catching up on a backlog of five would recreate exactly the burst the
+    claim exists to prevent.
+    """
+    _pending[chat_id] = (message, _utcnow())
+
+
+def _take_missed(chat_id: int, max_age: int) -> object | None:
+    entry = _pending.pop(chat_id, None)
+    if entry is None:
+        return None
+    message, seen_at = entry
+    if (_utcnow() - seen_at).total_seconds() > max_age:
+        return None
+    return message
+
+
 def media_kind_and_file_id(message) -> tuple[str | None, str | None]:
     """Kept as the handler-facing name; the detection itself lives in `media`."""
     return media.detect(message)
@@ -233,12 +255,31 @@ async def _typing(message) -> AsyncIterator[None]:
         yield
 
 
+async def _maybe_answer_missed(message, db, client, persona, bot_id, chat_id: int) -> None:
+    """Sometimes go back to whoever was skipped while the bot was busy.
+
+    Sometimes is the point. Always coming back turns the bot into a queue that services
+    every request in order; never coming back means a direct address vanishes in silence,
+    which from inside the chat is indistinguishable from the bot being broken.
+    """
+    chance = await config.get_int(db, "deferred_chance", chat_id)
+    if chance <= 0 or random.randrange(100) >= chance:
+        _pending.pop(chat_id, None)
+        return
+    missed = _take_missed(chat_id, await config.get_int(db, "deferred_max_age", chat_id))
+    if missed is None:
+        return
+    log.info("going back to a message that was skipped in %s", chat_id)
+    await handle_message(missed, db, client, persona, bot_id, deferred=True)
+
+
 async def handle_message(
     message: Message,
     db: aiosqlite.Connection,
     client,
     persona: str,
     bot_id: int,
+    deferred: bool = False,
 ) -> str | None:
     chat_id = message.chat.id
 
@@ -275,25 +316,30 @@ async def handle_message(
 
     text = message.text or message.caption or ""
     replied = message.reply_to_message
+    mentions_bot = any(
+        text[e.offset : e.offset + e.length].lstrip("@").lower().endswith("gryag_bot")
+        for e in (message.entities or [])
+        if e.type == "mention"
+    )
+    replies_to_bot = bool(replied and replied.from_user and replied.from_user.id == bot_id)
+    keywords = tuple(
+        k.strip()
+        for k in (await config.get(db, "keywords", chat_id)).split(",")
+        if k.strip()
+    )
+    # Only a direct address is worth returning to after losing the race for the chat.
+    decision_addressed = (
+        mentions_bot or replies_to_bot or gate.mentions_keyword(text, keywords)
+    )
     decision = gate.should_speak(
         gate.GateInput(
             text=text,
             is_bot=bool(sender and getattr(sender, "is_bot", False)),
             is_self=bool(sender and sender.id == bot_id),
             chat_enabled=True,  # checked above, before anything was written down
-            mentions_bot=any(
-                text[e.offset : e.offset + e.length].lstrip("@").lower().endswith("gryag_bot")
-                for e in (message.entities or [])
-                if e.type == "mention"
-            ),
-            replies_to_bot=bool(
-                replied and replied.from_user and replied.from_user.id == bot_id
-            ),
-            keywords=tuple(
-                k.strip()
-                for k in (await config.get(db, "keywords", chat_id)).split(",")
-                if k.strip()
-            ),
+            mentions_bot=mentions_bot,
+            replies_to_bot=replies_to_bot,
+            keywords=keywords,
             replies_today=replies_today,
             replies_this_hour=replies_this_hour,
             daily_cap=await config.get_int(db, "daily_reply_cap", chat_id),
@@ -336,6 +382,11 @@ async def handle_message(
         )
     )
     if not decision.speak:
+        if decision.reason == "busy" and not deferred:
+            # Only a direct address is worth coming back to. An ambient interjection that
+            # lost the race was optional to begin with.
+            if decision_addressed:
+                _remember_missed(chat_id, message)
         # "not addressed" is the normal case and would drown the log. A safety valve
         # firing is not normal: it means the bot went quiet for a reason nobody in the
         # chat can see, which is exactly the failure that must be visible here.
@@ -365,6 +416,11 @@ async def handle_message(
     # here rather than around the model call is the point: everything between the
     # gate and the call is an await, and a batch of updates would otherwise all pass.
     if not _claim(chat_id):
+        # The gate's `busy` check and this claim happen at different moments, and this is
+        # the one that actually decides. A direct address losing here is the common case,
+        # so it is remembered here too — not only on the gate's branch.
+        if not deferred and decision_addressed:
+            _remember_missed(chat_id, message)
         log.debug("already answering in %s", chat_id)
         return None
     try:
@@ -448,6 +504,8 @@ async def handle_message(
         return result.text
     finally:
         _release(chat_id)
+        if not deferred:
+            await _maybe_answer_missed(message, db, client, persona, bot_id, chat_id)
 
 
 async def handle_edit(message, db) -> bool:

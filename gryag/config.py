@@ -45,6 +45,12 @@ DEFAULTS: dict[str, str] = {
     # Seconds. Older messages are still stored, just never answered — this is what makes
     # replaying the restart backlog safe.
     "max_reply_age": "300",
+    # When somebody addresses the bot while it is already answering, that message is
+    # dropped — which from inside the chat reads as being ignored. It is remembered and
+    # sometimes answered afterwards. Sometimes, not always: a bot that always circles
+    # back is a queue, and this one is supposed to be a person who missed something.
+    "deferred_chance": "40",
+    "deferred_max_age": "60",
     # Dynamic throttle, per person. Free for the first `throttle_after` replies inside
     # the window, then each further one demands a gap that grows by `throttle_step`.
     # First values were 3 free replies per 10 minutes with a 20s step, and they silenced

@@ -225,6 +225,10 @@ async def test_a_second_message_is_ignored_while_the_first_is_being_answered(db,
     """Generation takes ~2s; in this chat three people can address the bot inside that
     window. Answering all of them replies to a conversation that has already moved on."""
     await enable_chat(db)
+    from gryag import config as cfg
+
+    # Pin the deferral off: this test is about the claim, not about coming back later.
+    await cfg.set(db, "deferred_chance", "0", chat_id=-100)
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -367,6 +371,9 @@ async def test_a_whole_batch_arriving_at_once_produces_one_reply(db, monkeypatch
     """Regression: a restart replays the backlog, every message evaluated `busy` as false
     at the same moment, and five replies landed in the same second."""
     await enable_chat(db)
+    from gryag import config as cfg
+
+    await cfg.set(db, "deferred_chance", "0", chat_id=-100)
     calls = 0
 
     async def slow(client, **kwargs):
@@ -470,3 +477,92 @@ async def test_an_enabled_chat_is_still_recorded_even_when_the_bot_says_nothing(
 
     rows = await store.recent_messages(db, -100, limit=10)
     assert [r["text"] for r in rows] == ["балачки без звертання"]
+
+
+async def test_a_direct_address_lost_to_the_race_is_sometimes_answered_afterwards(db, monkeypatch):
+    """Being skipped while the bot answers somebody else reads, from inside the chat, as
+    being ignored — which is what prompted this. It comes back sometimes, not always."""
+    await enable_chat(db)
+    from gryag import config as cfg
+
+    await cfg.set(db, "deferred_chance", "100", chat_id=-100)
+    answered: list[str] = []
+
+    async def slow(client, **kwargs):
+        await asyncio.sleep(0.05)
+        answered.append(kwargs["user"])
+        return llm.LlmResult("ага", 0, 600, 0, 10, 100, 50, 0.0005)
+
+    monkeypatch.setattr(handlers.llm, "generate", slow)
+    first = FakeMessage(text="гряг раз", message_id=1)
+    second = FakeMessage(text="гряг два", message_id=2, user_id=9)
+
+    task = asyncio.create_task(
+        handlers.handle_message(first, db, client=None, persona="p", bot_id=77)
+    )
+    await asyncio.sleep(0.01)
+    assert await handlers.handle_message(second, db, client=None, persona="p", bot_id=77) is None
+    await task
+
+    assert second.replies == ["ага"]
+
+
+async def test_it_does_not_always_come_back(db, monkeypatch):
+    await enable_chat(db)
+    from gryag import config as cfg
+
+    await cfg.set(db, "deferred_chance", "0", chat_id=-100)
+
+    async def slow(client, **kwargs):
+        await asyncio.sleep(0.05)
+        return llm.LlmResult("ага", 0, 600, 0, 10, 100, 50, 0.0005)
+
+    monkeypatch.setattr(handlers.llm, "generate", slow)
+    first = FakeMessage(text="гряг раз", message_id=1)
+    second = FakeMessage(text="гряг два", message_id=2, user_id=9)
+
+    task = asyncio.create_task(
+        handlers.handle_message(first, db, client=None, persona="p", bot_id=77)
+    )
+    await asyncio.sleep(0.01)
+    await handlers.handle_message(second, db, client=None, persona="p", bot_id=77)
+    await task
+
+    assert second.replies == []
+
+
+async def test_an_ambient_message_that_lost_the_race_is_not_worth_returning_to(db, monkeypatch):
+    await enable_chat(db)
+    from gryag import config as cfg
+
+    await cfg.set(db, "deferred_chance", "100", chat_id=-100)
+
+    async def slow(client, **kwargs):
+        await asyncio.sleep(0.05)
+        return llm.LlmResult("ага", 0, 600, 0, 10, 100, 50, 0.0005)
+
+    monkeypatch.setattr(handlers.llm, "generate", slow)
+    first = FakeMessage(text="гряг раз", message_id=1)
+    passerby = FakeMessage(text="просто балачки без звертання", message_id=2, user_id=9)
+
+    task = asyncio.create_task(
+        handlers.handle_message(first, db, client=None, persona="p", bot_id=77)
+    )
+    await asyncio.sleep(0.01)
+    await handlers.handle_message(passerby, db, client=None, persona="p", bot_id=77)
+    await task
+
+    assert passerby.replies == []
+
+
+async def test_a_stale_missed_message_is_dropped(db, monkeypatch):
+    await enable_chat(db)
+    from datetime import timedelta
+
+    from gryag import config as cfg
+
+    await cfg.set(db, "deferred_chance", "100", chat_id=-100)
+    stale = FakeMessage(text="гряг агов", message_id=5)
+    handlers._pending[-100] = (stale, handlers._utcnow() - timedelta(minutes=5))
+
+    assert handlers._take_missed(-100, 60) is None

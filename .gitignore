@@ -19,3 +19,6 @@ chat_exports/
 
 # Real production prompt dump: names, user IDs, stored memory facts. Never push.
 eval/reference/
+
+# SpecStory records the whole assistant conversation, including anything pasted into it.
+.specstory/

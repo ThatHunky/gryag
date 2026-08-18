@@ -74,6 +74,7 @@ SECTIONS: dict[str, tuple[str, tuple[Setting, ...]]] = {
             Setting("throttle_after", "Безкоштовних відповідей", _numbers(3, 6, 12)),
             Setting("throttle_step", "Крок паузи", _numbers(10, 15, 30, suffix=" с")),
             Setting("hourly_reply_cap", "Стеля за годину", _numbers(120, 300, 600)),
+            Setting("deferred_chance", "Вертається до пропущених", _numbers(0, 40, 80, suffix="%")),
             Setting("quiet_from", "Тиша з", _numbers(0, 2, 4, suffix=":00")),
             Setting("quiet_to", "Тиша до", _numbers(6, 8, 10, suffix=":00")),
         ),

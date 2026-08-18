@@ -18,5 +18,7 @@ def _clear_busy_chats():
     from gryag import handlers
 
     handlers._busy.clear()
+    handlers._pending.clear()
     yield
     handlers._busy.clear()
+    handlers._pending.clear()

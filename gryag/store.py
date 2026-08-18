@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS messages (
     file_id    TEXT,
     reply_to   INTEGER,
     is_bot     INTEGER NOT NULL DEFAULT 0,
+    sender_is_bot INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (chat_id, message_id)
 );
 
@@ -79,7 +80,8 @@ CREATE TABLE IF NOT EXISTS usage (
     visible_tok INTEGER NOT NULL,
     thought_tok INTEGER NOT NULL,
     latency_ms  INTEGER NOT NULL,
-    cost_usd    REAL NOT NULL
+    cost_usd    REAL NOT NULL,
+    searched    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS chat_state (
@@ -92,8 +94,26 @@ CREATE TABLE IF NOT EXISTS chat_state (
 
 MESSAGE_COLUMNS = """
     m.message_id, m.user_id, m.ts, m.text, m.media_kind, m.file_id,
-    m.reply_to, m.is_bot, u.alias, u.display_name
+    m.reply_to, m.is_bot, m.sender_is_bot, u.alias, u.display_name
 """
+
+MIGRATIONS = (
+    # `is_bot` means "gryag said this" and drives the reply caps. Messages from *other*
+    # bots need their own flag, or the loop guard cannot see them.
+    "ALTER TABLE messages ADD COLUMN sender_is_bot INTEGER NOT NULL DEFAULT 0",
+    # Google Search grounding is free for the first 5,000 requests a month and $14 per
+    # 1,000 after, so the panel needs to be able to count them.
+    "ALTER TABLE usage ADD COLUMN searched INTEGER NOT NULL DEFAULT 0",
+)
+
+
+async def _migrate(db: aiosqlite.Connection) -> None:
+    for statement in MIGRATIONS:
+        try:
+            await db.execute(statement)
+        except aiosqlite.OperationalError:
+            pass  # already applied
+    await db.commit()
 
 
 async def connect(path: str) -> aiosqlite.Connection:
@@ -104,6 +124,7 @@ async def connect(path: str) -> aiosqlite.Connection:
     await db.execute("PRAGMA foreign_keys=ON")
     await db.executescript(SCHEMA)
     await db.commit()
+    await _migrate(db)
     return db
 
 
@@ -138,15 +159,28 @@ async def save_message(
     file_id: str | None,
     reply_to: int | None,
     is_bot: bool,
+    sender_is_bot: bool = False,
 ) -> None:
     await db.execute(
         """
         INSERT INTO messages
-            (chat_id, message_id, user_id, ts, text, media_kind, file_id, reply_to, is_bot)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (chat_id, message_id, user_id, ts, text, media_kind, file_id, reply_to,
+             is_bot, sender_is_bot)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (chat_id, message_id) DO NOTHING
         """,
-        (chat_id, message_id, user_id, ts, text, media_kind, file_id, reply_to, int(is_bot)),
+        (
+            chat_id,
+            message_id,
+            user_id,
+            ts,
+            text,
+            media_kind,
+            file_id,
+            reply_to,
+            int(is_bot),
+            int(sender_is_bot or is_bot),
+        ),
     )
     await db.commit()
 
@@ -205,6 +239,25 @@ async def count_replies_since(
     return int(row[0])
 
 
+async def bot_streak(db: aiosqlite.Connection, chat_id: int) -> int:
+    """How many bot messages have piled up since a human last said something.
+
+    This is the loop guard's only input. Two bots left alone drive it up until the gate
+    stops answering; the first human line drops it back to zero.
+    """
+    async with db.execute(
+        """
+        SELECT COUNT(*) FROM messages
+        WHERE chat_id = ? AND sender_is_bot = 1 AND ts > COALESCE(
+            (SELECT MAX(ts) FROM messages WHERE chat_id = ? AND sender_is_bot = 0), ''
+        )
+        """,
+        (chat_id, chat_id),
+    ) as cur:
+        row = await cur.fetchone()
+    return int(row[0])
+
+
 async def record_usage(
     db: aiosqlite.Connection,
     *,
@@ -217,13 +270,14 @@ async def record_usage(
     thought_tok: int,
     latency_ms: int,
     cost_usd: float,
+    searched: int = 0,
 ) -> None:
     await db.execute(
         """
         INSERT INTO usage
             (chat_id, purpose, model, prompt_tok, cached_tok,
-             visible_tok, thought_tok, latency_ms, cost_usd)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             visible_tok, thought_tok, latency_ms, cost_usd, searched)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             chat_id,
@@ -235,6 +289,7 @@ async def record_usage(
             thought_tok,
             latency_ms,
             cost_usd,
+            searched,
         ),
     )
     await db.commit()

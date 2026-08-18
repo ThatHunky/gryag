@@ -6,6 +6,9 @@ structural difference from the legacy bot, where deciding whether to answer cost
 
 Phase 1 implements direct address only. Ambient interjection and proactive speech arrive in
 phase 3 and will extend GateInput rather than replace it.
+
+Other bots are allowed to talk to gryag, but never to trap it: a bot must address it
+explicitly, and the exchange dies after `bot_exchange_limit` messages without a human.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from dataclasses import dataclass
 class GateInput:
     text: str
     is_bot: bool
+    is_self: bool
     chat_enabled: bool
     mentions_bot: bool
     replies_to_bot: bool
@@ -26,6 +30,8 @@ class GateInput:
     replies_this_hour: int
     daily_cap: int
     hourly_cap: int
+    bot_streak: int
+    bot_exchange_limit: int
 
 
 @dataclass(frozen=True)
@@ -50,12 +56,26 @@ def mentions_keyword(text: str, keywords: tuple[str, ...]) -> bool:
 def should_speak(g: GateInput) -> GateDecision:
     if not g.chat_enabled:
         return GateDecision(False, "chat_disabled")
-    if g.is_bot:
-        return GateDecision(False, "sender_is_bot")
+    if g.is_self:
+        return GateDecision(False, "sender_is_self")
     if g.replies_today >= g.daily_cap:
         return GateDecision(False, "daily_cap")
     if g.replies_this_hour >= g.hourly_cap:
         return GateDecision(False, "hourly_cap")
+
+    addressed = (
+        g.mentions_bot
+        or g.replies_to_bot
+        or mentions_keyword(g.text, g.keywords)
+    )
+    if g.is_bot:
+        # Другий бот may be talked to, but only when it speaks first and only for a few
+        # turns. `bot_streak` counts messages since the last human said anything, so two
+        # bots left alone run down the limit and stop; any human line resets it to zero.
+        if not addressed:
+            return GateDecision(False, "bot_not_addressed")
+        if g.bot_streak >= g.bot_exchange_limit:
+            return GateDecision(False, "bot_exchange_limit")
 
     if g.mentions_bot:
         return GateDecision(True, "mention")

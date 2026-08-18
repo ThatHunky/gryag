@@ -17,24 +17,20 @@ from aiogram import F, Router
 from aiogram.types import Message
 from aiogram.utils.chat_action import ChatActionSender
 
-from gryag import config, context, gate, llm, store
+from gryag import config, context, gate, llm, media, store
 
 log = logging.getLogger(__name__)
 
 
 def media_kind_and_file_id(message) -> tuple[str | None, str | None]:
-    if getattr(message, "photo", None):
-        return "photo", message.photo[-1].file_id
-    for kind in ("voice", "video_note", "video", "sticker", "document"):
-        item = getattr(message, kind, None)
-        if item is not None:
-            return kind, item.file_id
-    return None, None
+    """Kept as the handler-facing name; the detection itself lives in `media`."""
+    return media.detect(message)
 
 
 async def persist(db: aiosqlite.Connection, message, *, is_bot: bool = False) -> None:
     kind, file_id = media_kind_and_file_id(message)
     user = message.from_user
+    sender_is_bot = bool(is_bot or (user is not None and getattr(user, "is_bot", False)))
     if user is not None:
         await store.upsert_user(
             db,
@@ -56,6 +52,7 @@ async def persist(db: aiosqlite.Connection, message, *, is_bot: bool = False) ->
             message.reply_to_message.message_id if message.reply_to_message else None
         ),
         is_bot=is_bot,
+        sender_is_bot=sender_is_bot,
     )
 
 
@@ -65,6 +62,25 @@ async def _chat_enabled(db: aiosqlite.Connection, chat_id: int) -> bool:
     ) as cur:
         row = await cur.fetchone()
     return bool(row and row[0])
+
+
+async def _look_at_media(message) -> tuple[bytes, str] | None:
+    """Fetch the file the bot is being asked about, if there is one.
+
+    Only runs once the gate has decided to speak, so the 17% of this chat that is media
+    costs nothing until somebody actually asks about a specific file.
+    """
+    bot = getattr(message, "bot", None)
+    if bot is None:
+        return None
+    found = media.target(message)
+    if found is None:
+        return None
+    file_id, mime, _source = found
+    payload = await media.fetch(bot, file_id, mime)
+    if payload is not None:
+        log.info("looking at %s (%s, %s bytes)", file_id, mime, len(payload[0]))
+    return payload
 
 
 @asynccontextmanager
@@ -103,10 +119,12 @@ async def handle_message(
 
     text = message.text or message.caption or ""
     replied = message.reply_to_message
+    sender = message.from_user
     decision = gate.should_speak(
         gate.GateInput(
             text=text,
-            is_bot=bool(message.from_user and message.from_user.is_bot),
+            is_bot=bool(sender and getattr(sender, "is_bot", False)),
+            is_self=bool(sender and sender.id == bot_id),
             chat_enabled=await _chat_enabled(db, chat_id),
             mentions_bot=any(
                 text[e.offset : e.offset + e.length].lstrip("@").lower().endswith("gryag_bot")
@@ -125,6 +143,8 @@ async def handle_message(
             replies_this_hour=replies_this_hour,
             daily_cap=await config.get_int(db, "daily_reply_cap", chat_id),
             hourly_cap=await config.get_int(db, "hourly_reply_cap", chat_id),
+            bot_streak=await store.bot_streak(db, chat_id),
+            bot_exchange_limit=await config.get_int(db, "bot_exchange_limit", chat_id),
         )
     )
     if not decision.speak:
@@ -151,6 +171,8 @@ async def handle_message(
         chat_title=message.chat.title or "",
     )
 
+    payload = await _look_at_media(message)
+
     model = await config.get(db, "speak_model", chat_id)
     async with _typing(message):
         result = await llm.generate(
@@ -160,6 +182,8 @@ async def handle_message(
             user=prompt,
             max_output_tokens=await config.get_int(db, "max_output_tokens", chat_id),
             thinking_budget=await config.get_int(db, "thinking_budget", chat_id),
+            media=payload,
+            use_tools=await config.get(db, "tools_enabled", chat_id) == "1",
         )
     if result is None:
         return None
@@ -175,6 +199,7 @@ async def handle_message(
         thought_tok=result.thought_tokens,
         latency_ms=result.latency_ms,
         cost_usd=result.cost_usd,
+        searched=result.searched,
     )
 
     sent = await message.reply(result.text)

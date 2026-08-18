@@ -158,3 +158,39 @@ async def test_usage_rows_are_recorded(db):
         rows = [tuple(r) for r in await cur.fetchall()]
 
     assert rows == [("gemini-flash-latest", 150)]
+
+
+async def _bot_msg(db, message_id, ts, *, sender_is_bot, chat_id=-100):
+    await store.save_message(
+        db, chat_id=chat_id, message_id=message_id, user_id=1, ts=ts, text="x",
+        media_kind=None, file_id=None, reply_to=None, is_bot=False,
+        sender_is_bot=sender_is_bot,
+    )
+
+
+async def test_bot_streak_is_zero_when_a_human_spoke_last(db):
+    await _seed_user(db)
+    await _bot_msg(db, 1, "2026-08-19T10:00:00", sender_is_bot=True)
+    await _bot_msg(db, 2, "2026-08-19T10:01:00", sender_is_bot=False)
+
+    assert await store.bot_streak(db, -100) == 0
+
+
+async def test_bot_streak_counts_only_the_tail(db):
+    await _seed_user(db)
+    await _bot_msg(db, 1, "2026-08-19T10:00:00", sender_is_bot=True)
+    await _bot_msg(db, 2, "2026-08-19T10:01:00", sender_is_bot=False)
+    await _bot_msg(db, 3, "2026-08-19T10:02:00", sender_is_bot=True)
+    await _bot_msg(db, 4, "2026-08-19T10:03:00", sender_is_bot=True)
+
+    assert await store.bot_streak(db, -100) == 2
+
+
+async def test_our_own_replies_count_as_bot_messages(db):
+    await _seed_user(db)
+    await store.save_message(
+        db, chat_id=-100, message_id=1, user_id=1, ts="2026-08-19T10:00:00", text="x",
+        media_kind=None, file_id=None, reply_to=None, is_bot=True,
+    )
+
+    assert await store.bot_streak(db, -100) == 1

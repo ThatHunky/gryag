@@ -7,6 +7,7 @@ def make(**overrides) -> GateInput:
     base = dict(
         text="просто повідомлення",
         is_bot=False,
+        is_self=False,
         chat_enabled=True,
         mentions_bot=False,
         replies_to_bot=False,
@@ -15,6 +16,8 @@ def make(**overrides) -> GateInput:
         replies_this_hour=0,
         daily_cap=60,
         hourly_cap=10,
+        bot_streak=0,
+        bot_exchange_limit=3,
     )
     base.update(overrides)
     return GateInput(**base)
@@ -59,11 +62,45 @@ def test_stays_silent_without_any_address():
     assert decision.reason == "not_addressed"
 
 
-def test_never_answers_another_bot_even_when_addressed():
+def test_answers_another_bot_that_addresses_it():
     decision = should_speak(make(is_bot=True, mentions_bot=True))
 
+    assert decision.speak is True
+
+
+def test_ignores_a_bot_that_is_just_talking():
+    decision = should_speak(make(is_bot=True, text="Живі гравці: 1. Неру 2. КЛ"))
+
     assert decision.speak is False
-    assert decision.reason == "sender_is_bot"
+    assert decision.reason == "bot_not_addressed"
+
+
+def test_bot_to_bot_exchange_dies_at_the_limit():
+    decision = should_speak(make(is_bot=True, mentions_bot=True, bot_streak=3,
+                                 bot_exchange_limit=3))
+
+    assert decision.speak is False
+    assert decision.reason == "bot_exchange_limit"
+
+
+def test_bot_to_bot_exchange_is_allowed_below_the_limit():
+    decision = should_speak(make(is_bot=True, mentions_bot=True, bot_streak=2,
+                                 bot_exchange_limit=3))
+
+    assert decision.speak is True
+
+
+def test_the_streak_does_not_restrain_humans():
+    decision = should_speak(make(mentions_bot=True, bot_streak=99, bot_exchange_limit=3))
+
+    assert decision.speak is True
+
+
+def test_never_answers_itself():
+    decision = should_speak(make(is_self=True, is_bot=True, mentions_bot=True))
+
+    assert decision.speak is False
+    assert decision.reason == "sender_is_self"
 
 
 def test_stays_silent_in_a_disabled_chat():
@@ -87,8 +124,8 @@ def test_hourly_cap_stops_even_a_direct_address():
     assert decision.reason == "hourly_cap"
 
 
-def test_disabled_chat_is_checked_before_the_sender():
-    decision = should_speak(make(chat_enabled=False, is_bot=True, mentions_bot=True))
+def test_disabled_chat_is_checked_before_anything_else():
+    decision = should_speak(make(chat_enabled=False, is_self=True, mentions_bot=True))
 
     assert decision.reason == "chat_disabled"
 

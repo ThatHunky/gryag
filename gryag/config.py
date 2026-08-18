@@ -25,6 +25,12 @@ DEFAULTS: dict[str, str] = {
     # safety valves — these exist for bugs, not for money
     "daily_reply_cap": "60",
     "hourly_reply_cap": "10",
+    # How many bot messages may pile up before gryag stops answering other bots.
+    # Any human line resets the count, so this only ever bites a bot-to-bot loop.
+    "bot_exchange_limit": "3",
+    # Google Search grounding and URL fetching. Server-side, so they cost no prompt
+    # tokens; search is free to 5,000/month, fetched pages bill as input tokens.
+    "tools_enabled": "1",
 }
 
 

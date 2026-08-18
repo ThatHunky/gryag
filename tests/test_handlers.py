@@ -49,6 +49,7 @@ class FakeLlm:
         self.calls.append(kwargs)
         return llm.LlmResult(
             text=self.text,
+            searched=0,
             prompt_tokens=600,
             cached_tokens=0,
             visible_tokens=10,

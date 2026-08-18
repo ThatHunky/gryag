@@ -38,12 +38,27 @@ PRICES: dict[str, tuple[float, float, float]] = {
 @dataclass(frozen=True)
 class LlmResult:
     text: str
+    searched: int
     prompt_tokens: int
     cached_tokens: int
     visible_tokens: int
     thought_tokens: int
     latency_ms: int
     cost_usd: float
+
+
+SEARCH_FREE_PER_MONTH = 5000
+"""Gemini 3.x allowance, shared across 3.x models; $14 per 1,000 after that. At this
+chat's volume even searching on every reply stays inside it, but the panel counts anyway."""
+
+
+def build_tools() -> list[types.Tool]:
+    """Server-side tools: they cost nothing in the prompt, unlike a tool manifest in the
+    persona, which is exactly why the 137-token manifest was cut from it."""
+    return [
+        types.Tool(google_search=types.GoogleSearch()),
+        types.Tool(url_context=types.UrlContext()),
+    ]
 
 
 def cost_usd(
@@ -78,8 +93,14 @@ async def generate(
     user: str,
     max_output_tokens: int,
     thinking_budget: int,
+    media: tuple[bytes, str] | None = None,
+    use_tools: bool = True,
 ) -> LlmResult | None:
-    """Returns None on any failure or empty reply — silence is the correct behaviour."""
+    """Returns None on any failure or empty reply — silence is the correct behaviour.
+
+    `media` is (bytes, mime_type) and is sent inline before the prompt, so the model sees
+    the picture first and the conversation second — the same order a person would.
+    """
     config = types.GenerateContentConfig(
         system_instruction=system,
         max_output_tokens=max_output_tokens,
@@ -89,17 +110,29 @@ async def generate(
             for category in HARM_CATEGORIES
         ],
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        tools=build_tools() if use_tools else None,
     )
+
+    contents: object = user
+    if media is not None:
+        payload, mime_type = media
+        contents = [types.Part.from_bytes(data=payload, mime_type=mime_type), user]
 
     started = time.monotonic()
     try:
         response = await client.aio.models.generate_content(
-            model=model, contents=user, config=config
+            model=model, contents=contents, config=config
         )
     except Exception:
         log.exception("gemini call failed for model %s", model)
         return None
     latency_ms = int((time.monotonic() - started) * 1000)
+
+    candidate = (response.candidates or [None])[0]
+    grounding = getattr(candidate, "grounding_metadata", None)
+    queries = list(getattr(grounding, "web_search_queries", None) or [])
+    if queries:
+        log.info("grounded on: %s", ", ".join(queries))
 
     text = (response.text or "").strip()
     usage = response.usage_metadata
@@ -118,6 +151,7 @@ async def generate(
 
     return LlmResult(
         text=text,
+        searched=len(queries),
         prompt_tokens=prompt_tokens,
         cached_tokens=cached_tokens,
         visible_tokens=visible_tokens,

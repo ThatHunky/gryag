@@ -12,7 +12,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from gryag import config
+from gryag import config, llm
 
 MODEL_CHOICES = ("gemini-flash-latest", "gemini-2.5-flash", "gemini-2.5-flash-lite")
 
@@ -47,7 +47,8 @@ async def spend_report(db: aiosqlite.Connection, chat_id: int | None = None) -> 
                AVG(visible_tok),
                AVG(thought_tok),
                AVG(latency_ms),
-               SUM(cached_tok) * 1.0 / NULLIF(SUM(prompt_tok), 0)
+               SUM(cached_tok) * 1.0 / NULLIF(SUM(prompt_tok), 0),
+               SUM(searched)
         FROM usage {where}
         GROUP BY model
         """,
@@ -60,13 +61,14 @@ async def spend_report(db: aiosqlite.Connection, chat_id: int | None = None) -> 
 
     lines = ["Витрати:"]
     total = 0.0
-    for model, calls, cost, prompt, visible, thoughts, latency, cache in rows:
+    for model, calls, cost, prompt, visible, thoughts, latency, cache, searched in rows:
         total += cost or 0.0
         lines.append(
             f"{model}\n"
             f"  викликів: {calls}, разом ${cost:.4f}\n"
             f"  промпт {prompt:.0f}, видимих {visible:.0f}, думання {thoughts:.0f}\n"
-            f"  латентність {latency:.0f} мс, кеш {100 * (cache or 0):.1f}%"
+            f"  латентність {latency:.0f} мс, кеш {100 * (cache or 0):.1f}%\n"
+            f"  пошуків {searched or 0} з {llm.SEARCH_FREE_PER_MONTH} безкоштовних"
         )
     lines.append(f"Разом: ${total:.4f}")
     return "\n".join(lines)

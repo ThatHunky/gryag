@@ -13,10 +13,18 @@ class FakeUsage:
         self.thoughts_token_count = thoughts
 
 
+class FakeCandidate:
+    def __init__(self, queries=()):
+        self.grounding_metadata = (
+            pytypes.SimpleNamespace(web_search_queries=list(queries)) if queries else None
+        )
+
+
 class FakeResponse:
-    def __init__(self, text="ага", usage=None):
+    def __init__(self, text="ага", usage=None, queries=()):
         self.text = text
         self.usage_metadata = usage or FakeUsage()
+        self.candidates = [FakeCandidate(queries)]
 
 
 class FakeClient:
@@ -155,3 +163,70 @@ async def test_safety_is_disabled_on_every_category():
     settings = client.calls[0]["config"].safety_settings
     assert len(settings) == 4
     assert all(s.threshold == "BLOCK_NONE" for s in settings)
+
+
+async def test_reports_how_many_searches_were_grounded():
+    client = FakeClient(FakeResponse("курс 44.7", queries=["usd uah kurs"]))
+
+    result = await llm.generate(
+        client,
+        model="gemini-flash-latest",
+        system="persona",
+        user="гряг курс долара",
+        max_output_tokens=1500,
+        thinking_budget=0,
+    )
+
+    assert result.searched == 1
+
+
+async def test_search_and_url_tools_are_offered_by_default():
+    client = FakeClient(FakeResponse())
+
+    await llm.generate(
+        client,
+        model="gemini-flash-latest",
+        system="persona",
+        user="привіт",
+        max_output_tokens=1500,
+        thinking_budget=0,
+    )
+
+    tools = client.calls[0]["config"].tools
+    assert any(t.google_search is not None for t in tools)
+    assert any(t.url_context is not None for t in tools)
+
+
+async def test_tools_can_be_turned_off():
+    client = FakeClient(FakeResponse())
+
+    await llm.generate(
+        client,
+        model="gemini-flash-latest",
+        system="persona",
+        user="привіт",
+        max_output_tokens=1500,
+        thinking_budget=0,
+        use_tools=False,
+    )
+
+    assert client.calls[0]["config"].tools is None
+
+
+async def test_media_is_sent_before_the_prompt():
+    client = FakeClient(FakeResponse())
+
+    await llm.generate(
+        client,
+        model="gemini-flash-latest",
+        system="persona",
+        user="гряг як тобі",
+        max_output_tokens=1500,
+        thinking_budget=0,
+        media=(b"gifbytes", "video/mp4"),
+    )
+
+    contents = client.calls[0]["contents"]
+    assert isinstance(contents, list)
+    assert contents[0].inline_data.mime_type == "video/mp4"
+    assert contents[1] == "гряг як тобі"

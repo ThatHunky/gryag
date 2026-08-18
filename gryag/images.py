@@ -32,7 +32,7 @@ DRAW_WORDS = (
     "перемалюй",
 )
 
-EDIT_WORDS = ("перемалюй", "додай", "прибери", "заміни", "зміни")
+EDIT_WORDS = ("перемалюй", "додай", "прибери", "заміни", "зміни", "переробі", "зроби з")
 
 
 @dataclass(frozen=True)
@@ -45,14 +45,42 @@ class ImageResult:
 
 
 def wants_image(text: str) -> str | None:
-    """The prompt to draw, or None. Plain code — no model call to decide."""
+    """The prompt to draw, or None. Plain code — no model call to decide.
+
+    Returns an empty string when a draw verb was used with nothing after it — "гряг
+    намалюй" in reply to something. That is a request to draw *that*, and the subject has
+    to be found elsewhere; returning the message text would have the model draw the words
+    "гряг намалюй", which is exactly what it did.
+    """
     lowered = (text or "").lower()
     for word in DRAW_WORDS:
         index = lowered.find(word)
         if index != -1:
-            prompt = text[index + len(word) :].strip(" ,:.!?—-")
-            return prompt or text.strip()
+            return text[index + len(word) :].strip(" ,:.!?—-\n")
     return None
+
+
+def subject_from(prompt: str, quoted: str | None, parent: str | None, recent: str | None) -> str | None:
+    """What to draw, in order of how directly it was asked for.
+
+    An explicit prompt wins. Failing that, a quoted fragment — somebody selecting two
+    words and saying "намалюй" means those two words. Then the whole message being
+    replied to. Only then the conversation, which is a guess but a better one than
+    drawing the instruction itself.
+    """
+    for candidate in (prompt, quoted, parent, recent):
+        text = (candidate or "").strip()
+        if len(text) >= 3:
+            return text
+    return None
+
+
+PARENT_INSTRUCTION = (
+    "Намалюй ілюстрацію до цього повідомлення з групового чату. "
+    "Не пиши текст на зображенні, якщо про це не просили окремо.\n\n"
+)
+
+EDIT_INSTRUCTION = "Переробіть це зображення так: "
 
 
 def wants_edit(text: str) -> bool:

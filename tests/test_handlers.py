@@ -577,3 +577,69 @@ def test_the_bot_is_told_the_time_the_room_is_living_in():
 
     assert rendered.startswith("2026-08-19 02:35")
     assert "середа" in rendered
+
+
+async def test_a_bare_draw_request_draws_what_it_replies_to(db, monkeypatch):
+    """"гряг намалюй" in reply to something means draw that. It used to hand the model
+    the words "гряг намалюй" and get exactly that back."""
+    await enable_chat(db)
+    from gryag import config as cfg, images
+
+    await cfg.set(db, "image_whitelist", "1", chat_id=-100)
+    asked: list[str] = []
+
+    async def fake_draw(client, *, model, prompt, source=None):
+        asked.append(prompt)
+        return images.ImageResult(b"jpeg", "image/jpeg", 8000, 20, 1200)
+
+    monkeypatch.setattr(handlers.images, "generate", fake_draw)
+    parent = FakeMessage(text="кіт у вишиванці компілює ядро", message_id=1, user_id=2)
+    message = FakeMessage(text="гряг намалюй", message_id=2, user_id=1, reply_to=parent)
+
+    await handlers.handle_message(message, db, client=None, persona="p", bot_id=77)
+
+    assert "кіт у вишиванці компілює ядро" in asked[0]
+    assert "намалюй" not in asked[0]
+
+
+async def test_a_quoted_fragment_wins_over_the_whole_parent(db, monkeypatch):
+    await enable_chat(db)
+    from gryag import config as cfg, images
+
+    await cfg.set(db, "image_whitelist", "1", chat_id=-100)
+    asked: list[str] = []
+
+    async def fake_draw(client, *, model, prompt, source=None):
+        asked.append(prompt)
+        return images.ImageResult(b"jpeg", "image/jpeg", 8000, 20, 1200)
+
+    monkeypatch.setattr(handlers.images, "generate", fake_draw)
+    parent = FakeMessage(text="довге повідомлення про все на світі", message_id=1, user_id=2)
+    message = FakeMessage(text="гряг намалюй", message_id=2, user_id=1, reply_to=parent)
+    message.quote = pytypes.SimpleNamespace(text="все на світі")
+
+    await handlers.handle_message(message, db, client=None, persona="p", bot_id=77)
+
+    assert "все на світі" in asked[0]
+
+
+async def test_an_explicit_prompt_still_wins(db, monkeypatch):
+    await enable_chat(db)
+    from gryag import config as cfg, images
+
+    await cfg.set(db, "image_whitelist", "1", chat_id=-100)
+    asked: list[str] = []
+
+    async def fake_draw(client, *, model, prompt, source=None):
+        asked.append(prompt)
+        return images.ImageResult(b"jpeg", "image/jpeg", 8000, 20, 1200)
+
+    monkeypatch.setattr(handlers.images, "generate", fake_draw)
+    parent = FakeMessage(text="щось інше", message_id=1, user_id=2)
+    message = FakeMessage(
+        text="гряг намалюй пінгвіна на скейті", message_id=2, user_id=1, reply_to=parent
+    )
+
+    await handlers.handle_message(message, db, client=None, persona="p", bot_id=77)
+
+    assert asked[0] == "пінгвіна на скейті"

@@ -195,8 +195,8 @@ async def _maybe_draw(message, db, client, text: str, payload) -> str | None:
     sender = message.from_user
     if sender is None:
         return None
-    prompt = images.wants_image(text)
-    if prompt is None:
+    asked = images.wants_image(text)
+    if asked is None:
         return None
     chat_id = message.chat.id
     whitelist = await config.get(db, "image_whitelist", chat_id)
@@ -204,11 +204,37 @@ async def _maybe_draw(message, db, client, text: str, payload) -> str | None:
         log.info("image request from %s refused: not whitelisted", sender.id)
         return None
 
+    # "намалюй" on its own, in reply to something, means draw *that*. Work out what
+    # "that" is before deciding whether this is a fresh drawing or an edit.
+    replied = getattr(message, "reply_to_message", None)
+    quote = getattr(message, "quote", None)
+    parent_text = (
+        (getattr(replied, "text", None) or getattr(replied, "caption", None) or "")
+        if replied is not None
+        else ""
+    )
+    recent = await store.recent_messages(db, chat_id, limit=6)
+    recent_text = " ".join(
+        (m.get("text") or "").strip() for m in recent if (m.get("text") or "").strip()
+    )
+    subject = images.subject_from(
+        asked, getattr(quote, "text", None), parent_text, recent_text or None
+    )
+    if subject is None:
+        log.info("draw request with nothing to draw in %s", chat_id)
+        return None
+
+    editing = payload is not None and (images.wants_edit(text) or not asked)
+    prompt = (
+        images.EDIT_INSTRUCTION + subject
+        if editing
+        else (images.PARENT_INSTRUCTION + subject if not asked else subject)
+    )
+
     model = await config.get(db, "image_model", chat_id)
-    source = payload if payload is not None and images.wants_edit(text) else None
     async with _typing(message):
         result = await images.generate(
-            client, model=model, prompt=prompt, source=source
+            client, model=model, prompt=prompt, source=payload if editing else None
         )
     if result is None:
         return None

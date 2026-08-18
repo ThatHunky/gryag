@@ -115,6 +115,9 @@ def build(
     665 tokens for the conversation actually happening.
     """
     header = f"Зараз {now}. Чат: {chat_title}."
+    # `now` must already be local. Telegram timestamps are UTC, and handing those over
+    # told the bot it was three hours earlier than everyone in the room — wrong for
+    # "котра година", and wrong for knowing whether it is late at night.
 
     memory: list[str] = []
     if week_summary and week_summary.strip():

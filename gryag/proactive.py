@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import aiosqlite
 
 from gryag import config, context, gate, llm, store
+from gryag.handlers import _render_now
 
 log = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ async def run_once(db: aiosqlite.Connection, client, bot, persona) -> int:
             messages=messages,
             chain=[],
             trigger={"text": "", "alias": "", "is_bot": False, "message_id": None},
-            now=now.strftime("%Y-%m-%d %H:%M"),
+            now=_render_now(now),
             chat_title="",
             week_summary=await store.latest_summary(db, chat_id, "week"),
             today_summary=await store.latest_summary(db, chat_id, "day"),

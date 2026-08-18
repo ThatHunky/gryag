@@ -566,3 +566,14 @@ async def test_a_stale_missed_message_is_dropped(db, monkeypatch):
     handlers._pending[-100] = (stale, handlers._utcnow() - timedelta(minutes=5))
 
     assert handlers._take_missed(-100, 60) is None
+
+
+def test_the_bot_is_told_the_time_the_room_is_living_in():
+    """Telegram timestamps are UTC. Handing those over told the bot it was three hours
+    earlier than everybody in the chat."""
+    from datetime import datetime, timezone
+
+    rendered = handlers._render_now(datetime(2026, 8, 18, 23, 35, tzinfo=timezone.utc))
+
+    assert rendered.startswith("2026-08-19 02:35")
+    assert "середа" in rendered

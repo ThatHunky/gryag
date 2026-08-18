@@ -40,6 +40,20 @@ def _local_hour() -> int:
     return _utcnow().astimezone(LOCAL_TZ).hour
 
 
+WEEKDAYS = ("понеділок", "вівторок", "середа", "четвер", "пʼятниця", "субота", "неділя")
+
+
+def _render_now(moment: datetime) -> str:
+    """Local time, with the day of the week spelled out.
+
+    Telegram sends UTC. Passing that through told the bot it was three hours earlier than
+    the room it was sitting in, which is wrong for the obvious question and wrong for
+    knowing whether it is the middle of the night.
+    """
+    local = moment.astimezone(LOCAL_TZ)
+    return f"{local:%Y-%m-%d %H:%M}, {WEEKDAYS[local.weekday()]}"
+
+
 async def _since(ts: str | None) -> float:
     if not ts:
         return 1e9
@@ -446,7 +460,7 @@ async def handle_message(
             messages=messages,
             chain=chain,
             trigger=trigger,
-            now=now.strftime("%Y-%m-%d %H:%M"),
+            now=_render_now(now),
             chat_title=message.chat.title or "",
             week_summary=await store.latest_summary(db, chat_id, "week"),
             today_summary=await store.latest_summary(db, chat_id, "day"),

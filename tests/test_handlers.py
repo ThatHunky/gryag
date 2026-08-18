@@ -361,3 +361,26 @@ async def test_a_ban_is_capped_at_two_days(db):
     until = await store.ban_until(db, -100, 5, datetime.now(timezone.utc).isoformat())
     days = (datetime.fromisoformat(until) - datetime.now(timezone.utc)).days
     assert days <= 2
+
+
+async def test_a_whole_batch_arriving_at_once_produces_one_reply(db, monkeypatch):
+    """Regression: a restart replays the backlog, every message evaluated `busy` as false
+    at the same moment, and five replies landed in the same second."""
+    await enable_chat(db)
+    calls = 0
+
+    async def slow(client, **kwargs):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.05)
+        return llm.LlmResult("одна відповідь", 0, 600, 0, 10, 100, 50, 0.0005)
+
+    monkeypatch.setattr(handlers.llm, "generate", slow)
+    batch = [FakeMessage(text=f"гряг {n}", message_id=n) for n in range(5)]
+
+    results = await asyncio.gather(*[
+        handlers.handle_message(m, db, client=None, persona="p", bot_id=77) for m in batch
+    ])
+
+    assert calls == 1
+    assert [r for r in results if r] == ["одна відповідь"]

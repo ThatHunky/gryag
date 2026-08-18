@@ -30,20 +30,31 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-_busy: dict[int, asyncio.Lock] = {}
+_busy: set[int] = set()
 
 
-def _chat_lock(chat_id: int) -> asyncio.Lock:
-    """One reply at a time per chat.
+def _claim(chat_id: int) -> bool:
+    """Take the chat for one reply, or report that somebody already has it.
 
-    Generation takes about two seconds. In a chat with a median gap of six seconds
-    between messages, three people can address the bot inside one generation, and it
-    would answer all three about a conversation that has already moved on.
+    Generation takes about two seconds, and this chat has a median gap of six seconds
+    between messages, so several people can address the bot inside one generation.
+
+    An asyncio.Lock was wrong for this. Checking `locked()` while building the gate input
+    and acquiring it a dozen awaits later is a race: a batch of updates — exactly what a
+    restart replays — all see it free, then queue on the lock and each produces a reply.
+    Five landed in the same second that way.
+
+    A set works because the check and the add happen with no await between them, which on
+    a single-threaded event loop is atomic. Whoever loses simply says nothing.
     """
-    lock = _busy.get(chat_id)
-    if lock is None:
-        lock = _busy[chat_id] = asyncio.Lock()
-    return lock
+    if chat_id in _busy:
+        return False
+    _busy.add(chat_id)
+    return True
+
+
+def _release(chat_id: int) -> None:
+    _busy.discard(chat_id)
 
 
 def media_kind_and_file_id(message) -> tuple[str | None, str | None]:
@@ -130,7 +141,7 @@ async def _maybe_draw(message, db, client, text: str, payload) -> str | None:
 
     model = await config.get(db, "image_model", chat_id)
     source = payload if payload is not None and images.wants_edit(text) else None
-    async with _chat_lock(chat_id), _typing(message):
+    async with _typing(message):
         result = await images.generate(
             client, model=model, prompt=prompt, source=source
         )
@@ -254,7 +265,7 @@ async def handle_message(
             bot_exchange_limit=await config.get_int(db, "bot_exchange_limit", chat_id),
             age_seconds=max((_utcnow() - now).total_seconds(), 0.0),
             max_reply_age=await config.get_int(db, "max_reply_age", chat_id),
-            busy=_chat_lock(chat_id).locked(),
+            busy=chat_id in _busy,
             user_recent_replies=user_replies,
             seconds_since_user_reply=since_user_reply,
             throttle_after=await config.get_int(db, "throttle_after", chat_id),
@@ -294,84 +305,93 @@ async def handle_message(
             log.debug("silent in %s: %s", chat_id, decision.reason)
         return None
 
-    window = await config.get_int(db, "context_messages", chat_id)
-    messages = await store.recent_messages(db, chat_id, limit=window)
-    chain = (
-        await store.reply_chain(db, chat_id, replied.message_id) if replied else []
-    )
-    trigger = {
-        "message_id": message.message_id,
-        "text": text,
-        "media_kind": media_kind_and_file_id(message)[0],
-        "is_bot": False,
-        "alias": context.alias_for(message.from_user.full_name),
-    }
-    present = {m["user_id"] for m in messages if m.get("user_id")}
-    if sender is not None:
-        present.add(sender.id)
-    facts = await store.facts_for_users(db, chat_id, sorted(present))
-
-    quote = getattr(message, "quote", None)
-    prompt = context.build(
-        messages=messages,
-        chain=chain,
-        trigger=trigger,
-        now=now.strftime("%Y-%m-%d %H:%M"),
-        chat_title=message.chat.title or "",
-        week_summary=await store.latest_summary(db, chat_id, "week"),
-        today_summary=await store.latest_summary(db, chat_id, "day"),
-        facts=facts,
-        quote=getattr(quote, "text", None),
-        quote_author=(
-            context.BOT_ALIAS
-            if replied and replied.from_user and replied.from_user.id == bot_id
-            else (
-                context.alias_for(replied.from_user.full_name)
-                if replied and replied.from_user
-                else None
-            )
-        ),
-    )
-
-    payload = await _look_at_media(message)
-
-    drawn = await _maybe_draw(message, db, client, text, payload)
-    if drawn is not None:
-        return drawn
-
-    model = await config.get(db, "speak_model", chat_id)
-    async with _chat_lock(chat_id), _typing(message):
-        result = await llm.generate(
-            client,
-            model=model,
-            system=persona,
-            user=prompt,
-            max_output_tokens=await config.get_int(db, "max_output_tokens", chat_id),
-            thinking_budget=await config.get_int(db, "thinking_budget", chat_id),
-            media=payload,
-            use_tools=await config.get(db, "tools_enabled", chat_id) == "1",
-            tool_handler=_ban_handler(db, chat_id, sender),
-        )
-    if result is None:
+    # Claimed before any of the slow work and held until the reply is sent. Doing it
+    # here rather than around the model call is the point: everything between the
+    # gate and the call is an await, and a batch of updates would otherwise all pass.
+    if not _claim(chat_id):
+        log.debug("already answering in %s", chat_id)
         return None
+    try:
+        window = await config.get_int(db, "context_messages", chat_id)
+        messages = await store.recent_messages(db, chat_id, limit=window)
+        chain = (
+            await store.reply_chain(db, chat_id, replied.message_id) if replied else []
+        )
+        trigger = {
+            "message_id": message.message_id,
+            "text": text,
+            "media_kind": media_kind_and_file_id(message)[0],
+            "is_bot": False,
+            "alias": context.alias_for(message.from_user.full_name),
+        }
+        present = {m["user_id"] for m in messages if m.get("user_id")}
+        if sender is not None:
+            present.add(sender.id)
+        facts = await store.facts_for_users(db, chat_id, sorted(present))
 
-    await store.record_usage(
-        db,
-        chat_id=chat_id,
-        purpose="reply",
-        model=model,
-        prompt_tok=result.prompt_tokens,
-        cached_tok=result.cached_tokens,
-        visible_tok=result.visible_tokens,
-        thought_tok=result.thought_tokens,
-        latency_ms=result.latency_ms,
-        cost_usd=result.cost_usd,
-        searched=result.searched,
-    )
+        quote = getattr(message, "quote", None)
+        prompt = context.build(
+            messages=messages,
+            chain=chain,
+            trigger=trigger,
+            now=now.strftime("%Y-%m-%d %H:%M"),
+            chat_title=message.chat.title or "",
+            week_summary=await store.latest_summary(db, chat_id, "week"),
+            today_summary=await store.latest_summary(db, chat_id, "day"),
+            facts=facts,
+            quote=getattr(quote, "text", None),
+            quote_author=(
+                context.BOT_ALIAS
+                if replied and replied.from_user and replied.from_user.id == bot_id
+                else (
+                    context.alias_for(replied.from_user.full_name)
+                    if replied and replied.from_user
+                    else None
+                )
+            ),
+        )
 
-    sent = await message.reply(result.text)
-    await persist(db, sent, is_bot=True)
-    return result.text
+        payload = await _look_at_media(message)
+
+        drawn = await _maybe_draw(message, db, client, text, payload)
+        if drawn is not None:
+            return drawn
+
+        model = await config.get(db, "speak_model", chat_id)
+        async with _typing(message):
+            result = await llm.generate(
+                client,
+                model=model,
+                system=persona,
+                user=prompt,
+                max_output_tokens=await config.get_int(db, "max_output_tokens", chat_id),
+                thinking_budget=await config.get_int(db, "thinking_budget", chat_id),
+                media=payload,
+                use_tools=await config.get(db, "tools_enabled", chat_id) == "1",
+                tool_handler=_ban_handler(db, chat_id, sender),
+            )
+        if result is None:
+            return None
+
+        await store.record_usage(
+            db,
+            chat_id=chat_id,
+            purpose="reply",
+            model=model,
+            prompt_tok=result.prompt_tokens,
+            cached_tok=result.cached_tokens,
+            visible_tok=result.visible_tokens,
+            thought_tok=result.thought_tokens,
+            latency_ms=result.latency_ms,
+            cost_usd=result.cost_usd,
+            searched=result.searched,
+        )
+
+        sent = await message.reply(result.text)
+        await persist(db, sent, is_bot=True)
+        return result.text
+    finally:
+        _release(chat_id)
 
 
 async def handle_edit(message, db) -> bool:

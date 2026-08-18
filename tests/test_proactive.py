@@ -121,3 +121,15 @@ async def test_the_usage_row_says_it_was_proactive(db, monkeypatch):
 
     async with db.execute("SELECT purpose FROM usage") as cur:
         assert [r[0] for r in await cur.fetchall()] == ["proactive"]
+
+
+def test_the_entrypoint_hands_the_loop_everything_it_needs():
+    """Regression: the proactive task was started with `db`, `client` and `persona` that
+    only existed inside build(), and the process died on startup with a NameError."""
+    import inspect
+
+    from gryag import __main__ as entry
+
+    source = inspect.getsource(entry)
+    assert "proactive.loop(rt.db, rt.client, rt.bot, rt.persona)" in source
+    assert set(entry.Runtime.__dataclass_fields__) >= {"db", "client", "persona", "bot"}

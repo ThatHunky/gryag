@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
@@ -20,11 +21,23 @@ from aiohttp import web
 
 from gryag import admin, config, digest, handlers, llm, proactive, store
 
+@dataclass
+class Runtime:
+    """Everything built inside the loop. The proactive task needs the database, the
+    client and the persona box, none of which used to leave `build`."""
+
+    bot: Bot
+    dispatcher: Dispatcher
+    db: object
+    client: object
+    persona: dict
+
+
 WEBHOOK_PATH = "/webhook"
 PERSONA_PATH = Path(__file__).resolve().parent.parent / "eval" / "persona-v3.txt"
 
 
-async def build(secrets: config.Secrets) -> tuple[Bot, Dispatcher]:
+async def build(secrets: config.Secrets) -> "Runtime":
     """Everything is constructed inside the running loop.
 
     The database connection, the bot session and the aiohttp app must all belong to the
@@ -55,12 +68,13 @@ async def build(secrets: config.Secrets) -> tuple[Bot, Dispatcher]:
         admin.build_router(secrets.admin_ids, on_reload=reload_persona, on_digest=rerun_digest)
     )
     dispatcher.include_router(handlers.build_router())
-    return bot, dispatcher
+    return Runtime(bot=bot, dispatcher=dispatcher, db=db, client=client, persona=persona)
 
 
 async def serve_webhook(secrets: config.Secrets) -> None:
-    bot, dispatcher = await build(secrets)
-    asyncio.create_task(proactive.loop(db, client, bot, persona))
+    rt = await build(secrets)
+    bot, dispatcher = rt.bot, rt.dispatcher
+    asyncio.create_task(proactive.loop(rt.db, rt.client, rt.bot, rt.persona))
 
     await bot.set_webhook(
         f"{secrets.webhook_base}{WEBHOOK_PATH}",

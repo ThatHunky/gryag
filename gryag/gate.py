@@ -39,6 +39,7 @@ class GateInput:
     seconds_since_user_reply: float = 1e9
     throttle_after: int = 3
     throttle_step: int = 20
+    own_commands: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -71,11 +72,26 @@ def required_gap(recent_replies: int, throttle_after: int, throttle_step: int) -
     return max(over, 0) * throttle_step
 
 
+def foreign_command(text: str, own_commands: tuple[str, ...]) -> bool:
+    """True for a slash command that belongs to some other bot.
+
+    This chat runs three of them. `/slots 1.6` is a person talking to Пісюнбот, and gryag
+    barging in on it is noise. Its own commands are handled by the admin router, so by the
+    time the gate sees one it is somebody else's.
+    """
+    if not text.startswith("/"):
+        return False
+    word = text[1:].split()[0] if len(text) > 1 else ""
+    return word.split("@")[0].lower() not in own_commands
+
+
 def should_speak(g: GateInput) -> GateDecision:
     if not g.chat_enabled:
         return GateDecision(False, "chat_disabled")
     if g.is_self:
         return GateDecision(False, "sender_is_self")
+    if foreign_command(g.text, g.own_commands):
+        return GateDecision(False, "foreign_command")
     if g.age_seconds > g.max_reply_age:
         # A backlog replayed after downtime must be stored but not answered: nobody wants
         # the bot waking up and replying to an argument that ended an hour ago.

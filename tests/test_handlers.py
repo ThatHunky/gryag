@@ -35,6 +35,11 @@ class FakeMessage:
         self.video_note = self.sticker = self.document = None
         self.bot = None  # disables the typing indicator; see handlers._typing
         self.replies: list[str] = []
+        self.photos: list[bytes] = []
+
+    async def reply_photo(self, photo):
+        self.photos.append(photo.data)
+        return FakeMessage(text="", message_id=self.message_id + 2000, is_bot=True)
 
     async def reply(self, text):
         """The bot always answers as a Telegram reply, quoting what triggered it."""
@@ -259,3 +264,45 @@ async def test_an_edit_is_followed_but_never_answered(db, monkeypatch):
     assert fake.calls == []
     rows = await store.recent_messages(db, -100, limit=5)
     assert rows[0]["text"] == "гряг тепер я тебе кличу"
+
+
+async def test_a_whitelisted_person_gets_a_picture_instead_of_a_reply(db, monkeypatch):
+    await enable_chat(db)
+    from gryag import config as cfg, images
+
+    await cfg.set(db, "image_whitelist", "1", chat_id=-100)
+    drew: list[dict] = []
+
+    async def fake_draw(client, *, model, prompt, source=None):
+        drew.append({"model": model, "prompt": prompt, "source": source})
+        return images.ImageResult(b"jpegbytes", "image/jpeg", 8000, 20, 1200)
+
+    monkeypatch.setattr(handlers.images, "generate", fake_draw)
+    text_llm = FakeLlm()
+    monkeypatch.setattr(handlers.llm, "generate", text_llm.generate)
+    message = FakeMessage(text="гряг намалюй кота у вишиванці", user_id=1)
+
+    await handlers.handle_message(message, db, client=None, persona="p", bot_id=77)
+
+    assert drew[0]["prompt"] == "кота у вишиванці"
+    assert text_llm.calls == []
+    assert message.photos == [b"jpegbytes"]
+
+
+async def test_someone_not_on_the_list_gets_words_not_pictures(db, monkeypatch):
+    await enable_chat(db)
+    from gryag import config as cfg
+
+    await cfg.set(db, "image_whitelist", "999", chat_id=-100)
+
+    async def fake_draw(client, **kwargs):
+        raise AssertionError("must not be called")
+
+    monkeypatch.setattr(handlers.images, "generate", fake_draw)
+    text_llm = FakeLlm("малюй сам")
+    monkeypatch.setattr(handlers.llm, "generate", text_llm.generate)
+    message = FakeMessage(text="гряг намалюй кота", user_id=1)
+
+    reply = await handlers.handle_message(message, db, client=None, persona="p", bot_id=77)
+
+    assert reply == "малюй сам"

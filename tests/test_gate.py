@@ -209,3 +209,34 @@ def test_a_quiet_person_is_never_throttled():
     )
 
     assert decision.speak is True
+
+
+def test_another_bots_command_is_ignored():
+    """This chat runs three other bots; /slots is a person talking to Пісюнбот."""
+    decision = should_speak(make(text="/slots 1.6", own_commands=("gryag", "nb")))
+
+    assert decision.speak is False
+    assert decision.reason == "foreign_command"
+
+
+def test_a_foreign_command_is_ignored_even_when_it_names_the_bot():
+    decision = should_speak(
+        make(text="/slots гряг подивись", own_commands=("gryag", "nb"))
+    )
+
+    assert decision.speak is False
+    assert decision.reason == "foreign_command"
+
+
+def test_our_own_commands_fall_through_to_the_admin_router():
+    from gryag.gate import foreign_command
+
+    assert foreign_command("/gryag", ("gryag", "nb")) is False
+    assert foreign_command("/nb@gryag_bot", ("gryag", "nb")) is False
+    assert foreign_command("/slots@pisunbot 1", ("gryag", "nb")) is True
+
+
+def test_a_slash_in_the_middle_is_not_a_command():
+    from gryag.gate import foreign_command
+
+    assert foreign_command("це 50/50", ("gryag",)) is False

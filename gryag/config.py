@@ -53,6 +53,10 @@ DEFAULTS: dict[str, str] = {
     # Google Search grounding and URL fetching. Server-side, so they cost no prompt
     # tokens; search is free to 5,000/month, fetched pages bill as input tokens.
     "tools_enabled": "1",
+    # Nano Banana 2. Billed per image rather than per token, so it is whitelist-only.
+    # The admin edits the list with /nb in reply to somebody.
+    "image_model": "gemini-3.1-flash-image",
+    "image_whitelist": "392817811",
 }
 
 

@@ -12,7 +12,7 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from gryag import config, llm
+from gryag import config, images, llm
 
 MODEL_CHOICES = ("gemini-flash-latest", "gemini-2.5-flash", "gemini-2.5-flash-lite")
 
@@ -109,6 +109,34 @@ def build_router(admin_ids: tuple[int, ...]) -> Router:
     async def open_menu(message: Message, db) -> None:
         current = await config.get(db, "speak_model", message.chat.id)
         await message.answer(f"Модель: {current}", reply_markup=_menu(current))
+
+    @router.message(Command("nb"))
+    async def toggle_whitelist(message: Message, db) -> None:
+        """Reply to somebody with /nb to let them draw, or /nb alone to see the list.
+
+        Never registered with setMyCommands, so it does not appear in anyone's menu.
+        """
+        raw = await config.get(db, "image_whitelist", message.chat.id)
+        allowed = images.parse_whitelist(raw)
+        target = message.reply_to_message.from_user if message.reply_to_message else None
+
+        if target is None:
+            await message.reply(
+                "Малювати можуть: " + (", ".join(map(str, allowed)) or "ніхто")
+            )
+            return
+
+        if target.id in allowed:
+            allowed.remove(target.id)
+            verdict = f"{target.full_name} більше не малює"
+        else:
+            allowed.append(target.id)
+            verdict = f"{target.full_name} тепер малює"
+
+        await config.set(
+            db, "image_whitelist", images.render_whitelist(allowed), chat_id=message.chat.id
+        )
+        await message.reply(verdict)
 
     @router.callback_query(F.data.startswith("model:"))
     async def switch_model(query: CallbackQuery, db) -> None:

@@ -15,12 +15,15 @@ from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 from aiogram import F, Router
-from aiogram.types import Message
+from aiogram.types import BufferedInputFile, Message
 from aiogram.utils.chat_action import ChatActionSender
 
-from gryag import config, context, gate, llm, media, store
+from gryag import config, context, gate, images, llm, media, store
 
 log = logging.getLogger(__name__)
+
+OWN_COMMANDS = ("gryag", "nb")
+"""Everything else starting with a slash belongs to another bot; see gate.foreign_command."""
 
 
 def _utcnow() -> datetime:
@@ -83,6 +86,54 @@ async def _chat_enabled(db: aiosqlite.Connection, chat_id: int) -> bool:
     ) as cur:
         row = await cur.fetchone()
     return bool(row and row[0])
+
+
+async def _maybe_draw(message, db, client, text: str, payload) -> str | None:
+    """Draw instead of talking, when a whitelisted person asks for a picture.
+
+    Deciding this in code rather than by function call keeps the reply path at one model
+    call and costs nothing when nobody is asking for an image — which is almost always.
+    """
+    sender = message.from_user
+    if sender is None:
+        return None
+    prompt = images.wants_image(text)
+    if prompt is None:
+        return None
+    chat_id = message.chat.id
+    whitelist = await config.get(db, "image_whitelist", chat_id)
+    if not images.is_allowed(sender.id, whitelist):
+        log.info("image request from %s refused: not whitelisted", sender.id)
+        return None
+
+    model = await config.get(db, "image_model", chat_id)
+    source = payload if payload is not None and images.wants_edit(text) else None
+    async with _chat_lock(chat_id), _typing(message):
+        result = await images.generate(
+            client, model=model, prompt=prompt, source=source
+        )
+    if result is None:
+        return None
+
+    await store.record_usage(
+        db,
+        chat_id=chat_id,
+        purpose="image",
+        model=model,
+        prompt_tok=result.prompt_tokens,
+        cached_tok=0,
+        visible_tok=result.output_tokens,
+        thought_tok=0,
+        latency_ms=result.latency_ms,
+        cost_usd=0.0,
+    )
+    await message.reply_photo(
+        BufferedInputFile(result.payload, filename="gryag.jpg")
+    )
+    log.info(
+        "drew %s KB for %s in %s ms", len(result.payload) // 1024, sender.id, result.latency_ms
+    )
+    return ""
 
 
 async def _look_at_media(message) -> tuple[bytes, str] | None:
@@ -186,6 +237,7 @@ async def handle_message(
             seconds_since_user_reply=since_user_reply,
             throttle_after=await config.get_int(db, "throttle_after", chat_id),
             throttle_step=await config.get_int(db, "throttle_step", chat_id),
+            own_commands=OWN_COMMANDS,
         )
     )
     if not decision.speak:
@@ -252,6 +304,10 @@ async def handle_message(
     )
 
     payload = await _look_at_media(message)
+
+    drawn = await _maybe_draw(message, db, client, text, payload)
+    if drawn is not None:
+        return drawn
 
     model = await config.get(db, "speak_model", chat_id)
     async with _chat_lock(chat_id), _typing(message):

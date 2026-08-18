@@ -195,6 +195,7 @@ async def test_search_and_url_tools_are_offered_by_default():
     tools = client.calls[0]["config"].tools
     assert any(t.google_search is not None for t in tools)
     assert any(t.url_context is not None for t in tools)
+    assert any(t.code_execution is not None for t in tools)
 
 
 async def test_tools_can_be_turned_off():

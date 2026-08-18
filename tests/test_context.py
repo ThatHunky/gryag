@@ -112,3 +112,35 @@ def test_build_includes_the_header():
 
     assert "2026-08-19 10:00, середа" in prompt
     assert "матсурі" in prompt
+
+
+def test_a_partial_quote_is_shown_to_the_model():
+    prompt = context.build(
+        messages=[],
+        chain=[],
+        trigger=msg(text="NixOS?"),
+        now="2026-08-19 01:05, середа",
+        chat_title="матсурі",
+        quote="Нікос",
+        quote_author="гряг",
+    )
+
+    assert "цитує з гряг: «Нікос»" in prompt
+    assert prompt.index("Нікос") < prompt.index("NixOS?")
+
+
+def test_no_quote_changes_nothing():
+    without = context.build(
+        messages=[], chain=[], trigger=msg(text="NixOS?"),
+        now="n", chat_title="c",
+    )
+    with_empty = context.build(
+        messages=[], chain=[], trigger=msg(text="NixOS?"),
+        now="n", chat_title="c", quote="   ",
+    )
+
+    assert without == with_empty
+
+
+def test_quote_without_an_author_still_renders():
+    assert context.render_quote("Нікос", None) == "(цитує: «Нікос»)"

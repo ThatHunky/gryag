@@ -79,12 +79,27 @@ def is_context_worthy(msg: dict) -> bool:
     return bool(msg.get("media_kind"))
 
 
+def render_quote(quoted: str | None, author: str | None) -> str | None:
+    """Telegram lets a person quote *part* of a message when replying.
+
+    That selection is the whole point of the reply — someone quoting two words out of a
+    long message is asking about those two words. Without this the model receives the
+    entire parent message and has to guess which bit mattered.
+    """
+    if not quoted or not quoted.strip():
+        return None
+    who = f" з {author}" if author else ""
+    return f"(цитує{who}: «{quoted.strip()}»)"
+
+
 def build(
     messages: list[dict],
     chain: list[dict],
     trigger: dict,
     now: str,
     chat_title: str,
+    quote: str | None = None,
+    quote_author: str | None = None,
 ) -> str:
     """Header, then the reply chain, then the recent window, then the boundary."""
     header = f"Зараз {now}. Чат: {chat_title}."
@@ -100,4 +115,9 @@ def build(
         seen.add(message_id)
         lines.append(render_line(msg))
 
-    return "\n".join([header, "", *lines, BOUNDARY, render_line(trigger)])
+    tail = [BOUNDARY]
+    quoted = render_quote(quote, quote_author)
+    if quoted is not None:
+        tail.append(quoted)
+    tail.append(render_line(trigger))
+    return "\n".join([header, "", *lines, *tail])

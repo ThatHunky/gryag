@@ -175,12 +175,23 @@ async def handle_message(
         "is_bot": False,
         "alias": context.alias_for(message.from_user.full_name),
     }
+    quote = getattr(message, "quote", None)
     prompt = context.build(
         messages=messages,
         chain=chain,
         trigger=trigger,
         now=now.strftime("%Y-%m-%d %H:%M"),
         chat_title=message.chat.title or "",
+        quote=getattr(quote, "text", None),
+        quote_author=(
+            context.BOT_ALIAS
+            if replied and replied.from_user and replied.from_user.id == bot_id
+            else (
+                context.alias_for(replied.from_user.full_name)
+                if replied and replied.from_user
+                else None
+            )
+        ),
     )
 
     payload = await _look_at_media(message)

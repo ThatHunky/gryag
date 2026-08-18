@@ -176,3 +176,17 @@ async def test_the_reply_quotes_the_message_that_triggered_it(db, monkeypatch):
     rows = await store.recent_messages(db, -100, limit=10)
     bot_row = [r for r in rows if r["is_bot"]][0]
     assert bot_row["reply_to"] == 42
+
+
+async def test_a_partial_quote_reaches_the_prompt(db, monkeypatch):
+    await enable_chat(db)
+    fake = FakeLlm("ага")
+    monkeypatch.setattr(handlers.llm, "generate", fake.generate)
+    parent = FakeMessage(text="Нікос качався і слухав соні", message_id=1, user_id=77)
+    parent.from_user.id = 77
+    message = FakeMessage(text="гряг NixOS?", message_id=2, reply_to=parent)
+    message.quote = pytypes.SimpleNamespace(text="Нікос")
+
+    await handlers.handle_message(message, db, client=None, persona="p", bot_id=77)
+
+    assert "«Нікос»" in fake.calls[0]["user"]

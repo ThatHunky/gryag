@@ -68,6 +68,7 @@ class Secrets:
     webhook_base: str
     admin_ids: tuple[int, ...]
     db_path: str
+    port: int
 
 
 def secrets() -> Secrets:
@@ -79,6 +80,9 @@ def secrets() -> Secrets:
         webhook_base=os.environ["WEBHOOK_BASE"],
         admin_ids=tuple(int(x) for x in raw_admins.split(",") if x.strip()),
         db_path=os.environ.get("DB_PATH", "gryag.db"),
+        # 8080/8081 are taken by docker-proxy on this host; binding there fails and
+        # Telegram sees a 302 from whatever container answers instead.
+        port=int(os.environ.get("PORT", "8137")),
     )
 
 

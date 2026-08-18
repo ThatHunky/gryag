@@ -61,8 +61,8 @@ async def serve_webhook(secrets: config.Secrets) -> None:
 
     runner = web.AppRunner(app)
     await runner.setup()
-    await web.TCPSite(runner, host="127.0.0.1", port=8081).start()
-    logging.info("webhook mode, listening on 127.0.0.1:8081")
+    await web.TCPSite(runner, host="127.0.0.1", port=secrets.port).start()
+    logging.info("webhook mode, listening on 127.0.0.1:%s", secrets.port)
     await asyncio.Event().wait()
 
 

@@ -22,3 +22,8 @@ eval/reference/
 
 # SpecStory records the whole assistant conversation, including anything pasted into it.
 .specstory/
+
+# Test cases quote real messages under real display names, and the legacy persona is
+# superseded by persona-v3. Both are kept locally; neither belongs in a public repo.
+eval/cases.yaml
+eval/persona.txt

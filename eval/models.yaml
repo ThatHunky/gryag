@@ -1,0 +1,70 @@
+# Candidate roster for the blind persona test.
+#
+# Resolution order per model: use `native` if that provider's key is set,
+# otherwise fall back to `openrouter` if OPENROUTER_API_KEY is set,
+# otherwise skip with a warning.
+#
+# Prices are USD per 1M tokens. Gemini rows verified against Google's own pricing page
+# on 2026-08-18; the rest are OpenRouter figures and remain UNVERIFIED against vendors.
+# `enabled: false` keeps a model in the file but out of the run.
+
+- name: Gemini Flash Latest
+  note: >-
+    THE PRODUCTION TARGET — chosen deliberately on 2026-08-18 to sidestep model
+    retirement. Opaque by design: the API echoes the alias, and metadata is
+    byte-identical across every Flash, so the served model cannot be identified
+    from a response. Billed as whatever it resolves to; assumed 3.x here.
+    Google repoints it on every Flash release, possibly onto a preview build,
+    with 2-week email notice only for breaking changes.
+  native: { provider: gemini, model: gemini-flash-latest }
+  price: { in: 0.75, out: 3.75 }
+
+- name: Gemini 3.7 Flash
+  note: >-
+    newest Flash. PRICE CORRECTED 2026-08-18 against ai.google.dev/gemini-api/docs/pricing:
+    $0.75/$3.75 is promotional through 2026-12-31 and DOUBLES to $1.50/$7.50 on 2027-01-01.
+    The earlier $0.375/$1.88 figure came from OpenRouter and does not match Google's own page.
+  native: { provider: gemini, model: gemini-3.7-flash }
+  openrouter: google/gemini-3.7-flash
+  price: { in: 0.75, out: 3.75 }
+
+- name: Gemini 2.5 Flash
+  note: CONTROL — the model legacy actually ran on
+  native: { provider: gemini, model: gemini-2.5-flash }
+  openrouter: google/gemini-2.5-flash
+  price: { in: 0.30, out: 2.50 }
+
+- name: Gemini 3.6 Flash
+  note: >-
+    same list price as 3.7 Flash ($0.75/$3.75, doubling 2027-01-01), so 3.7 dominates it
+    on every axis. Kept only as a scoring reference; there is no reason to pick it.
+  native: { provider: gemini, model: gemini-3.6-flash }
+  openrouter: google/gemini-3.6-flash
+  price: { in: 0.75, out: 3.75 }
+
+- name: GPT-5.6 Luna
+  note: cheapest capable option, unknown for Ukrainian
+  native: { provider: openai, model: gpt-5.6-luna }
+  openrouter: openai/gpt-5.6-luna
+  price: { in: 0.20, out: 1.20 }
+
+- name: Kimi K2.6
+  note: Chinese, data in PRC
+  native: { provider: moonshot, model: kimi-k2.6 }
+  openrouter: moonshotai/kimi-k2.6
+  price: { in: 0.561, out: 2.36 }
+
+- name: Qwen3.5 Plus
+  note: Chinese, Singapore region available
+  native: { provider: dashscope, model: qwen3.5-plus }
+  openrouter: qwen/qwen3.5-plus-20260420
+  price: { in: 0.30, out: 1.80 }
+
+# Sanity floor: this is the tier already ruled out. Enable it for one run
+# if you want the scoresheet to prove the gap rather than assume it.
+- name: Gemini 3.1 Flash Lite
+  note: RULED OUT on quality — enable only to demonstrate the gap
+  enabled: false
+  native: { provider: gemini, model: gemini-3.1-flash-lite }
+  openrouter: google/gemini-3.1-flash-lite
+  price: { in: 0.25, out: 1.50 }

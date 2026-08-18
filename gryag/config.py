@@ -19,6 +19,10 @@ DEFAULTS: dict[str, str] = {
     "speak_model": "gemini-flash-latest",
     "thinking_budget": "0",
     "max_output_tokens": "1500",
+    # The digest has no voice requirement, so it runs on the cheapest tier. Flash-Lite is
+    # ruled out for the persona, not for summarising: 0.86M tokens a month costs $0.09
+    # here against $0.64 on the speaking model.
+    "digest_model": "gemini-2.5-flash-lite",
     # trigger
     "keywords": "гряг",
     # 30 messages is only ~4.4 minutes of wall clock in a chat that runs at a median of
@@ -40,9 +44,12 @@ DEFAULTS: dict[str, str] = {
     "max_reply_age": "300",
     # Dynamic throttle, per person. Free for the first `throttle_after` replies inside
     # the window, then each further one demands a gap that grows by `throttle_step`.
-    "throttle_after": "3",
-    "throttle_step": "20",
-    "throttle_window": "600",
+    # First values were 3 free replies per 10 minutes with a 20s step, and they silenced
+    # normal conversation within an evening: one person easily earns five replies in ten
+    # minutes without being a nuisance. This only bites someone genuinely hammering it.
+    "throttle_after": "6",
+    "throttle_step": "15",
+    "throttle_window": "300",
     # Google Search grounding and URL fetching. Server-side, so they cost no prompt
     # tokens; search is free to 5,000/month, fetched pages bill as input tokens.
     "tools_enabled": "1",

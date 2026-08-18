@@ -242,3 +242,20 @@ async def test_a_second_message_is_ignored_while_the_first_is_being_answered(db,
     assert await task == "повільна"
     assert ignored is None
     assert second.replies == []
+
+
+async def test_an_edit_is_followed_but_never_answered(db, monkeypatch):
+    """Answering edits would let anyone re-trigger the bot by editing an old message."""
+    await enable_chat(db)
+    fake = FakeLlm()
+    monkeypatch.setattr(handlers.llm, "generate", fake.generate)
+    original = FakeMessage(text="просто балачки", message_id=7)
+    await handlers.handle_message(original, db, client=None, persona="p", bot_id=77)
+
+    edited = FakeMessage(text="гряг тепер я тебе кличу", message_id=7)
+    applied = await handlers.handle_edit(edited, db)
+
+    assert applied is True
+    assert fake.calls == []
+    rows = await store.recent_messages(db, -100, limit=5)
+    assert rows[0]["text"] == "гряг тепер я тебе кличу"

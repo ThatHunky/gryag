@@ -17,6 +17,10 @@ CHARS_PER_TOKEN = 2.5
 
 BOT_ALIAS = "гряг"
 
+WEEK_SUMMARY_TOKENS = 400
+DAY_SUMMARY_TOKENS = 300
+FACTS_TOKENS = 150
+
 BOUNDARY = (
     "---\n"
     "Далі пишеш тільки свою наступну репліку. Без імені, без дужок, "
@@ -100,9 +104,26 @@ def build(
     chat_title: str,
     quote: str | None = None,
     quote_author: str | None = None,
+    week_summary: str | None = None,
+    today_summary: str | None = None,
+    facts: list[tuple[str, str]] | None = None,
 ) -> str:
-    """Header, then the reply chain, then the recent window, then the boundary."""
+    """Header, memory, then the reply chain, the recent window, and the boundary.
+
+    Every block below carries a hard cap, checked here rather than trusted from upstream.
+    Legacy degraded precisely because its summaries crept to 65% of the prompt, leaving
+    665 tokens for the conversation actually happening.
+    """
     header = f"Зараз {now}. Чат: {chat_title}."
+
+    memory: list[str] = []
+    if week_summary and week_summary.strip():
+        memory.append("За тиждень: " + clamp(week_summary.strip(), WEEK_SUMMARY_TOKENS))
+    if today_summary and today_summary.strip():
+        memory.append("Сьогодні: " + clamp(today_summary.strip(), DAY_SUMMARY_TOKENS))
+    if facts:
+        rendered = "; ".join(f"{who} — {fact}" for who, fact in facts)
+        memory.append("Про присутніх: " + clamp(rendered, FACTS_TOKENS))
 
     seen: set[int] = set()
     lines: list[str] = []
@@ -120,4 +141,4 @@ def build(
     if quoted is not None:
         tail.append(quoted)
     tail.append(render_line(trigger))
-    return "\n".join([header, "", *lines, *tail])
+    return "\n".join([header, *memory, "", *lines, *tail])

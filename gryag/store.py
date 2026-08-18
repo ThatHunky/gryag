@@ -185,6 +185,23 @@ async def save_message(
     await db.commit()
 
 
+async def update_message_text(
+    db: aiosqlite.Connection, chat_id: int, message_id: int, text: str
+) -> bool:
+    """Apply an edit to a message already stored.
+
+    Telegram sends `edited_message` updates, so an edit can be followed. It sends nothing
+    at all when a message is deleted — the Bot API has no such update for ordinary bots —
+    so a deleted message stays in the transcript. Nothing here can change that.
+    """
+    cur = await db.execute(
+        "UPDATE messages SET text = ? WHERE chat_id = ? AND message_id = ?",
+        (text, chat_id, message_id),
+    )
+    await db.commit()
+    return cur.rowcount > 0
+
+
 async def recent_messages(
     db: aiosqlite.Connection, chat_id: int, limit: int
 ) -> list[dict]:
@@ -277,6 +294,121 @@ async def replies_to_user(
     ) as cur:
         row = await cur.fetchone()
     return int(row[0]), row[1]
+
+
+async def messages_for_day(
+    db: aiosqlite.Connection, chat_id: int, day: str
+) -> list[dict]:
+    """Everything said on one calendar day (UTC), oldest first."""
+    async with db.execute(
+        f"""
+        SELECT {MESSAGE_COLUMNS} FROM messages m
+        LEFT JOIN users u ON u.chat_id = m.chat_id AND u.user_id = m.user_id
+        WHERE m.chat_id = ? AND m.ts >= ? AND m.ts < ?
+        ORDER BY m.ts, m.message_id
+        """,
+        (chat_id, f"{day}T00:00:00", f"{day}T23:59:59.999"),
+    ) as cur:
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def save_summary(
+    db: aiosqlite.Connection,
+    *,
+    chat_id: int,
+    kind: str,
+    period_start: str,
+    period_end: str,
+    text: str,
+    tokens: int,
+) -> None:
+    await db.execute(
+        """
+        INSERT INTO summaries (chat_id, kind, period_start, period_end, text, tokens)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (chat_id, kind, period_start) DO UPDATE SET
+            text = excluded.text, tokens = excluded.tokens, period_end = excluded.period_end
+        """,
+        (chat_id, kind, period_start, period_end, text, tokens),
+    )
+    await db.commit()
+
+
+async def latest_summary(
+    db: aiosqlite.Connection, chat_id: int, kind: str
+) -> str | None:
+    async with db.execute(
+        """
+        SELECT text FROM summaries WHERE chat_id = ? AND kind = ?
+        ORDER BY period_start DESC LIMIT 1
+        """,
+        (chat_id, kind),
+    ) as cur:
+        row = await cur.fetchone()
+    return row[0] if row else None
+
+
+async def recent_daily_summaries(
+    db: aiosqlite.Connection, chat_id: int, limit: int = 7
+) -> list[tuple[str, str]]:
+    """(day, text) for the last `limit` days, oldest first."""
+    async with db.execute(
+        """
+        SELECT period_start, text FROM summaries
+        WHERE chat_id = ? AND kind = 'day'
+        ORDER BY period_start DESC LIMIT ?
+        """,
+        (chat_id, limit),
+    ) as cur:
+        rows = await cur.fetchall()
+    return [(r[0], r[1]) for r in reversed(rows)]
+
+
+async def replace_facts(
+    db: aiosqlite.Connection, chat_id: int, day: str, facts: list[tuple[int, str]]
+) -> None:
+    """Facts for one day, rewritten wholesale so a re-run cannot duplicate them."""
+    await db.execute(
+        "DELETE FROM facts WHERE chat_id = ? AND source_day = ?", (chat_id, day)
+    )
+    await db.executemany(
+        """
+        INSERT INTO facts (chat_id, user_id, text, source_day, created_at)
+        VALUES (?, ?, ?, ?, datetime('now'))
+        """,
+        [(chat_id, user_id, text, day) for user_id, text in facts],
+    )
+    await db.commit()
+
+
+async def facts_for_users(
+    db: aiosqlite.Connection, chat_id: int, user_ids: list[int], per_user: int = 4
+) -> list[tuple[str, str]]:
+    """(alias, fact) for the people currently in the window — nobody else.
+
+    Addressing the facts to whoever is present is what keeps this block inside its
+    150-token cap in a chat with 27 participants.
+    """
+    if not user_ids:
+        return []
+    marks = ",".join("?" * len(user_ids))
+    async with db.execute(
+        f"""
+        SELECT u.alias, f.text, f.user_id,
+               ROW_NUMBER() OVER (PARTITION BY f.user_id ORDER BY f.created_at DESC) AS rn
+        FROM facts f
+        LEFT JOIN users u ON u.chat_id = f.chat_id AND u.user_id = f.user_id
+        WHERE f.chat_id = ? AND f.user_id IN ({marks})
+        """,
+        (chat_id, *user_ids),
+    ) as cur:
+        rows = await cur.fetchall()
+    return [(r[0] or "хтось", r[1]) for r in rows if r[3] <= per_user]
+
+
+async def enabled_chats(db: aiosqlite.Connection) -> list[int]:
+    async with db.execute("SELECT chat_id FROM chats WHERE enabled = 1") as cur:
+        return [r[0] for r in await cur.fetchall()]
 
 
 async def record_usage(

@@ -224,6 +224,11 @@ async def handle_message(
         "is_bot": False,
         "alias": context.alias_for(message.from_user.full_name),
     }
+    present = {m["user_id"] for m in messages if m.get("user_id")}
+    if sender is not None:
+        present.add(sender.id)
+    facts = await store.facts_for_users(db, chat_id, sorted(present))
+
     quote = getattr(message, "quote", None)
     prompt = context.build(
         messages=messages,
@@ -231,6 +236,9 @@ async def handle_message(
         trigger=trigger,
         now=now.strftime("%Y-%m-%d %H:%M"),
         chat_title=message.chat.title or "",
+        week_summary=await store.latest_summary(db, chat_id, "week"),
+        today_summary=await store.latest_summary(db, chat_id, "day"),
+        facts=facts,
         quote=getattr(quote, "text", None),
         quote_author=(
             context.BOT_ALIAS
@@ -279,6 +287,20 @@ async def handle_message(
     return result.text
 
 
+async def handle_edit(message, db) -> bool:
+    """Follow an edit, never answer it.
+
+    Answering edits would let anyone re-trigger the bot by editing an old message, and
+    would double up on a conversation that already got its reply.
+    """
+    return await store.update_message_text(
+        db,
+        message.chat.id,
+        message.message_id,
+        (message.text or message.caption or ""),
+    )
+
+
 def build_router() -> Router:
     router = Router(name="chat")
 
@@ -288,5 +310,9 @@ def build_router() -> Router:
     @router.message()
     async def on_message(message: Message, db, client, persona, bot_id) -> None:
         await handle_message(message, db, client, persona, bot_id)
+
+    @router.edited_message()
+    async def on_edit(message: Message, db) -> None:
+        await handle_edit(message, db)
 
     return router

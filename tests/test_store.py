@@ -194,3 +194,20 @@ async def test_our_own_replies_count_as_bot_messages(db):
     )
 
     assert await store.bot_streak(db, -100) == 1
+
+
+async def test_an_edit_updates_the_stored_text(db):
+    await _seed_user(db)
+    await store.save_message(
+        db, chat_id=-100, message_id=5, user_id=1, ts="2026-08-19T10:00:00",
+        text="оригінал", media_kind=None, file_id=None, reply_to=None, is_bot=False,
+    )
+
+    assert await store.update_message_text(db, -100, 5, "виправлено") is True
+
+    rows = await store.recent_messages(db, -100, limit=5)
+    assert rows[0]["text"] == "виправлено"
+
+
+async def test_editing_a_message_we_never_saw_changes_nothing(db):
+    assert await store.update_message_text(db, -100, 999, "щось") is False

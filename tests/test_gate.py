@@ -18,6 +18,8 @@ def make(**overrides) -> GateInput:
         hourly_cap=10,
         bot_streak=0,
         bot_exchange_limit=3,
+        throttle_after=6,
+        throttle_step=15,
     )
     base.update(overrides)
     return GateInput(**base)
@@ -163,21 +165,30 @@ def test_says_nothing_while_it_is_already_writing():
 def test_the_first_few_replies_to_one_person_are_free():
     from gryag.gate import required_gap
 
-    assert required_gap(0, 3, 20) == 0
-    assert required_gap(2, 3, 20) == 0
+    assert required_gap(0, 6, 15) == 0
+    assert required_gap(5, 6, 15) == 0
 
 
 def test_the_gap_grows_with_each_further_reply():
     from gryag.gate import required_gap
 
-    assert required_gap(3, 3, 20) == 20
-    assert required_gap(4, 3, 20) == 40
-    assert required_gap(5, 3, 20) == 60
+    assert required_gap(6, 6, 15) == 15
+    assert required_gap(7, 6, 15) == 30
+    assert required_gap(8, 6, 15) == 45
+
+
+def test_an_active_conversation_is_not_throttled():
+    """Regression: 3 free replies per 10 minutes silenced normal back-and-forth."""
+    decision = should_speak(
+        make(mentions_bot=True, user_recent_replies=5, seconds_since_user_reply=3)
+    )
+
+    assert decision.speak is True
 
 
 def test_a_person_leaning_on_the_bot_is_slowed_down():
     decision = should_speak(
-        make(mentions_bot=True, user_recent_replies=5, seconds_since_user_reply=10)
+        make(mentions_bot=True, user_recent_replies=12, seconds_since_user_reply=10)
     )
 
     assert decision.speak is False
@@ -186,7 +197,7 @@ def test_a_person_leaning_on_the_bot_is_slowed_down():
 
 def test_the_throttle_lets_them_through_once_they_wait():
     decision = should_speak(
-        make(mentions_bot=True, user_recent_replies=5, seconds_since_user_reply=90)
+        make(mentions_bot=True, user_recent_replies=12, seconds_since_user_reply=200)
     )
 
     assert decision.speak is True

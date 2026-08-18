@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the gryag digest once a day
+
+[Timer]
+# 04:00 sits inside the measured dead zone of this chat: 03:00-07:00 carries
+# 0-11 messages an hour against a peak of 958 at 22:00.
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

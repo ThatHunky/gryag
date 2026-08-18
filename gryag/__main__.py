@@ -51,7 +51,7 @@ async def serve_webhook(secrets: config.Secrets) -> None:
         f"{secrets.webhook_base}{WEBHOOK_PATH}",
         secret_token=secrets.webhook_secret,
         drop_pending_updates=False,
-        allowed_updates=["message", "callback_query"],
+        allowed_updates=["message", "edited_message", "callback_query"],
     )
     app = web.Application()
     SimpleRequestHandler(
@@ -75,7 +75,7 @@ async def serve_polling(secrets: config.Secrets) -> None:
     await bot.delete_webhook(drop_pending_updates=False)
     logging.info("polling mode")
     await dispatcher.start_polling(
-        bot, allowed_updates=["message", "callback_query"]
+        bot, allowed_updates=["message", "edited_message", "callback_query"]
     )
 
 

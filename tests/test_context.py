@@ -144,3 +144,47 @@ def test_no_quote_changes_nothing():
 
 def test_quote_without_an_author_still_renders():
     assert context.render_quote("Нікос", None) == "(цитує: «Нікос»)"
+
+
+def test_summaries_and_facts_appear_above_the_conversation():
+    prompt = context.build(
+        messages=[msg(text="привіт")],
+        chain=[],
+        trigger=msg(message_id=99, text="гряг шо"),
+        now="n", chat_title="c",
+        week_summary="тиждень про лінукс",
+        today_summary="сьогодні сварилися",
+        facts=[("oleh", "з Тернополя")],
+    )
+
+    assert prompt.index("тиждень про лінукс") < prompt.index("привіт")
+    assert "Сьогодні: сьогодні сварилися" in prompt
+    assert "Про присутніх: oleh — з Тернополя" in prompt
+
+
+def test_each_memory_block_is_capped_here_not_upstream():
+    """Caps are enforced where the prompt is built, not trusted from whatever wrote the
+    summary. Legacy degraded exactly by letting these blocks creep."""
+    prompt = context.build(
+        messages=[], chain=[], trigger=msg(text="."), now="n", chat_title="c",
+        week_summary="w" * 9000,
+        today_summary="d" * 9000,
+        facts=[("oleh", "f" * 9000)],
+    )
+    blocks = {
+        line.split(": ", 1)[0]: line.split(": ", 1)[1]
+        for line in prompt.splitlines()
+        if line.startswith(("За тиждень: ", "Сьогодні: ", "Про присутніх: "))
+    }
+
+    assert context.estimate_tokens(blocks["За тиждень"]) <= context.WEEK_SUMMARY_TOKENS
+    assert context.estimate_tokens(blocks["Сьогодні"]) <= context.DAY_SUMMARY_TOKENS
+    assert context.estimate_tokens(blocks["Про присутніх"]) <= context.FACTS_TOKENS
+
+
+def test_absent_memory_adds_nothing():
+    with_none = context.build(messages=[], chain=[], trigger=msg(text="г"), now="n", chat_title="c")
+    with_empty = context.build(messages=[], chain=[], trigger=msg(text="г"), now="n",
+                               chat_title="c", week_summary="", today_summary=None, facts=[])
+
+    assert with_none == with_empty

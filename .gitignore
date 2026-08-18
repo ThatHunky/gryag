@@ -1,0 +1,21 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Eval output contains real chat content and model responses.
+eval/out/
+
+# Runtime
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# Raw Telegram exports: real messages, names, photos, voice and video.
+# Never commit. Mine cases out of these, keep the source local.
+chat_exports/
+
+# Real production prompt dump: names, user IDs, stored memory facts. Never push.
+eval/reference/

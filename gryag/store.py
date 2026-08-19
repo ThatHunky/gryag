@@ -6,6 +6,8 @@ connection runs in WAL mode with a busy timeout and transactions stay short.
 
 from __future__ import annotations
 
+import json
+
 import aiosqlite
 
 SCHEMA = """
@@ -98,6 +100,18 @@ CREATE TABLE IF NOT EXISTS pidor_days (
     day       TEXT    NOT NULL,
     user_id   INTEGER NOT NULL,
     chosen_at TEXT    NOT NULL,
+    PRIMARY KEY (chat_id, day)
+);
+
+CREATE TABLE IF NOT EXISTS pidrahuika_days (
+    day        TEXT PRIMARY KEY,
+    fetched_at TEXT NOT NULL,
+    payload    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pidrahuika_posts (
+    chat_id INTEGER NOT NULL,
+    day     TEXT    NOT NULL,
     PRIMARY KEY (chat_id, day)
 );
 
@@ -471,7 +485,10 @@ async def forget_chat(db: aiosqlite.Connection, chat_id: int) -> dict[str, int]:
     removed: dict[str, int] = {}
     for table in (
         "messages", "users", "facts", "summaries", "usage", "bans", "chat_state",
-        "pidor_days",
+        # pidrahuika_days is deliberately absent: the killboard's figures are not this
+        # chat's data. They are the same for everybody, and dropping them here would
+        # break tomorrow's delta in every other chat.
+        "pidor_days", "pidrahuika_posts",
     ):
         cur = await db.execute(f"DELETE FROM {table} WHERE chat_id = ?", (chat_id,))
         removed[table] = cur.rowcount
@@ -717,3 +734,45 @@ async def pidor_counts(
         params,
     ) as cur:
         return [(r[0], r[1]) for r in await cur.fetchall()]
+
+
+async def pidrahuika_save(
+    db: aiosqlite.Connection, day: str, fetched_at: str, payload: dict
+) -> None:
+    """The raw payload, not the rendered text: a change to the rendering should be able to
+    go back over days already collected."""
+    await db.execute(
+        """
+        INSERT INTO pidrahuika_days (day, fetched_at, payload) VALUES (?, ?, ?)
+        ON CONFLICT (day) DO UPDATE SET
+            fetched_at = excluded.fetched_at, payload = excluded.payload
+        """,
+        (day, fetched_at, json.dumps(payload, ensure_ascii=False)),
+    )
+    await db.commit()
+
+
+async def pidrahuika_payload(db: aiosqlite.Connection, day: str) -> dict | None:
+    async with db.execute(
+        "SELECT payload FROM pidrahuika_days WHERE day = ?", (day,)
+    ) as cur:
+        row = await cur.fetchone()
+    return json.loads(row[0]) if row else None
+
+
+async def pidrahuika_posted(db: aiosqlite.Connection, chat_id: int, day: str) -> bool:
+    async with db.execute(
+        "SELECT 1 FROM pidrahuika_posts WHERE chat_id = ? AND day = ?", (chat_id, day)
+    ) as cur:
+        return await cur.fetchone() is not None
+
+
+async def pidrahuika_mark(db: aiosqlite.Connection, chat_id: int, day: str) -> None:
+    await db.execute(
+        """
+        INSERT INTO pidrahuika_posts (chat_id, day) VALUES (?, ?)
+        ON CONFLICT (chat_id, day) DO NOTHING
+        """,
+        (chat_id, day),
+    )
+    await db.commit()

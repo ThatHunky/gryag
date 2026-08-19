@@ -358,3 +358,47 @@ async def test_forgetting_a_chat_forgets_its_game(db):
     await store.forget_chat(db, -100)
 
     assert await store.pidor_winner(db, -100, "2026-08-19") is None
+
+
+async def test_a_days_figures_are_kept_and_read_back(db):
+    await store.pidrahuika_save(db, "2026-08-19", "2026-08-19T09:00:00+00:00", {"killed": 1})
+
+    assert await store.pidrahuika_payload(db, "2026-08-19") == {"killed": 1}
+
+
+async def test_saving_the_same_day_twice_overwrites(db):
+    await store.pidrahuika_save(db, "2026-08-19", "2026-08-19T09:00:00+00:00", {"killed": 1})
+    await store.pidrahuika_save(db, "2026-08-19", "2026-08-19T10:00:00+00:00", {"killed": 2})
+
+    assert await store.pidrahuika_payload(db, "2026-08-19") == {"killed": 2}
+
+
+async def test_a_day_that_was_never_saved_reads_as_nothing(db):
+    assert await store.pidrahuika_payload(db, "1999-01-01") is None
+
+
+async def test_posting_is_recorded_per_chat_and_day(db):
+    assert await store.pidrahuika_posted(db, -100, "2026-08-19") is False
+
+    await store.pidrahuika_mark(db, -100, "2026-08-19")
+
+    assert await store.pidrahuika_posted(db, -100, "2026-08-19") is True
+    assert await store.pidrahuika_posted(db, -200, "2026-08-19") is False
+
+
+async def test_forgetting_a_chat_forgets_that_it_was_posted_to(db):
+    await store.pidrahuika_mark(db, -100, "2026-08-19")
+
+    await store.forget_chat(db, -100)
+
+    assert await store.pidrahuika_posted(db, -100, "2026-08-19") is False
+
+
+async def test_forgetting_a_chat_keeps_the_figures_themselves(db):
+    """The killboard's numbers are not the chat's data — they are the same for everybody,
+    and losing them would break tomorrow's delta for every other chat."""
+    await store.pidrahuika_save(db, "2026-08-19", "2026-08-19T09:00:00+00:00", {"killed": 1})
+
+    await store.forget_chat(db, -100)
+
+    assert await store.pidrahuika_payload(db, "2026-08-19") is not None

@@ -20,7 +20,18 @@ from aiogram.types import BotCommand
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
-from gryag import admin, config, digest, handlers, llm, pidor, proactive, screens, store
+from gryag import (
+    admin,
+    config,
+    digest,
+    handlers,
+    llm,
+    pidor,
+    pidrahuika,
+    proactive,
+    screens,
+    store,
+)
 
 @dataclass
 class Runtime:
@@ -78,6 +89,7 @@ async def build(secrets: config.Secrets) -> "Runtime":
     await bot.set_my_commands([
         BotCommand(command="pidor", description="хто сьогодні підарас дня"),
         BotCommand(command="pidorstats", description="підараси року"),
+        BotCommand(command="pidrahuika", description="підрахуйка СБС за сьогодні"),
     ])
 
     dispatcher = Dispatcher(db=db, client=client, persona=persona, bot_id=me.id)
@@ -90,6 +102,7 @@ async def build(secrets: config.Secrets) -> "Runtime":
         )
     )
     dispatcher.include_router(pidor.build_router())
+    dispatcher.include_router(pidrahuika.build_router())
     dispatcher.include_router(handlers.build_router())
     return Runtime(bot=bot, dispatcher=dispatcher, db=db, client=client, persona=persona)
 

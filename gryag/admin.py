@@ -189,6 +189,14 @@ def build_router(
         )
         await query.answer()
 
+    @router.callback_query(F.data == "board:now")
+    async def show_board(query: CallbackQuery, db) -> None:
+        from gryag import pidrahuika
+
+        text = await pidrahuika.digest_text(db, "daily", datetime.now(timezone.utc))
+        await query.message.answer(text or "табло не відповідає")
+        await query.answer()
+
     @router.callback_query(F.data == "reload")
     async def reload_persona(query: CallbackQuery) -> None:
         if on_reload is None:

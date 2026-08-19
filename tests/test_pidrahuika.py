@@ -2,7 +2,11 @@
 https://sbs-group.army/api/public/statistics/… on 2026-08-19 and trimmed to five target
 classes; the shape is exactly what the API returns."""
 
-from gryag import pidrahuika
+from datetime import datetime, timezone
+
+import pytest
+
+from gryag import admin, config, pidrahuika, store
 
 PAYLOAD = {
     "personnel": {"killed": 168, "wounded": 182},
@@ -110,3 +114,117 @@ def test_only_the_top_n_categories_are_shown():
     report = pidrahuika.parse(many, "2026-08-19")
 
     assert len(report.top) == pidrahuika.TOP_N
+
+
+class FakeBot:
+    def __init__(self):
+        self.sent: list[tuple[int, str]] = []
+
+    async def send_message(self, chat_id, text, **kwargs):
+        self.sent.append((chat_id, text))
+
+        class Sent:
+            message_id = 1000 + len(self.sent)
+
+        return Sent()
+
+
+@pytest.fixture
+def _board(monkeypatch):
+    """The killboard is never called from a test."""
+    calls: list[str] = []
+
+    async def fake_fetch(period_type, now=None):
+        calls.append(period_type)
+        return pidrahuika.parse(PAYLOAD, "2026-08-18"), PAYLOAD
+
+    monkeypatch.setattr(pidrahuika, "fetch_report", fake_fetch)
+    return calls
+
+
+async def test_the_digest_reads_the_previous_day_and_stores_it(db, _board):
+    text = await pidrahuika.digest_text(
+        db, "prev_day", datetime(2026, 8, 19, 6, tzinfo=timezone.utc)
+    )
+
+    assert "Підрахуйка" in text
+    assert _board == ["prev_day"]
+    assert await store.pidrahuika_payload(db, "2026-08-18") is not None
+
+
+async def test_a_board_that_does_not_answer_yields_nothing(db, monkeypatch):
+    async def no_answer(period_type, now=None):
+        return None
+
+    monkeypatch.setattr(pidrahuika, "fetch_report", no_answer)
+
+    assert (
+        await pidrahuika.digest_text(db, "prev_day", datetime(2026, 8, 19, tzinfo=timezone.utc))
+        is None
+    )
+
+
+async def test_figures_that_are_not_collected_yet_say_so(db, monkeypatch):
+    async def uncollected(period_type, now=None):
+        return pidrahuika.parse({**PAYLOAD, "status": "not_collected"}, "2026-08-18"), PAYLOAD
+
+    monkeypatch.setattr(pidrahuika, "fetch_report", uncollected)
+
+    text = await pidrahuika.digest_text(db, "daily", datetime(2026, 8, 19, tzinfo=timezone.utc))
+
+    assert "ще не порахували" in text
+
+
+async def test_the_morning_post_lands_once(db, _board):
+    await admin.enable_chat(db, -100, "матсурі")
+    await config.set(db, "pidrahuika_enabled", "1", chat_id=-100)
+    bot = FakeBot()
+    # 09:30 Kyiv is 06:30 UTC in summer.
+    morning = datetime(2026, 8, 19, 6, 30, tzinfo=timezone.utc)
+
+    assert await pidrahuika.post_due(db, bot, morning) == 1
+    assert await pidrahuika.post_due(db, bot, morning) == 0
+    assert len(bot.sent) == 1
+
+
+async def test_nothing_is_posted_before_the_hour(db, _board):
+    await admin.enable_chat(db, -100, "матсурі")
+    await config.set(db, "pidrahuika_enabled", "1", chat_id=-100)
+    bot = FakeBot()
+
+    assert await pidrahuika.post_due(db, bot, datetime(2026, 8, 19, 3, tzinfo=timezone.utc)) == 0
+
+
+async def test_a_chat_that_did_not_ask_for_it_gets_nothing(db, _board):
+    await admin.enable_chat(db, -100, "матсурі")
+    bot = FakeBot()
+
+    assert (
+        await pidrahuika.post_due(db, bot, datetime(2026, 8, 19, 6, 30, tzinfo=timezone.utc)) == 0
+    )
+
+
+async def test_a_muted_chat_gets_nothing(db, _board):
+    await admin.enable_chat(db, -100, "матсурі")
+    await config.set(db, "pidrahuika_enabled", "1", chat_id=-100)
+    await store.set_mute(db, -100, "2126-01-01T00:00:00+00:00")
+    bot = FakeBot()
+
+    assert (
+        await pidrahuika.post_due(db, bot, datetime(2026, 8, 19, 6, 30, tzinfo=timezone.utc)) == 0
+    )
+
+
+async def test_a_failed_fetch_leaves_the_day_unmarked_so_the_next_tick_retries(db, monkeypatch):
+    await admin.enable_chat(db, -100, "матсурі")
+    await config.set(db, "pidrahuika_enabled", "1", chat_id=-100)
+
+    async def no_answer(period_type, now=None):
+        return None
+
+    monkeypatch.setattr(pidrahuika, "fetch_report", no_answer)
+    bot = FakeBot()
+    morning = datetime(2026, 8, 19, 6, 30, tzinfo=timezone.utc)
+
+    assert await pidrahuika.post_due(db, bot, morning) == 0
+    assert await store.pidrahuika_posted(db, -100, "2026-08-19") is False

@@ -16,8 +16,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
+from aiogram import Router
+from aiogram.filters import Command
+from aiogram.types import Message
 
-from gryag.handlers import kyiv_day
+from gryag import config, handlers, phrases, store
+from gryag.handlers import LOCAL_TZ, kyiv_day
 
 log = logging.getLogger(__name__)
 
@@ -168,3 +172,92 @@ async def fetch_report(
         return None
     data = payload.get("data") or {}
     return parse(data, day), data
+
+
+async def digest_text(db, period_type: str, now: datetime) -> str | None:
+    """The rendered digest, or None when the board could not be read at all."""
+    got = await fetch_report(period_type, now)
+    if got is None:
+        return None
+    report, payload = got
+    if not report.collected:
+        return "підрахуйку за цю добу ще не порахували"
+
+    await store.pidrahuika_save(db, report.day, now.isoformat(timespec="seconds"), payload)
+    day_before = (
+        datetime.strptime(report.day, "%Y-%m-%d") - timedelta(days=1)
+    ).strftime("%Y-%m-%d")
+    stored = await store.pidrahuika_payload(db, day_before)
+    previous = parse(stored, day_before) if stored else None
+    seed = int(report.day.replace("-", ""))
+    return render(report, previous, phrases.pick(phrases.DIGEST, seed))
+
+
+async def post_due(db, bot, now: datetime | None = None) -> int:
+    """Post yesterday's figures in every chat whose hour has come. Returns how many."""
+    now = now or datetime.now(timezone.utc)
+    local_hour = now.astimezone(LOCAL_TZ).hour
+    today = kyiv_day(now)
+    posted = 0
+    for chat_id in await store.enabled_chats(db):
+        if await config.get(db, "pidrahuika_enabled", chat_id) != "1":
+            continue
+        if local_hour < await config.get_int(db, "pidrahuika_hour", chat_id):
+            continue
+        if await store.pidrahuika_posted(db, chat_id, today):
+            continue
+        if await store.muted_until(db, chat_id, now.isoformat(timespec="seconds")):
+            continue
+        text = await digest_text(db, "prev_day", now)
+        if text is None:
+            # Deliberately unmarked: the next tick is ten minutes away, and a board that
+            # was down at nine is usually up at ten past.
+            continue
+        sent = await bot.send_message(chat_id, text)
+        await store.save_message(
+            db,
+            chat_id=chat_id,
+            message_id=sent.message_id,
+            user_id=None,
+            ts=now.isoformat(timespec="seconds"),
+            text=text,
+            media_kind=None,
+            file_id=None,
+            reply_to=None,
+            is_bot=True,
+        )
+        await store.pidrahuika_mark(db, chat_id, today)
+        posted += 1
+    return posted
+
+
+_last_asked: dict[int, tuple[float, str]] = {}
+COOLDOWN = 60.0
+"""The board itself refreshes every ten seconds, so a minute-old answer is as good as a
+new one — and this doubles as the anti-spam measure."""
+
+
+def build_router() -> Router:
+    router = Router(name="pidrahuika")
+
+    @router.message(Command("pidrahuika", "sbs"))
+    async def show(message: Message, db) -> None:
+        from gryag.screens import chat_is_enabled
+
+        if not await chat_is_enabled(db, message.chat.id):
+            return
+        await handlers.persist(db, message)
+        if await config.get(db, "pidrahuika_enabled", message.chat.id) != "1":
+            return
+        cached = _last_asked.get(message.chat.id)
+        if cached and time.monotonic() - cached[0] < COOLDOWN:
+            await message.reply(cached[1])
+            return
+        text = await digest_text(db, "daily", datetime.now(timezone.utc))
+        if text is None:
+            await message.reply("табло не відповідає")
+            return
+        _last_asked[message.chat.id] = (time.monotonic(), text)
+        await message.reply(text)
+
+    return router

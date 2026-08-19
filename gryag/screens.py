@@ -178,6 +178,9 @@ _ACTIONS: dict[str, list[list[InlineKeyboardButton]]] = {
         InlineKeyboardButton(text="🎲 розіграти", callback_data="pidor:roll"),
         InlineKeyboardButton(text="🏆 топ", callback_data="pidor:top"),
     ]],
+    "board": [[
+        InlineKeyboardButton(text="📊 показати", callback_data="board:now"),
+    ]],
     "spend": [[
         InlineKeyboardButton(text="доба", callback_data="spend:day"),
         InlineKeyboardButton(text="тиждень", callback_data="spend:week"),

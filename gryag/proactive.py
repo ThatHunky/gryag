@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 import aiosqlite
 
-from gryag import config, context, gate, handlers, llm, pidor, store
+from gryag import config, context, gate, handlers, llm, pidor, pidrahuika, store
 from gryag.handlers import _render_now
 
 log = logging.getLogger(__name__)
@@ -154,4 +154,5 @@ async def loop(db: aiosqlite.Connection, client, bot, persona) -> None:
     while True:
         await _run_safely("proactive pass", run_once(db, client, bot, persona))
         await _run_safely("pidor announcement", pidor.announce_due(db, bot))
+        await _run_safely("pidrahuika digest", pidrahuika.post_due(db, bot))
         await asyncio.sleep(TICK_SECONDS)

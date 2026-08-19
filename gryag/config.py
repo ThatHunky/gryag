@@ -80,6 +80,16 @@ DEFAULTS: dict[str, str] = {
     "proactive_enabled": "0",
     "proactive_silence": "10800",
     "proactive_cooldown": "21600",
+    # Підарас дня. A joke, but the pool is real people, so the window governs who counts
+    # as present: somebody who left the chat a month ago should not keep winning.
+    "pidor_enabled": "1",
+    "pidor_window_days": "30",
+    "pidor_min_players": "3",
+    # Kyiv hour at which the bot rolls on its own if nobody has asked. -1 never does.
+    "pidor_announce_hour": "13",
+    # Підрахуйка: the USF public killboard. Off until a chat asks for it.
+    "pidrahuika_enabled": "0",
+    "pidrahuika_hour": "9",
 }
 
 

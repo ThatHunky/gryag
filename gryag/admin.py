@@ -14,20 +14,26 @@ import aiosqlite
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, Message
 
-from gryag import config, images, llm, menu, store
+from gryag import config, images, menu, store
 from gryag.handlers import _spawn
+from gryag.screens import (
+    _now,
+    _persona_size_hint,
+    chat_is_enabled,
+    root_markup,
+    root_text,
+    screen_markup,
+    screen_text,
+    spend_report,
+)
 
 log = logging.getLogger(__name__)
 
 MODEL_CHOICES = tuple(
     c.value for c in menu.SECTIONS["model"][1][0].choices
 )
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 async def enable_chat(db: aiosqlite.Connection, chat_id: int, title: str) -> None:
@@ -47,129 +53,6 @@ async def disable_chat(db: aiosqlite.Connection, chat_id: int) -> None:
     await db.commit()
 
 
-async def chat_is_enabled(db: aiosqlite.Connection, chat_id: int) -> bool:
-    async with db.execute(
-        "SELECT enabled FROM chats WHERE chat_id = ?", (chat_id,)
-    ) as cur:
-        row = await cur.fetchone()
-    return bool(row and row[0])
-
-
-async def spend_report(db: aiosqlite.Connection, chat_id: int | None = None) -> str:
-    where, params = "", []
-    if chat_id is not None:
-        where, params = "WHERE chat_id = ?", [chat_id]
-    async with db.execute(
-        f"""
-        SELECT model, purpose, COUNT(*), SUM(cost_usd), AVG(prompt_tok), AVG(visible_tok),
-               AVG(thought_tok), AVG(latency_ms),
-               SUM(cached_tok) * 1.0 / NULLIF(SUM(prompt_tok), 0), SUM(searched)
-        FROM usage {where}
-        GROUP BY model, purpose ORDER BY SUM(cost_usd) DESC
-        """,
-        params,
-    ) as cur:
-        rows = await cur.fetchall()
-
-    if not rows:
-        return "Витрат поки нічого немає."
-
-    lines: list[str] = []
-    total = 0.0
-    searches = 0
-    for model, purpose, calls, cost, prompt, visible, thoughts, latency, cache, found in rows:
-        total += cost or 0.0
-        searches += found or 0
-        lines.append(
-            f"{model} ({purpose})\n"
-            f"  викликів {calls}, разом ${cost:.4f}\n"
-            f"  промпт {prompt:.0f}, видимих {visible:.0f}, думання {thoughts:.0f}\n"
-            f"  латентність {latency:.0f} мс, кеш {100 * (cache or 0):.1f}%"
-        )
-    lines.append(f"Разом: ${total:.4f}")
-    lines.append(f"Пошуків: {searches} з {llm.SEARCH_FREE_PER_MONTH} безкоштовних на місяць")
-    return "\n".join(lines)
-
-
-async def drift_warning(db: aiosqlite.Connection) -> str | None:
-    """`gemini-flash-latest` can be repointed with no notice and no API signal.
-
-    A step change in how much the model thinks, or how long it takes, is the only
-    evidence available that the thing behind the alias is not the thing that was there
-    last week.
-    """
-    async with db.execute(
-        """
-        SELECT AVG(thought_tok), AVG(latency_ms) FROM usage
-        WHERE purpose = 'reply' AND model = 'gemini-flash-latest' AND ts >= datetime('now', '-2 days')
-        """
-    ) as cur:
-        recent = await cur.fetchone()
-    async with db.execute(
-        """
-        SELECT AVG(thought_tok), AVG(latency_ms) FROM usage
-        WHERE purpose = 'reply' AND model = 'gemini-flash-latest'
-          AND ts < datetime('now', '-2 days') AND ts >= datetime('now', '-9 days')
-        """
-    ) as cur:
-        older = await cur.fetchone()
-
-    if not recent or not older or not recent[0] or not older[0]:
-        return None
-    if recent[0] > older[0] * 1.5 or recent[0] < older[0] * 0.66:
-        return (
-            f"⚠️ Думання змінилось: було {older[0]:.0f} токенів, стало {recent[0]:.0f}. "
-            "Схоже, аліас перевели на іншу модель."
-        )
-    return None
-
-
-async def _menu_markup(db: aiosqlite.Connection, chat_id: int, section: str) -> InlineKeyboardMarkup:
-    title, settings = menu.SECTIONS[section]
-    rows: list[list[InlineKeyboardButton]] = []
-    for setting in settings:
-        current = await config.get(db, setting.key, chat_id)
-        rows.append([
-            InlineKeyboardButton(
-                text=f"{setting.title}: {setting.label_for(current)}",
-                callback_data=f"set:{section}:{setting.key}",
-            )
-        ])
-    rows.append([
-        InlineKeyboardButton(
-            text=("● " if name == section else "") + label,
-            callback_data=f"sec:{name}",
-        )
-        for name, (label, _s) in menu.SECTIONS.items()
-    ])
-    enabled = await chat_is_enabled(db, chat_id)
-    muted = await store.muted_until(db, chat_id, _now())
-
-    rows.append([
-        InlineKeyboardButton(
-            text=("✅ чат увімкнено" if enabled else "❌ чат вимкнено"),
-            callback_data="chat:toggle",
-        )
-    ])
-    # Four buttons per row is the practical maximum before Telegram starts truncating,
-    # which is why these read "1 год" rather than "замовкни на 1 годину".
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text=("🔇 " if muted else "") + c.label, callback_data=f"mute:{c.value}"
-            )
-            for c in menu.MUTE_CHOICES
-        ]
-        + [InlineKeyboardButton(text="🔊", callback_data="mute:0")]
-    )
-    rows.append([
-        InlineKeyboardButton(text="💰 витрати", callback_data="panel"),
-        InlineKeyboardButton(text="↻ персона", callback_data="reload"),
-        InlineKeyboardButton(text="↻ самарі", callback_data="digest"),
-    ])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
 async def _rerun_and_report(on_digest, db, chat) -> None:
     """Regenerate one chat's summaries and say so when it lands.
 
@@ -186,28 +69,26 @@ async def _rerun_and_report(on_digest, db, chat) -> None:
     await chat.send_message("самарі перераховане")
 
 
-def build_router(admin_ids: tuple[int, ...], on_reload=None, on_digest=None) -> Router:
+def build_router(
+    admin_ids: tuple[int, ...], on_reload=None, on_digest=None, persona=None
+) -> Router:
     router = Router(name="admin")
     router.message.filter(F.from_user.id.in_(admin_ids))
     router.callback_query.filter(F.from_user.id.in_(admin_ids))
+    if persona is not None:
+        _persona_size_hint["chars"] = len(persona["text"])
 
-    async def show(target, db, section: str, edit: bool) -> None:
+    async def show(target, db, screen_key: str, section: str | None, edit: bool) -> None:
         chat_id = target.chat.id
-        lines = [f"⚙️ {menu.SECTIONS[section][0]}"]
-        if not await chat_is_enabled(db, chat_id):
-            lines.append("Цей чат вимкнений — бот тут мовчить.")
-        muted = await store.muted_until(db, chat_id, _now())
-        if muted:
-            lines.append(f"Мовчить до {muted[11:16]} UTC")
-        warning = await drift_warning(db)
-        if warning:
-            lines.append(warning)
-        text = "\n".join(lines)
-        markup = await _menu_markup(db, target.chat.id, section)
-        if not edit:
-            await target.answer(text, reply_markup=markup)
-            return
-        if not hasattr(target, "edit_text"):
+        if screen_key == "root":
+            text = await root_text(db, chat_id)
+            markup = await root_markup(db, chat_id)
+        else:
+            screen = menu.screen(screen_key)
+            section = section or (screen.tabs[0] if screen.tabs else "")
+            text = await screen_text(db, chat_id, screen)
+            markup = await screen_markup(db, chat_id, screen, section)
+        if not edit or not hasattr(target, "edit_text"):
             # A menu older than 48 hours arrives as InaccessibleMessage, which has no
             # edit_text. Answer fresh rather than raising into the callback.
             await target.answer(text, reply_markup=markup)
@@ -215,18 +96,24 @@ def build_router(admin_ids: tuple[int, ...], on_reload=None, on_digest=None) -> 
         try:
             await target.edit_text(text, reply_markup=markup)
         except TelegramBadRequest as exc:
-            # Tapping the section you are already in produces identical content, and
+            # Tapping the screen you are already in produces identical content, and
             # Telegram treats an edit that changes nothing as an error.
             if "message is not modified" not in str(exc):
                 raise
 
     @router.message(Command("gryag"))
     async def open_menu(message: Message, db) -> None:
-        await show(message, db, "model", edit=False)
+        await show(message, db, "root", None, edit=False)
+
+    @router.callback_query(F.data.startswith("nav:"))
+    async def navigate(query: CallbackQuery, db) -> None:
+        await show(query.message, db, query.data.split(":", 1)[1], None, edit=True)
+        await query.answer()
 
     @router.callback_query(F.data.startswith("sec:"))
-    async def switch_section(query: CallbackQuery, db) -> None:
-        await show(query.message, db, query.data.split(":", 1)[1], edit=True)
+    async def switch_tab(query: CallbackQuery, db) -> None:
+        _, screen_key, section = query.data.split(":", 2)
+        await show(query.message, db, screen_key, section, edit=True)
         await query.answer()
 
     @router.callback_query(F.data.startswith("set:"))
@@ -236,7 +123,8 @@ def build_router(admin_ids: tuple[int, ...], on_reload=None, on_digest=None) -> 
         current = await config.get(db, key, query.message.chat.id)
         value = menu.cycle(setting, current)
         await config.set(db, key, value, chat_id=query.message.chat.id)
-        await show(query.message, db, section, edit=True)
+        screen_key = next(s.key for s in menu.SCREENS if section in s.tabs)
+        await show(query.message, db, screen_key, section, edit=True)
         await query.answer(f"{setting.title}: {setting.label_for(value)}")
 
     @router.callback_query(F.data == "chat:toggle")
@@ -248,7 +136,7 @@ def build_router(admin_ids: tuple[int, ...], on_reload=None, on_digest=None) -> 
         else:
             await enable_chat(db, chat.id, chat.title or "")
             note = "чат увімкнено"
-        await show(query.message, db, "model", edit=True)
+        await show(query.message, db, "root", None, edit=True)
         await query.answer(note)
 
     @router.callback_query(F.data.startswith("mute:"))
@@ -262,11 +150,18 @@ def build_router(admin_ids: tuple[int, ...], on_reload=None, on_digest=None) -> 
             until = datetime.now(timezone.utc) + timedelta(hours=hours)
             await store.set_mute(db, chat_id, until.isoformat(timespec="seconds"))
             await query.answer(f"мовчу {hours} год")
-        await show(query.message, db, "model", edit=True)
+        await show(query.message, db, "root", None, edit=True)
 
-    @router.callback_query(F.data == "panel")
-    async def show_panel(query: CallbackQuery, db) -> None:
-        await query.message.answer(await spend_report(db, query.message.chat.id))
+    @router.callback_query(F.data.startswith("spend:"))
+    async def show_spend(query: CallbackQuery, db) -> None:
+        period = query.data.split(":", 1)[1]
+        report = await spend_report(db, query.message.chat.id, period)
+        markup = await screen_markup(db, query.message.chat.id, menu.screen("spend"), "")
+        try:
+            await query.message.edit_text(report, reply_markup=markup)
+        except TelegramBadRequest as exc:
+            if "message is not modified" not in str(exc):
+                raise
         await query.answer()
 
     @router.callback_query(F.data == "reload")

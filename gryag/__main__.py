@@ -19,7 +19,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
-from gryag import admin, config, digest, handlers, llm, proactive, store
+from gryag import admin, config, digest, handlers, llm, proactive, screens, store
 
 @dataclass
 class Runtime:
@@ -53,6 +53,7 @@ async def build(secrets: config.Secrets) -> "Runtime":
 
     def reload_persona() -> int:
         persona["text"] = PERSONA_PATH.read_text()
+        screens._persona_size_hint["chars"] = len(persona["text"])
         logging.info("persona reloaded, %s characters", len(persona["text"]))
         return len(persona["text"]) // 3
 
@@ -73,7 +74,12 @@ async def build(secrets: config.Secrets) -> "Runtime":
 
     dispatcher = Dispatcher(db=db, client=client, persona=persona, bot_id=me.id)
     dispatcher.include_router(
-        admin.build_router(secrets.admin_ids, on_reload=reload_persona, on_digest=rerun_digest)
+        admin.build_router(
+            secrets.admin_ids,
+            on_reload=reload_persona,
+            on_digest=rerun_digest,
+            persona=persona,
+        )
     )
     dispatcher.include_router(handlers.build_router())
     return Runtime(bot=bot, dispatcher=dispatcher, db=db, client=client, persona=persona)

@@ -49,3 +49,39 @@ async def test_switching_the_model_is_readable_afterwards(db):
     await config.set(db, "speak_model", "gemini-2.5-flash", chat_id=-100)
 
     assert await config.get(db, "speak_model", chat_id=-100) == "gemini-2.5-flash"
+
+
+async def test_rerunning_the_digest_reports_back_to_the_chat(db):
+    ran: list[int] = []
+    said: list[str] = []
+
+    async def on_digest(conn, chat_id: int) -> None:
+        ran.append(chat_id)
+
+    class FakeChat:
+        id = -100
+
+        async def send_message(self, text: str) -> None:
+            said.append(text)
+
+    await admin._rerun_and_report(on_digest, db, FakeChat())
+
+    assert ran == [-100]
+    assert "самарі" in said[0]
+
+
+async def test_a_failing_digest_says_so_instead_of_vanishing(db):
+    said: list[str] = []
+
+    async def on_digest(conn, chat_id: int) -> None:
+        raise RuntimeError("quota")
+
+    class FakeChat:
+        id = -100
+
+        async def send_message(self, text: str) -> None:
+            said.append(text)
+
+    await admin._rerun_and_report(on_digest, db, FakeChat())
+
+    assert "не вийшло" in said[0]

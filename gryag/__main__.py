@@ -122,16 +122,15 @@ async def serve_webhook(secrets: config.Secrets) -> None:
 
 
 async def serve_polling(secrets: config.Secrets) -> None:
-    bot, dispatcher = await build(secrets)
+    rt = await start(secrets)
     # Do NOT drop pending updates. Telegram holds them for 24 hours, and dropping them
     # punched 11-16 message holes in the stored history at every restart — a quarter of
     # the chat went missing across six restarts. The backlog is replayed and stored;
     # `max_reply_age` in the gate is what stops the bot answering stale messages.
-    await bot.delete_webhook(drop_pending_updates=False)
-    asyncio.create_task(proactive.loop(db, client, bot, persona))
+    await rt.bot.delete_webhook(drop_pending_updates=False)
     logging.info("polling mode")
-    await dispatcher.start_polling(
-        bot, allowed_updates=["message", "edited_message", "callback_query"]
+    await rt.dispatcher.start_polling(
+        rt.bot, allowed_updates=["message", "edited_message", "callback_query"]
     )
 
 

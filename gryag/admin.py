@@ -7,7 +7,6 @@ than the environment.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -18,6 +17,9 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from gryag import config, images, llm, menu, store
+from gryag.handlers import _spawn
+
+log = logging.getLogger(__name__)
 
 MODEL_CHOICES = tuple(
     c.value for c in menu.SECTIONS["model"][1][0].choices
@@ -166,6 +168,22 @@ async def _menu_markup(db: aiosqlite.Connection, chat_id: int, section: str) -> 
         InlineKeyboardButton(text="↻ самарі", callback_data="digest"),
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _rerun_and_report(on_digest, db, chat) -> None:
+    """Regenerate one chat's summaries and say so when it lands.
+
+    Spawned rather than awaited inside the callback: a multi-chunk day takes tens of
+    seconds, and holding the callback open that long makes Telegram redeliver it — which
+    used to start a second concurrent digest on the same connection.
+    """
+    try:
+        await on_digest(db, chat.id)
+    except Exception:
+        log.exception("rerunning the digest for %s failed", chat.id)
+        await chat.send_message("самарі не вийшло, дивись логи")
+        return
+    await chat.send_message("самарі перераховане")
 
 
 def build_router(admin_ids: tuple[int, ...], on_reload=None, on_digest=None) -> Router:

@@ -6,6 +6,8 @@ connection runs in WAL mode with a busy timeout and transactions stay short.
 
 from __future__ import annotations
 
+import json
+
 import aiosqlite
 
 SCHEMA = """
@@ -22,6 +24,7 @@ CREATE TABLE IF NOT EXISTS users (
     display_name TEXT,
     alias        TEXT,
     pronouns     TEXT,
+    username     TEXT,
     PRIMARY KEY (chat_id, user_id)
 );
 
@@ -92,6 +95,26 @@ CREATE TABLE IF NOT EXISTS bans (
     PRIMARY KEY (chat_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS pidor_days (
+    chat_id   INTEGER NOT NULL,
+    day       TEXT    NOT NULL,
+    user_id   INTEGER NOT NULL,
+    chosen_at TEXT    NOT NULL,
+    PRIMARY KEY (chat_id, day)
+);
+
+CREATE TABLE IF NOT EXISTS pidrahuika_days (
+    day        TEXT PRIMARY KEY,
+    fetched_at TEXT NOT NULL,
+    payload    TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pidrahuika_posts (
+    chat_id INTEGER NOT NULL,
+    day     TEXT    NOT NULL,
+    PRIMARY KEY (chat_id, day)
+);
+
 CREATE TABLE IF NOT EXISTS chat_state (
     chat_id         INTEGER PRIMARY KEY,
     last_spoke_ts   TEXT,
@@ -112,6 +135,8 @@ MIGRATIONS = (
     # Google Search grounding is free for the first 5,000 requests a month and $14 per
     # 1,000 after, so the panel needs to be able to count them.
     "ALTER TABLE usage ADD COLUMN searched INTEGER NOT NULL DEFAULT 0",
+    # A mention needs @username, and until the game arrived nothing ever needed one.
+    "ALTER TABLE users ADD COLUMN username TEXT",
 )
 
 
@@ -147,16 +172,38 @@ async def upsert_user(
     user_id: int,
     display_name: str,
     alias: str,
+    username: str | None = None,
 ) -> None:
     await db.execute(
         """
-        INSERT INTO users (chat_id, user_id, display_name, alias)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT (chat_id, user_id) DO UPDATE SET display_name = excluded.display_name
+        INSERT INTO users (chat_id, user_id, display_name, alias, username)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (chat_id, user_id) DO UPDATE SET
+            display_name = excluded.display_name,
+            -- Telegram omits the field for people who have no username, and an update
+            -- that omits it must not erase one recorded earlier.
+            username = COALESCE(excluded.username, users.username)
         """,
-        (chat_id, user_id, display_name, alias),
+        (chat_id, user_id, display_name, alias, username),
     )
     await db.commit()
+
+
+async def user_names(
+    db: aiosqlite.Connection, chat_id: int, user_ids: list[int]
+) -> dict[int, tuple[str | None, str]]:
+    """{user_id: (username, display_name)} for building mentions."""
+    if not user_ids:
+        return {}
+    marks = ",".join("?" * len(user_ids))
+    async with db.execute(
+        f"""
+        SELECT user_id, username, COALESCE(display_name, alias, CAST(user_id AS TEXT))
+        FROM users WHERE chat_id = ? AND user_id IN ({marks})
+        """,
+        (chat_id, *user_ids),
+    ) as cur:
+        return {r[0]: (r[1], r[2]) for r in await cur.fetchall()}
 
 
 async def save_message(
@@ -436,7 +483,13 @@ async def forget_chat(db: aiosqlite.Connection, chat_id: int) -> dict[str, int]:
     well as speech, and available for any chat the bot should never have been in.
     """
     removed: dict[str, int] = {}
-    for table in ("messages", "users", "facts", "summaries", "usage", "bans", "chat_state"):
+    for table in (
+        "messages", "users", "facts", "summaries", "usage", "bans", "chat_state",
+        # pidrahuika_days is deliberately absent: the killboard's figures are not this
+        # chat's data. They are the same for everybody, and dropping them here would
+        # break tomorrow's delta in every other chat.
+        "pidor_days", "pidrahuika_posts",
+    ):
         cur = await db.execute(f"DELETE FROM {table} WHERE chat_id = ?", (chat_id,))
         removed[table] = cur.rowcount
     await db.commit()
@@ -610,5 +663,116 @@ async def record_usage(
             cost_usd,
             searched,
         ),
+    )
+    await db.commit()
+
+
+async def active_user_ids(
+    db: aiosqlite.Connection, chat_id: int, since_ts: str
+) -> list[int]:
+    """Everybody who has said something since `since_ts`, bots excluded.
+
+    This is the only list of chat members available: the Bot API cannot enumerate a
+    group, so "who is here" means "who has spoken here recently".
+    """
+    async with db.execute(
+        """
+        SELECT DISTINCT user_id FROM messages
+        WHERE chat_id = ? AND ts >= ? AND user_id IS NOT NULL
+          AND sender_is_bot = 0 AND is_bot = 0
+        ORDER BY user_id
+        """,
+        (chat_id, since_ts),
+    ) as cur:
+        return [r[0] for r in await cur.fetchall()]
+
+
+async def pidor_winner(db: aiosqlite.Connection, chat_id: int, day: str) -> int | None:
+    async with db.execute(
+        "SELECT user_id FROM pidor_days WHERE chat_id = ? AND day = ?", (chat_id, day)
+    ) as cur:
+        row = await cur.fetchone()
+    return row[0] if row else None
+
+
+async def pidor_record(
+    db: aiosqlite.Connection, chat_id: int, day: str, user_id: int, chosen_at: str
+) -> int:
+    """Claim the day, and return whoever actually holds it.
+
+    Insert-then-read rather than a lock: two people typing the command in the same second
+    both write, one loses on the primary key, and both then read the same winner. The same
+    reasoning as `_claim` in handlers — the cheapest race is the one you let happen.
+    """
+    await db.execute(
+        """
+        INSERT INTO pidor_days (chat_id, day, user_id, chosen_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT (chat_id, day) DO NOTHING
+        """,
+        (chat_id, day, user_id, chosen_at),
+    )
+    await db.commit()
+    held = await pidor_winner(db, chat_id, day)
+    assert held is not None  # just inserted, or already there
+    return held
+
+
+async def pidor_counts(
+    db: aiosqlite.Connection, chat_id: int, since_day: str | None = None
+) -> list[tuple[int, int]]:
+    """(user_id, wins), most wins first."""
+    clause, params = "", [chat_id]
+    if since_day is not None:
+        clause = " AND day >= ?"
+        params.append(since_day)
+    async with db.execute(
+        f"""
+        SELECT user_id, COUNT(*) AS wins FROM pidor_days
+        WHERE chat_id = ?{clause}
+        GROUP BY user_id ORDER BY wins DESC, user_id
+        """,
+        params,
+    ) as cur:
+        return [(r[0], r[1]) for r in await cur.fetchall()]
+
+
+async def pidrahuika_save(
+    db: aiosqlite.Connection, day: str, fetched_at: str, payload: dict
+) -> None:
+    """The raw payload, not the rendered text: a change to the rendering should be able to
+    go back over days already collected."""
+    await db.execute(
+        """
+        INSERT INTO pidrahuika_days (day, fetched_at, payload) VALUES (?, ?, ?)
+        ON CONFLICT (day) DO UPDATE SET
+            fetched_at = excluded.fetched_at, payload = excluded.payload
+        """,
+        (day, fetched_at, json.dumps(payload, ensure_ascii=False)),
+    )
+    await db.commit()
+
+
+async def pidrahuika_payload(db: aiosqlite.Connection, day: str) -> dict | None:
+    async with db.execute(
+        "SELECT payload FROM pidrahuika_days WHERE day = ?", (day,)
+    ) as cur:
+        row = await cur.fetchone()
+    return json.loads(row[0]) if row else None
+
+
+async def pidrahuika_posted(db: aiosqlite.Connection, chat_id: int, day: str) -> bool:
+    async with db.execute(
+        "SELECT 1 FROM pidrahuika_posts WHERE chat_id = ? AND day = ?", (chat_id, day)
+    ) as cur:
+        return await cur.fetchone() is not None
+
+
+async def pidrahuika_mark(db: aiosqlite.Connection, chat_id: int, day: str) -> None:
+    await db.execute(
+        """
+        INSERT INTO pidrahuika_posts (chat_id, day) VALUES (?, ?)
+        ON CONFLICT (chat_id, day) DO NOTHING
+        """,
+        (chat_id, day),
     )
     await db.commit()

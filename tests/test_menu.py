@@ -46,3 +46,33 @@ def test_setting_titles_and_values_fit_on_one_button():
         for setting in settings:
             for choice in setting.choices:
                 assert len(f"{setting.title}: {choice.label}") <= 34
+
+
+def test_every_screen_has_a_unique_key_and_a_short_title():
+    keys = [s.key for s in menu.SCREENS]
+
+    assert len(keys) == len(set(keys))
+    for screen in menu.SCREENS:
+        assert len(screen.title) <= 14, screen.title
+
+
+def test_every_tab_a_screen_names_is_a_real_section():
+    for screen in menu.SCREENS:
+        for tab in screen.tabs:
+            assert tab in menu.SECTIONS, (screen.key, tab)
+
+
+def test_every_section_is_reachable_from_some_screen():
+    """A section nobody can navigate to is a setting nobody can change."""
+    reachable = {tab for screen in menu.SCREENS for tab in screen.tabs}
+
+    assert reachable == set(menu.SECTIONS)
+
+
+def test_looking_up_a_screen_by_key():
+    assert menu.screen("game").title == "Гра"
+
+
+def test_looking_up_a_screen_that_does_not_exist_falls_back_to_the_first():
+    """Callback data outlives deploys: a button from yesterday's layout must not raise."""
+    assert menu.screen("nope") is menu.SCREENS[0]

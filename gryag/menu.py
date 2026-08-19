@@ -97,7 +97,76 @@ SECTIONS: dict[str, tuple[str, tuple[Setting, ...]]] = {
             Setting("proactive_silence", "Після тиші", _numbers(3600, 10800, 21600, suffix=" с")),
         ),
     ),
+    "game": (
+        "Гра",
+        (
+            Setting(
+                "pidor_enabled",
+                "Підарас дня",
+                (Choice("ні", "0"), Choice("так", "1")),
+            ),
+            Setting("pidor_window_days", "Хто в грі", _numbers(7, 30, 90, suffix=" дн.")),
+            Setting("pidor_min_players", "Мінімум людей", _numbers(3, 5, 10)),
+            Setting(
+                "pidor_announce_hour",
+                "Сам оголошує",
+                (
+                    Choice("ніколи", "-1"),
+                    Choice("об 11", "11"),
+                    Choice("о 13", "13"),
+                    Choice("о 18", "18"),
+                ),
+            ),
+        ),
+    ),
+    "board": (
+        "Табло",
+        (
+            Setting(
+                "pidrahuika_enabled",
+                "Підрахуйка",
+                (Choice("ні", "0"), Choice("так", "1")),
+            ),
+            Setting(
+                "pidrahuika_hour",
+                "Ранковий пост",
+                (Choice("о 8", "8"), Choice("о 9", "9"), Choice("о 10", "10")),
+            ),
+        ),
+    ),
 }
+
+
+@dataclass(frozen=True)
+class Screen:
+    key: str
+    icon: str
+    title: str
+    tabs: tuple[str, ...] = ()
+    """Which SECTIONS this screen renders. Several means sub-tabs; one means the settings
+    are shown with no tab row; none means the screen is text and actions only."""
+
+
+SCREENS: tuple[Screen, ...] = (
+    Screen("settings", "⚙️", "Налаштування", ("model", "trigger", "ambient")),
+    Screen("voice", "🎭", "Голос"),
+    Screen("spend", "💰", "Витрати"),
+    Screen("people", "👥", "Люди"),
+    Screen("game", "🎲", "Гра", ("game",)),
+    Screen("board", "📊", "Табло", ("board",)),
+)
+"""Six buttons, two rows of three. Muting and the chat toggle stay on the root screen:
+silencing the bot is the most urgent thing the menu does, and a screen deeper is a screen
+too far when a chat is asking it to shut up."""
+
+
+def screen(key: str) -> Screen:
+    """Callback data outlives deploys. An unknown key means a button from an older layout,
+    which should land somewhere sensible rather than raise inside a callback."""
+    for candidate in SCREENS:
+        if candidate.key == key:
+            return candidate
+    return SCREENS[0]
 
 MUTE_CHOICES = _numbers(1, 3, 8, suffix=" год")
 """Labels stay short on purpose: four buttons in a row, and Telegram truncates anything

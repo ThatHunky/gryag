@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 import aiosqlite
 
-from gryag import config, context, gate, handlers, llm, store
+from gryag import config, context, gate, handlers, llm, pidor, pidrahuika, store
 from gryag.handlers import _render_now
 
 log = logging.getLogger(__name__)
@@ -137,10 +137,22 @@ async def _speak_into(db, client, bot, persona, chat_id: int, now) -> int:
     return 1
 
 
+async def _run_safely(what: str, coro) -> None:
+    """One failing job must not stop the others, or the loop.
+
+    Several unrelated things ride this tick now: speaking into a silence, the daily game,
+    and the killboard digest. A killboard outage taking down proactive speech would be an
+    absurd way to lose a feature.
+    """
+    try:
+        await coro
+    except Exception:
+        log.exception("%s failed", what)
+
+
 async def loop(db: aiosqlite.Connection, client, bot, persona) -> None:
     while True:
-        try:
-            await run_once(db, client, bot, persona)
-        except Exception:
-            log.exception("proactive pass failed")
+        await _run_safely("proactive pass", run_once(db, client, bot, persona))
+        await _run_safely("pidor announcement", pidor.announce_due(db, bot))
+        await _run_safely("pidrahuika digest", pidrahuika.post_due(db, bot))
         await asyncio.sleep(TICK_SECONDS)

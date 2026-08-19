@@ -16,10 +16,22 @@ from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.types import BotCommand
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
-from gryag import admin, config, digest, handlers, llm, proactive, store
+from gryag import (
+    admin,
+    config,
+    digest,
+    handlers,
+    llm,
+    pidor,
+    pidrahuika,
+    proactive,
+    screens,
+    store,
+)
 
 @dataclass
 class Runtime:
@@ -53,6 +65,7 @@ async def build(secrets: config.Secrets) -> "Runtime":
 
     def reload_persona() -> int:
         persona["text"] = PERSONA_PATH.read_text()
+        screens._persona_size_hint["chars"] = len(persona["text"])
         logging.info("persona reloaded, %s characters", len(persona["text"]))
         return len(persona["text"]) // 3
 
@@ -71,10 +84,25 @@ async def build(secrets: config.Secrets) -> "Runtime":
     me = await bot.get_me()
     logging.info("running as @%s (id %s)", me.username, me.id)
 
+    # Only the public ones. /gryag, /nb and /unban stay off this list on purpose — a menu
+    # entry nobody but the admin can use is an invitation to try it.
+    await bot.set_my_commands([
+        BotCommand(command="pidor", description="хто сьогодні підарас дня"),
+        BotCommand(command="pidorstats", description="підараси року"),
+        BotCommand(command="pidrahuika", description="підрахуйка СБС за сьогодні"),
+    ])
+
     dispatcher = Dispatcher(db=db, client=client, persona=persona, bot_id=me.id)
     dispatcher.include_router(
-        admin.build_router(secrets.admin_ids, on_reload=reload_persona, on_digest=rerun_digest)
+        admin.build_router(
+            secrets.admin_ids,
+            on_reload=reload_persona,
+            on_digest=rerun_digest,
+            persona=persona,
+        )
     )
+    dispatcher.include_router(pidor.build_router())
+    dispatcher.include_router(pidrahuika.build_router())
     dispatcher.include_router(handlers.build_router())
     return Runtime(bot=bot, dispatcher=dispatcher, db=db, client=client, persona=persona)
 
@@ -122,16 +150,15 @@ async def serve_webhook(secrets: config.Secrets) -> None:
 
 
 async def serve_polling(secrets: config.Secrets) -> None:
-    bot, dispatcher = await build(secrets)
+    rt = await start(secrets)
     # Do NOT drop pending updates. Telegram holds them for 24 hours, and dropping them
     # punched 11-16 message holes in the stored history at every restart — a quarter of
     # the chat went missing across six restarts. The backlog is replayed and stored;
     # `max_reply_age` in the gate is what stops the bot answering stale messages.
-    await bot.delete_webhook(drop_pending_updates=False)
-    asyncio.create_task(proactive.loop(db, client, bot, persona))
+    await rt.bot.delete_webhook(drop_pending_updates=False)
     logging.info("polling mode")
-    await dispatcher.start_polling(
-        bot, allowed_updates=["message", "edited_message", "callback_query"]
+    await rt.dispatcher.start_polling(
+        rt.bot, allowed_updates=["message", "edited_message", "callback_query"]
     )
 
 

@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import aiosqlite
-from aiogram import F, Router
+from aiogram import Router
 from aiogram.types import BufferedInputFile, Message
 from aiogram.utils.chat_action import ChatActionSender
 
@@ -24,7 +24,7 @@ from gryag import config, context, gate, images, llm, media, store
 
 log = logging.getLogger(__name__)
 
-OWN_COMMANDS = ("gryag", "nb", "unban")
+OWN_COMMANDS = ("gryag", "nb", "unban", "pidor", "pidorstats", "pidrahuika", "sbs")
 """Everything else starting with a slash belongs to another bot; see gate.foreign_command."""
 
 
@@ -45,6 +45,15 @@ def _utcnow() -> datetime:
 
 def _local_hour() -> int:
     return _utcnow().astimezone(LOCAL_TZ).hour
+
+
+def kyiv_day(moment: datetime) -> str:
+    """The calendar day this moment falls on, in the chat's own timezone.
+
+    Not the UTC day: on UTC the game would roll over at 03:00 local, in the same hours the
+    daily budget used to roll over in, and for the same bad reason.
+    """
+    return moment.astimezone(LOCAL_TZ).strftime("%Y-%m-%d")
 
 
 WEEKDAYS = ("понеділок", "вівторок", "середа", "четвер", "пʼятниця", "субота", "неділя")
@@ -166,6 +175,7 @@ async def persist(db: aiosqlite.Connection, message, *, is_bot: bool = False) ->
             user_id=user.id,
             display_name=user.full_name,
             alias=context.alias_for(user.full_name),
+            username=getattr(user, "username", None),
         )
     await store.save_message(
         db,

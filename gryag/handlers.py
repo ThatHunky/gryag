@@ -47,6 +47,15 @@ def _local_hour() -> int:
     return _utcnow().astimezone(LOCAL_TZ).hour
 
 
+def kyiv_day(moment: datetime) -> str:
+    """The calendar day this moment falls on, in the chat's own timezone.
+
+    Not the UTC day: on UTC the game would roll over at 03:00 local, in the same hours the
+    daily budget used to roll over in, and for the same bad reason.
+    """
+    return moment.astimezone(LOCAL_TZ).strftime("%Y-%m-%d")
+
+
 WEEKDAYS = ("понеділок", "вівторок", "середа", "четвер", "пʼятниця", "субота", "неділя")
 
 

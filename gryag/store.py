@@ -93,6 +93,14 @@ CREATE TABLE IF NOT EXISTS bans (
     PRIMARY KEY (chat_id, user_id)
 );
 
+CREATE TABLE IF NOT EXISTS pidor_days (
+    chat_id   INTEGER NOT NULL,
+    day       TEXT    NOT NULL,
+    user_id   INTEGER NOT NULL,
+    chosen_at TEXT    NOT NULL,
+    PRIMARY KEY (chat_id, day)
+);
+
 CREATE TABLE IF NOT EXISTS chat_state (
     chat_id         INTEGER PRIMARY KEY,
     last_spoke_ts   TEXT,
@@ -461,7 +469,10 @@ async def forget_chat(db: aiosqlite.Connection, chat_id: int) -> dict[str, int]:
     well as speech, and available for any chat the bot should never have been in.
     """
     removed: dict[str, int] = {}
-    for table in ("messages", "users", "facts", "summaries", "usage", "bans", "chat_state"):
+    for table in (
+        "messages", "users", "facts", "summaries", "usage", "bans", "chat_state",
+        "pidor_days",
+    ):
         cur = await db.execute(f"DELETE FROM {table} WHERE chat_id = ?", (chat_id,))
         removed[table] = cur.rowcount
     await db.commit()
@@ -637,3 +648,72 @@ async def record_usage(
         ),
     )
     await db.commit()
+
+
+async def active_user_ids(
+    db: aiosqlite.Connection, chat_id: int, since_ts: str
+) -> list[int]:
+    """Everybody who has said something since `since_ts`, bots excluded.
+
+    This is the only list of chat members available: the Bot API cannot enumerate a
+    group, so "who is here" means "who has spoken here recently".
+    """
+    async with db.execute(
+        """
+        SELECT DISTINCT user_id FROM messages
+        WHERE chat_id = ? AND ts >= ? AND user_id IS NOT NULL
+          AND sender_is_bot = 0 AND is_bot = 0
+        ORDER BY user_id
+        """,
+        (chat_id, since_ts),
+    ) as cur:
+        return [r[0] for r in await cur.fetchall()]
+
+
+async def pidor_winner(db: aiosqlite.Connection, chat_id: int, day: str) -> int | None:
+    async with db.execute(
+        "SELECT user_id FROM pidor_days WHERE chat_id = ? AND day = ?", (chat_id, day)
+    ) as cur:
+        row = await cur.fetchone()
+    return row[0] if row else None
+
+
+async def pidor_record(
+    db: aiosqlite.Connection, chat_id: int, day: str, user_id: int, chosen_at: str
+) -> int:
+    """Claim the day, and return whoever actually holds it.
+
+    Insert-then-read rather than a lock: two people typing the command in the same second
+    both write, one loses on the primary key, and both then read the same winner. The same
+    reasoning as `_claim` in handlers — the cheapest race is the one you let happen.
+    """
+    await db.execute(
+        """
+        INSERT INTO pidor_days (chat_id, day, user_id, chosen_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT (chat_id, day) DO NOTHING
+        """,
+        (chat_id, day, user_id, chosen_at),
+    )
+    await db.commit()
+    held = await pidor_winner(db, chat_id, day)
+    assert held is not None  # just inserted, or already there
+    return held
+
+
+async def pidor_counts(
+    db: aiosqlite.Connection, chat_id: int, since_day: str | None = None
+) -> list[tuple[int, int]]:
+    """(user_id, wins), most wins first."""
+    clause, params = "", [chat_id]
+    if since_day is not None:
+        clause = " AND day >= ?"
+        params.append(since_day)
+    async with db.execute(
+        f"""
+        SELECT user_id, COUNT(*) AS wins FROM pidor_days
+        WHERE chat_id = ?{clause}
+        GROUP BY user_id ORDER BY wins DESC, user_id
+        """,
+        params,
+    ) as cur:
+        return [(r[0], r[1]) for r in await cur.fetchall()]

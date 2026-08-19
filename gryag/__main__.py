@@ -16,10 +16,11 @@ from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.types import BotCommand
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
-from gryag import admin, config, digest, handlers, llm, proactive, screens, store
+from gryag import admin, config, digest, handlers, llm, pidor, proactive, screens, store
 
 @dataclass
 class Runtime:
@@ -72,6 +73,13 @@ async def build(secrets: config.Secrets) -> "Runtime":
     me = await bot.get_me()
     logging.info("running as @%s (id %s)", me.username, me.id)
 
+    # Only the public ones. /gryag, /nb and /unban stay off this list on purpose — a menu
+    # entry nobody but the admin can use is an invitation to try it.
+    await bot.set_my_commands([
+        BotCommand(command="pidor", description="хто сьогодні підарас дня"),
+        BotCommand(command="pidorstats", description="підараси року"),
+    ])
+
     dispatcher = Dispatcher(db=db, client=client, persona=persona, bot_id=me.id)
     dispatcher.include_router(
         admin.build_router(
@@ -81,6 +89,7 @@ async def build(secrets: config.Secrets) -> "Runtime":
             persona=persona,
         )
     )
+    dispatcher.include_router(pidor.build_router())
     dispatcher.include_router(handlers.build_router())
     return Runtime(bot=bot, dispatcher=dispatcher, db=db, client=client, persona=persona)
 

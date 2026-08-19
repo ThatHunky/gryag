@@ -166,6 +166,7 @@ async def persist(db: aiosqlite.Connection, message, *, is_bot: bool = False) ->
             user_id=user.id,
             display_name=user.full_name,
             alias=context.alias_for(user.full_name),
+            username=getattr(user, "username", None),
         )
     await store.save_message(
         db,

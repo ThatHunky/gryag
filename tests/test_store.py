@@ -230,3 +230,45 @@ async def test_forgetting_a_chat_erases_every_trace(db):
     assert await store.recent_messages(db, -100, limit=10) == []
     async with db.execute("SELECT COUNT(*) FROM usage WHERE chat_id = -100") as cur:
         assert (await cur.fetchone())[0] == 0
+
+
+async def test_a_username_is_remembered(db):
+    await store.upsert_user(
+        db,
+        chat_id=-100,
+        user_id=7,
+        display_name="Віталій Нижник",
+        alias="віталік",
+        username="nailsad_eleos",
+    )
+
+    names = await store.user_names(db, -100, [7])
+
+    assert names[7] == ("nailsad_eleos", "Віталій Нижник")
+
+
+async def test_a_user_without_a_username_is_still_returned(db):
+    await store.upsert_user(
+        db, chat_id=-100, user_id=8, display_name="Хтось", alias="хтось"
+    )
+
+    names = await store.user_names(db, -100, [8])
+
+    assert names[8] == (None, "Хтось")
+
+
+async def test_losing_a_username_does_not_wipe_the_stored_one(db):
+    """Telegram omits the field for users who have none, and a later update that omits it
+    must not erase what an earlier one recorded."""
+    await store.upsert_user(
+        db, chat_id=-100, user_id=9, display_name="Хто", alias="хто", username="hto"
+    )
+    await store.upsert_user(db, chat_id=-100, user_id=9, display_name="Хто", alias="хто")
+
+    names = await store.user_names(db, -100, [9])
+
+    assert names[9][0] == "hto"
+
+
+async def test_asking_for_nobody_returns_nothing(db):
+    assert await store.user_names(db, -100, []) == {}

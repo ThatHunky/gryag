@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS users (
     display_name TEXT,
     alias        TEXT,
     pronouns     TEXT,
+    username     TEXT,
     PRIMARY KEY (chat_id, user_id)
 );
 
@@ -112,6 +113,8 @@ MIGRATIONS = (
     # Google Search grounding is free for the first 5,000 requests a month and $14 per
     # 1,000 after, so the panel needs to be able to count them.
     "ALTER TABLE usage ADD COLUMN searched INTEGER NOT NULL DEFAULT 0",
+    # A mention needs @username, and until the game arrived nothing ever needed one.
+    "ALTER TABLE users ADD COLUMN username TEXT",
 )
 
 
@@ -147,16 +150,38 @@ async def upsert_user(
     user_id: int,
     display_name: str,
     alias: str,
+    username: str | None = None,
 ) -> None:
     await db.execute(
         """
-        INSERT INTO users (chat_id, user_id, display_name, alias)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT (chat_id, user_id) DO UPDATE SET display_name = excluded.display_name
+        INSERT INTO users (chat_id, user_id, display_name, alias, username)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (chat_id, user_id) DO UPDATE SET
+            display_name = excluded.display_name,
+            -- Telegram omits the field for people who have no username, and an update
+            -- that omits it must not erase one recorded earlier.
+            username = COALESCE(excluded.username, users.username)
         """,
-        (chat_id, user_id, display_name, alias),
+        (chat_id, user_id, display_name, alias, username),
     )
     await db.commit()
+
+
+async def user_names(
+    db: aiosqlite.Connection, chat_id: int, user_ids: list[int]
+) -> dict[int, tuple[str | None, str]]:
+    """{user_id: (username, display_name)} for building mentions."""
+    if not user_ids:
+        return {}
+    marks = ",".join("?" * len(user_ids))
+    async with db.execute(
+        f"""
+        SELECT user_id, username, COALESCE(display_name, alias, CAST(user_id AS TEXT))
+        FROM users WHERE chat_id = ? AND user_id IN ({marks})
+        """,
+        (chat_id, *user_ids),
+    ) as cur:
+        return {r[0]: (r[1], r[2]) for r in await cur.fetchall()}
 
 
 async def save_message(

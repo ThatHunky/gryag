@@ -140,40 +140,55 @@ async def leaderboard_text(db, chat_id: int, now) -> str:
     return "\n".join(lines)
 
 
-def build_router() -> Router:
-    """Registered before the chat router, so a handled command stops there.
+async def _answer(message: Message, db, text: str) -> None:
+    """Reply, and store the reply, like every other thing the bot says."""
+    sent = await message.reply(text)
+    await handlers.persist(db, sent, is_bot=True)
 
-    That means this router owns persisting the message: `handle_message` never sees it,
-    and a command missing from the transcript is a hole in the day the digest summarises.
+
+async def _ready(message: Message, db) -> bool:
+    """True once the chat is on the whitelist and the message is recorded.
+
+    This router runs before the chat router, so a command it handles never reaches
+    `handle_message` — which means persisting is this module's job, and a command missing
+    from the transcript is a hole in the day the digest summarises.
     """
+    from gryag.screens import chat_is_enabled
+
+    if not await chat_is_enabled(db, message.chat.id):
+        return False
+    await handlers.persist(db, message)
+    return True
+
+
+async def play_command(message: Message, db) -> None:
+    if not await _ready(message, db):
+        return
+    if await config.get(db, "pidor_enabled", message.chat.id) != "1":
+        # Not silence: a command that produces nothing reads as a broken bot, which is
+        # how the killboard command was first reported.
+        await _answer(message, db, "гру тут вимкнено")
+        return
+    now = message.date
+    result = await roll(db, message.chat.id, now)
+    if result is None:
+        await _answer(message, db, "нема з кого вибирати, хай хтось щось напише")
+        return
+    winner, is_new = result
+    await announce(message.bot, db, message.chat.id, winner, is_new, now)
+
+
+async def stats_command(message: Message, db) -> None:
+    if not await _ready(message, db):
+        return
+    await _answer(message, db, await leaderboard_text(db, message.chat.id, message.date))
+
+
+def build_router() -> Router:
+    """Registered before the chat router, so a handled command stops there."""
     router = Router(name="pidor")
-
-    async def _ready(message: Message, db) -> bool:
-        from gryag.screens import chat_is_enabled
-
-        if not await chat_is_enabled(db, message.chat.id):
-            return False
-        await handlers.persist(db, message)
-        return await config.get(db, "pidor_enabled", message.chat.id) == "1"
-
-    @router.message(Command("pidor"))
-    async def play(message: Message, db) -> None:
-        if not await _ready(message, db):
-            return
-        now = message.date
-        result = await roll(db, message.chat.id, now)
-        if result is None:
-            await message.reply("нема з кого вибирати, хай хтось щось напише")
-            return
-        winner, is_new = result
-        await announce(message.bot, db, message.chat.id, winner, is_new, now)
-
-    @router.message(Command("pidorstats"))
-    async def stats(message: Message, db) -> None:
-        if not await _ready(message, db):
-            return
-        await message.reply(await leaderboard_text(db, message.chat.id, message.date))
-
+    router.message(Command("pidor"))(play_command)
+    router.message(Command("pidorstats"))(stats_command)
     return router
 
 

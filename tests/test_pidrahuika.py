@@ -228,3 +228,44 @@ async def test_a_failed_fetch_leaves_the_day_unmarked_so_the_next_tick_retries(d
 
     assert await pidrahuika.post_due(db, bot, morning) == 0
     assert await store.pidrahuika_posted(db, -100, "2026-08-19") is False
+
+
+async def test_the_command_answers_even_when_the_morning_post_is_off(db, _board):
+    """A command somebody typed is not ambient speech.
+
+    Silence here is indistinguishable from a broken bot, which is exactly how this was
+    first reported: "не працює команда підрахуйки взагалі". The flag governs the
+    unprompted morning post; reading a public board on request costs nothing.
+    """
+    from tests.conftest import FakeMessage
+
+    await admin.enable_chat(db, -100, "матсурі")
+    message = FakeMessage(text="/pidrahuika")
+
+    await pidrahuika.show_command(message, db)
+
+    assert message.replies
+    assert "Підрахуйка" in message.replies[0]
+
+
+async def test_the_command_says_nothing_in_a_chat_that_was_never_switched_on(db, _board):
+    from tests.conftest import FakeMessage
+
+    message = FakeMessage(text="/pidrahuika")
+
+    await pidrahuika.show_command(message, db)
+
+    assert message.replies == []
+
+
+async def test_the_commands_answer_is_stored_like_anything_else_the_bot_says(db, _board):
+    from tests.conftest import FakeMessage
+
+    await admin.enable_chat(db, -100, "матсурі")
+
+    await pidrahuika.show_command(FakeMessage(text="/pidrahuika"), db)
+
+    async with db.execute(
+        "SELECT COUNT(*) FROM messages WHERE chat_id = ? AND is_bot = 1", (-100,)
+    ) as cur:
+        assert (await cur.fetchone())[0] == 1

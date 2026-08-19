@@ -122,14 +122,17 @@ SECTIONS: dict[str, tuple[str, tuple[Setting, ...]]] = {
     "board": (
         "Табло",
         (
+            # This governs the morning post only. /pidrahuika answers whether it is on or
+            # off: somebody who types the command has asked, and reading a public board
+            # on request costs nothing.
             Setting(
                 "pidrahuika_enabled",
-                "Підрахуйка",
+                "Ранковий пост",
                 (Choice("ні", "0"), Choice("так", "1")),
             ),
             Setting(
                 "pidrahuika_hour",
-                "Ранковий пост",
+                "О котрій",
                 (Choice("о 8", "8"), Choice("о 9", "9"), Choice("о 10", "10")),
             ),
         ),

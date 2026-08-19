@@ -164,6 +164,8 @@ async def screen_text(db: aiosqlite.Connection, chat_id: int, screen: menu.Scree
                 "/nb у відповідь — дати або забрати малювання, /unban — зняти бан",
             ]
         )
+    if screen.key == "board":
+        return f"{header}\n/pidrahuika працює завжди; це — тільки ранковий пост"
     if screen.key == "voice":
         return f"{header}\nперсона: {_persona_size()} символів"
     return header

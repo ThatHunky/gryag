@@ -237,27 +237,41 @@ COOLDOWN = 60.0
 new one — and this doubles as the anti-spam measure."""
 
 
+async def _answer(message: Message, db, text: str) -> None:
+    """Reply, and store the reply.
+
+    Everything else the bot says is persisted; a command answer that is not leaves a hole
+    in the day the digest summarises, and in the context window the model reads.
+    """
+    sent = await message.reply(text)
+    await handlers.persist(db, sent, is_bot=True)
+
+
+async def show_command(message: Message, db) -> None:
+    """`/pidrahuika` and `/sbs`.
+
+    Deliberately not gated on `pidrahuika_enabled`. That flag governs the morning post —
+    speech nobody asked for. Somebody typing the command *did* ask, reading a public board
+    costs nothing, and staying silent is indistinguishable from being broken.
+    """
+    from gryag.screens import chat_is_enabled
+
+    if not await chat_is_enabled(db, message.chat.id):
+        return
+    await handlers.persist(db, message)
+    cached = _last_asked.get(message.chat.id)
+    if cached and time.monotonic() - cached[0] < COOLDOWN:
+        await _answer(message, db, cached[1])
+        return
+    text = await digest_text(db, "daily", datetime.now(timezone.utc))
+    if text is None:
+        await _answer(message, db, "табло не відповідає")
+        return
+    _last_asked[message.chat.id] = (time.monotonic(), text)
+    await _answer(message, db, text)
+
+
 def build_router() -> Router:
     router = Router(name="pidrahuika")
-
-    @router.message(Command("pidrahuika", "sbs"))
-    async def show(message: Message, db) -> None:
-        from gryag.screens import chat_is_enabled
-
-        if not await chat_is_enabled(db, message.chat.id):
-            return
-        await handlers.persist(db, message)
-        if await config.get(db, "pidrahuika_enabled", message.chat.id) != "1":
-            return
-        cached = _last_asked.get(message.chat.id)
-        if cached and time.monotonic() - cached[0] < COOLDOWN:
-            await message.reply(cached[1])
-            return
-        text = await digest_text(db, "daily", datetime.now(timezone.utc))
-        if text is None:
-            await message.reply("табло не відповідає")
-            return
-        _last_asked[message.chat.id] = (time.monotonic(), text)
-        await message.reply(text)
-
+    router.message(Command("pidrahuika", "sbs"))(show_command)
     return router

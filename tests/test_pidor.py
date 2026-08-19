@@ -236,3 +236,30 @@ async def test_a_disabled_game_is_not_announced(db):
     bot = FakeBot()
 
     assert await pidor.announce_due(db, bot, datetime(2026, 8, 19, 10, 30, tzinfo=timezone.utc)) == 0
+
+
+async def test_a_switched_off_game_says_so_rather_than_going_quiet(db):
+    """Same reasoning as the killboard command: silence reads as a broken bot."""
+    from tests.conftest import FakeMessage
+
+    await _populate(db)
+    await config.set(db, "pidor_enabled", "0", chat_id=-100)
+    message = FakeMessage(text="/pidor")
+
+    await pidor.play_command(message, db)
+
+    assert message.replies
+    assert "вимкнен" in message.replies[0]
+
+
+async def test_the_leaderboard_reply_is_stored(db):
+    from tests.conftest import FakeMessage
+
+    await _populate(db)
+
+    await pidor.stats_command(FakeMessage(text="/pidorstats"), db)
+
+    async with db.execute(
+        "SELECT COUNT(*) FROM messages WHERE chat_id = ? AND is_bot = 1", (-100,)
+    ) as cur:
+        assert (await cur.fetchone())[0] == 1

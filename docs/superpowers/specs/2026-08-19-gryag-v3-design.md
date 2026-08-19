@@ -607,6 +607,84 @@ it anyway, and then described its contents when pressed.
 Animated stickers are refused: they are `.tgs`, a gzipped Lottie file, which no model
 reads.
 
+## 9b. The superapp: menu hub, підарас дня, підрахуйка
+
+Built 2026-08-19 from `2026-08-19-superapp-design.md`. Both features obey the governing
+rule of §1: **neither calls the model at runtime.** Their text comes from
+`gryag/phrases.py`, 190 lines generated once by `gemini-3.1-pro-preview` through
+`eval/gen_phrases.py` and committed.
+
+### 9b.1 The menu
+
+`/gryag` is a hub. The root carries live status — chat on/off, model, mute, spend for the
+last 24 hours, the drift warning from §10 — and six screens: Налаштування (the three
+original sections as sub-tabs), Голос, Витрати, Люди, Гра, Табло. Muting and the chat
+toggle stay on the root: silencing the bot is the most urgent thing the menu does, and a
+screen deeper is a screen too far when a chat is asking it to shut up.
+
+Rendering moved to `gryag/screens.py` when `admin.py` hit 446 lines doing two jobs.
+`menu.py` stays pure data, which is what lets `test_menu.py` assert that every section is
+reachable and every setting names a real config key.
+
+### 9b.2 Підарас дня
+
+Once a day, one chat member at random. `/pidor` rolls or shows, `/pidorstats` is the
+leaderboard, and the bot rolls on its own at `pidor_announce_hour` if nobody asked.
+
+Three decisions worth recording:
+
+**The pool is whoever has spoken in the last 30 days**, bots excluded. The Bot API cannot
+enumerate a group, so "who is here" can only mean "who has spoken here". There is **no
+opt-out** — decided deliberately. Banned users stay in: a ban means "gryag ignores you",
+and excluding them would leak the ban list into a game everyone can see.
+
+**One winner per day, without a lock.** `pidor_days` has a primary key of `(chat_id, day)`;
+the roll inserts with `ON CONFLICT DO NOTHING` and then reads. Two people typing the
+command in the same second both write, one loses on the key, and both read the same
+winner — the same reasoning as `_claim` in `handlers.py`.
+
+**Days are Kyiv days.** On UTC the game would roll over at 03:00 local, in the same hours
+the daily budget used to roll over in, and for the same bad reason. `handlers.kyiv_day`
+is the single definition, next to `LOCAL_TZ`.
+
+Mentions needed a schema change: `users` never stored `username`. It is added by migration
+and filled in `persist`. Where there is no username the verdict uses an HTML text mention,
+with the display name escaped — it is text the person chose, going into a `parse_mode="HTML"`
+message.
+
+### 9b.3 Підрахуйка
+
+A morning digest of verified enemy losses from the Unmanned Systems Forces public
+killboard at `sbs-group.army/api/public` — no key, no authentication, `robots.txt` allows
+everything. Posted at `pidrahuika_hour` (09:00 Kyiv by default) from the `prev_day` period;
+`/pidrahuika` and `/sbs` read `daily` live, cached 60 seconds per chat.
+
+Period IDs are resolved from `/periods` and cached six hours rather than hardcoded: the
+IDs look stable, and hardcoding them works until the day they rotate and the digest
+quietly reports somebody else's month.
+
+`pidrahuika_days` snapshots each raw payload, because the API serves only named periods and
+cannot be asked about an arbitrary date — that snapshot is what makes tomorrow's delta
+possible. It has no `chat_id` and is the one table `forget_chat` must not touch: those
+figures are the same for everybody.
+
+A board that does not answer costs the digest, not the day. Nothing is marked posted, so
+the next tick — ten minutes later — tries again.
+
+### 9b.4 Where the scheduled work runs
+
+Both features ride the existing `proactive.loop` tick (600 s), each wrapped in
+`_run_safely`. A killboard outage taking down proactive speech would be an absurd way to
+lose a feature.
+
+### 9b.5 A guard added along the way
+
+Two shipped bugs were the same defect — a name that does not exist. `admin.py` called
+`_spawn` and `_rerun_and_report`, which live in `handlers.py`; `serve_polling` referenced
+three locals its rewrite had moved into `Runtime`. Neither was visible until the code path
+ran: one on a button nobody had pressed, one on a transport nobody used. `tests/test_lint.py`
+now runs pyflakes over the package and fails on any undefined name or unused import.
+
 ## 10. Model configuration
 
 ### 10.1 Default

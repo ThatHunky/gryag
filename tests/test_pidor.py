@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from gryag import admin, pidor, store
+from gryag import admin, config, pidor, store
 
 
 def test_a_day_is_the_kyiv_day_not_the_utc_one():
@@ -182,3 +182,57 @@ async def test_the_leaderboard_says_so_when_nobody_has_won_yet(db):
     text = await pidor.leaderboard_text(db, -100, datetime(2026, 8, 19, 12, tzinfo=timezone.utc))
 
     assert "ще нікого" in text
+
+
+async def test_the_bot_rolls_by_itself_once_the_hour_has_passed(db):
+    await _populate(db)
+    bot = FakeBot()
+
+    # 13:30 Kyiv is 10:30 UTC in summer, and the default announce hour is 13.
+    spoken = await pidor.announce_due(db, bot, datetime(2026, 8, 19, 10, 30, tzinfo=timezone.utc))
+
+    assert spoken == 1
+    assert len(bot.sent) == 3
+
+
+async def test_the_bot_stays_quiet_before_the_hour(db):
+    await _populate(db)
+    bot = FakeBot()
+
+    spoken = await pidor.announce_due(db, bot, datetime(2026, 8, 19, 6, 0, tzinfo=timezone.utc))
+
+    assert spoken == 0
+    assert bot.sent == []
+
+
+async def test_the_bot_does_not_announce_what_somebody_already_rolled(db):
+    await _populate(db)
+    now = datetime(2026, 8, 19, 10, 30, tzinfo=timezone.utc)
+    await pidor.roll(db, -100, now)
+    bot = FakeBot()
+
+    assert await pidor.announce_due(db, bot, now) == 0
+
+
+async def test_a_muted_chat_is_left_alone(db):
+    await _populate(db)
+    await store.set_mute(db, -100, "2126-01-01T00:00:00+00:00")
+    bot = FakeBot()
+
+    assert await pidor.announce_due(db, bot, datetime(2026, 8, 19, 10, 30, tzinfo=timezone.utc)) == 0
+
+
+async def test_the_schedule_can_be_switched_off(db):
+    await _populate(db)
+    await config.set(db, "pidor_announce_hour", "-1", chat_id=-100)
+    bot = FakeBot()
+
+    assert await pidor.announce_due(db, bot, datetime(2026, 8, 19, 10, 30, tzinfo=timezone.utc)) == 0
+
+
+async def test_a_disabled_game_is_not_announced(db):
+    await _populate(db)
+    await config.set(db, "pidor_enabled", "0", chat_id=-100)
+    bot = FakeBot()
+
+    assert await pidor.announce_due(db, bot, datetime(2026, 8, 19, 10, 30, tzinfo=timezone.utc)) == 0

@@ -164,6 +164,31 @@ def build_router(
                 raise
         await query.answer()
 
+    @router.callback_query(F.data == "pidor:roll")
+    async def roll_now(query: CallbackQuery, db) -> None:
+        # Imported here rather than at module level: pidor reaches back into screens for
+        # chat_is_enabled, and a module-level import each way is a cycle.
+        from gryag import pidor
+
+        now = datetime.now(timezone.utc)
+        result = await pidor.roll(db, query.message.chat.id, now)
+        if result is None:
+            await query.answer("нема з кого вибирати")
+            return
+        await query.answer("розіграно" if result[1] else "на сьогодні вже є")
+        await pidor.announce(
+            query.bot, db, query.message.chat.id, result[0], result[1], now
+        )
+
+    @router.callback_query(F.data == "pidor:top")
+    async def show_top(query: CallbackQuery, db) -> None:
+        from gryag import pidor
+
+        await query.message.answer(
+            await pidor.leaderboard_text(db, query.message.chat.id, datetime.now(timezone.utc))
+        )
+        await query.answer()
+
     @router.callback_query(F.data == "reload")
     async def reload_persona(query: CallbackQuery) -> None:
         if on_reload is None:

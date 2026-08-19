@@ -19,7 +19,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from gryag import config, handlers, phrases, store
-from gryag.handlers import kyiv_day
+from gryag.handlers import LOCAL_TZ, kyiv_day
 
 log = logging.getLogger(__name__)
 
@@ -175,3 +175,31 @@ def build_router() -> Router:
         await message.reply(await leaderboard_text(db, message.chat.id, message.date))
 
     return router
+
+
+async def announce_due(db, bot, now=None) -> int:
+    """Roll and announce in every chat whose hour has come and whose day is still empty.
+
+    The recorded winner is its own guard against announcing twice: a chat where somebody
+    already typed the command has a row for today, and this walks past it.
+    """
+    now = now or datetime.now(timezone.utc)
+    local_hour = now.astimezone(LOCAL_TZ).hour
+    spoken = 0
+    for chat_id in await store.enabled_chats(db):
+        if await config.get(db, "pidor_enabled", chat_id) != "1":
+            continue
+        hour = await config.get_int(db, "pidor_announce_hour", chat_id)
+        if hour < 0 or local_hour < hour:
+            continue
+        if await store.pidor_winner(db, chat_id, kyiv_day(now)) is not None:
+            continue
+        if await store.muted_until(db, chat_id, now.isoformat(timespec="seconds")):
+            log.debug("not announcing in %s: muted", chat_id)
+            continue
+        result = await roll(db, chat_id, now)
+        if result is None:
+            continue
+        await announce(bot, db, chat_id, result[0], result[1], now)
+        spoken += 1
+    return spoken

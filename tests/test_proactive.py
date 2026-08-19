@@ -133,3 +133,20 @@ def test_the_entrypoint_hands_the_loop_everything_it_needs():
     source = inspect.getsource(entry)
     assert "proactive.loop(rt.db, rt.client, rt.bot, rt.persona)" in source
     assert set(entry.Runtime.__dataclass_fields__) >= {"db", "client", "persona", "bot"}
+
+
+async def test_one_failing_job_does_not_stop_the_others():
+    from gryag import proactive
+
+    ran: list[str] = []
+
+    async def boom():
+        raise RuntimeError("nope")
+
+    async def fine():
+        ran.append("fine")
+
+    await proactive._run_safely("boom", boom())
+    await proactive._run_safely("fine", fine())
+
+    assert ran == ["fine"]

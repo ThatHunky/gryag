@@ -75,15 +75,23 @@ SEARCH_FREE_PER_MONTH = 5000
 chat's volume even searching on every reply stays inside it, but the panel counts anyway."""
 
 
-def build_tools() -> list[types.Tool]:
+def build_tools(has_media: bool = False) -> list[types.Tool]:
     """Server-side tools: they cost nothing in the prompt, unlike a tool manifest in the
-    persona, which is exactly why the 137-token manifest was cut from it."""
-    return [
+    persona, which is exactly why the 137-token manifest was cut from it.
+
+    Code execution is dropped when a file is attached. Offering both makes the API reject
+    the whole request — "The mime type: video/mp4 is not supported for code execution",
+    HTTP 400 — so somebody sending a video and asking about it got silence instead of an
+    answer. Nothing about looking at a video needs a Python sandbox.
+    """
+    tools = [
         types.Tool(function_declarations=[BAN_TOOL]),
         types.Tool(google_search=types.GoogleSearch()),
         types.Tool(url_context=types.UrlContext()),
-        types.Tool(code_execution=types.ToolCodeExecution()),
     ]
+    if not has_media:
+        tools.append(types.Tool(code_execution=types.ToolCodeExecution()))
+    return tools
 
 
 def cost_usd(
@@ -152,7 +160,7 @@ async def generate(
             for category in HARM_CATEGORIES
         ],
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-        tools=build_tools() if use_tools else None,
+        tools=build_tools(has_media=media is not None) if use_tools else None,
         # Mixing our own function with Google's server-side tools is refused outright
         # without this flag: "Please enable tool_config.include_server_side_tool_invocations".
         tool_config=(

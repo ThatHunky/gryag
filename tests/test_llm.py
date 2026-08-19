@@ -294,3 +294,30 @@ async def test_without_a_handler_a_tool_call_is_left_alone():
     )
 
     assert result.text == "текст"
+
+
+async def test_code_execution_is_dropped_when_a_file_is_attached():
+    """Offering both makes the API reject the whole request with 400 — "The mime type:
+    video/mp4 is not supported for code execution" — and the bot falls silent on a video
+    it was asked about."""
+    client = FakeClient(FakeResponse())
+
+    await llm.generate(
+        client, model="gemini-flash-latest", system="p", user="що тут",
+        max_output_tokens=1500, thinking_budget=0, media=(b"mp4", "video/mp4"),
+    )
+
+    tools = client.calls[0]["config"].tools
+    assert not any(t.code_execution is not None for t in tools)
+    assert any(t.google_search is not None for t in tools)
+
+
+async def test_code_execution_is_offered_without_media():
+    client = FakeClient(FakeResponse())
+
+    await llm.generate(
+        client, model="gemini-flash-latest", system="p", user="порахуй",
+        max_output_tokens=1500, thinking_budget=0,
+    )
+
+    assert any(t.code_execution is not None for t in client.calls[0]["config"].tools)

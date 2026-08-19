@@ -269,3 +269,39 @@ async def test_the_commands_answer_is_stored_like_anything_else_the_bot_says(db,
         "SELECT COUNT(*) FROM messages WHERE chat_id = ? AND is_bot = 1", (-100,)
     ) as cur:
         assert (await cur.fetchone())[0] == 1
+
+
+async def test_an_unfinished_day_is_not_snapshotted(db, _board):
+    """A day in progress is not comparable to a finished one, in either direction, and
+    storing it makes it tomorrow's baseline."""
+    await pidrahuika.digest_text(db, "daily", datetime(2026, 8, 19, 12, tzinfo=timezone.utc))
+
+    assert await store.pidrahuika_payload(db, "2026-08-18") is None
+
+
+async def test_the_live_report_carries_no_delta(db, _board):
+    await store.pidrahuika_save(db, "2026-08-17", "2026-08-18T09:00:00+00:00", PAYLOAD)
+
+    text = await pidrahuika.digest_text(
+        db, "daily", datetime(2026, 8, 19, 12, tzinfo=timezone.utc)
+    )
+
+    assert "(" not in text.split("Вильоти")[0].split("Особовий")[1]
+
+
+async def test_the_morning_post_does_not_talk_over_a_reply(db, _board):
+    from gryag import handlers
+
+    await admin.enable_chat(db, -100, "матсурі")
+    await config.set(db, "pidrahuika_enabled", "1", chat_id=-100)
+    bot = FakeBot()
+    handlers._claim(-100)
+    try:
+        posted = await pidrahuika.post_due(
+            db, bot, datetime(2026, 8, 19, 6, 30, tzinfo=timezone.utc)
+        )
+    finally:
+        handlers._release(-100)
+
+    assert posted == 0
+    assert bot.sent == []

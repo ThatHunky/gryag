@@ -680,9 +680,21 @@ async def active_user_ids(
         SELECT DISTINCT user_id FROM messages
         WHERE chat_id = ? AND ts >= ? AND user_id IS NOT NULL
           AND sender_is_bot = 0 AND is_bot = 0
+          -- Anybody ever seen as a bot here is out, not merely anybody whose messages in
+          -- this window say so. `sender_is_bot` arrived by migration with DEFAULT 0, so
+          -- every message sent before it landed reads as human — ten such rows for гряг
+          -- itself were enough to put the bot in its own draw.
+          AND user_id NOT IN (
+              SELECT user_id FROM messages
+              WHERE chat_id = ? AND (sender_is_bot = 1 OR is_bot = 1)
+                -- NOT IN over a set containing NULL is NULL for every row, so without
+                -- this the bot's own messages — stored with no user_id — excluded the
+                -- entire chat rather than just the bots.
+                AND user_id IS NOT NULL
+          )
         ORDER BY user_id
         """,
-        (chat_id, since_ts),
+        (chat_id, since_ts, chat_id),
     ) as cur:
         return [r[0] for r in await cur.fetchall()]
 

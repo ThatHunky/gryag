@@ -183,12 +183,18 @@ async def digest_text(db, period_type: str, now: datetime) -> str | None:
     if not report.collected:
         return "підрахуйку за цю добу ще не порахували"
 
-    await store.pidrahuika_save(db, report.day, now.isoformat(timespec="seconds"), payload)
-    day_before = (
-        datetime.strptime(report.day, "%Y-%m-%d") - timedelta(days=1)
-    ).strftime("%Y-%m-%d")
-    stored = await store.pidrahuika_payload(db, day_before)
-    previous = parse(stored, day_before) if stored else None
+    # Snapshots and deltas are for finished days only. A day in progress is not
+    # comparable to a complete one in either direction: storing this morning's partial
+    # figures would make them tomorrow's baseline, and comparing a third of a day against
+    # a whole one prints a collapse that never happened.
+    previous = None
+    if period_type == "prev_day":
+        await store.pidrahuika_save(db, report.day, now.isoformat(timespec="seconds"), payload)
+        day_before = (
+            datetime.strptime(report.day, "%Y-%m-%d") - timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+        stored = await store.pidrahuika_payload(db, day_before)
+        previous = parse(stored, day_before) if stored else None
     seed = int(report.day.replace("-", ""))
     return render(report, previous, phrases.pick(phrases.DIGEST, seed))
 
@@ -208,26 +214,33 @@ async def post_due(db, bot, now: datetime | None = None) -> int:
             continue
         if await store.muted_until(db, chat_id, now.isoformat(timespec="seconds")):
             continue
-        text = await digest_text(db, "prev_day", now)
-        if text is None:
-            # Deliberately unmarked: the next tick is ten minutes away, and a board that
-            # was down at nine is usually up at ten past.
+        # Claimed like every other unprompted message; see proactive.run_once.
+        if not handlers._claim(chat_id):
+            log.debug("not posting into %s: a reply is in flight", chat_id)
             continue
-        sent = await bot.send_message(chat_id, text)
-        await store.save_message(
-            db,
-            chat_id=chat_id,
-            message_id=sent.message_id,
-            user_id=None,
-            ts=now.isoformat(timespec="seconds"),
-            text=text,
-            media_kind=None,
-            file_id=None,
-            reply_to=None,
-            is_bot=True,
-        )
-        await store.pidrahuika_mark(db, chat_id, today)
-        posted += 1
+        try:
+            text = await digest_text(db, "prev_day", now)
+            if text is None:
+                # Deliberately unmarked: the next tick is ten minutes away, and a board
+                # that was down at nine is usually up at ten past.
+                continue
+            sent = await bot.send_message(chat_id, text)
+            await store.save_message(
+                db,
+                chat_id=chat_id,
+                message_id=sent.message_id,
+                user_id=None,
+                ts=now.isoformat(timespec="seconds"),
+                text=text,
+                media_kind=None,
+                file_id=None,
+                reply_to=None,
+                is_bot=True,
+            )
+            await store.pidrahuika_mark(db, chat_id, today)
+            posted += 1
+        finally:
+            handlers._release(chat_id)
     return posted
 
 
@@ -237,16 +250,6 @@ COOLDOWN = 60.0
 new one — and this doubles as the anti-spam measure."""
 
 
-async def _answer(message: Message, db, text: str) -> None:
-    """Reply, and store the reply.
-
-    Everything else the bot says is persisted; a command answer that is not leaves a hole
-    in the day the digest summarises, and in the context window the model reads.
-    """
-    sent = await message.reply(text)
-    await handlers.persist(db, sent, is_bot=True)
-
-
 async def show_command(message: Message, db) -> None:
     """`/pidrahuika` and `/sbs`.
 
@@ -254,21 +257,18 @@ async def show_command(message: Message, db) -> None:
     speech nobody asked for. Somebody typing the command *did* ask, reading a public board
     costs nothing, and staying silent is indistinguishable from being broken.
     """
-    from gryag.screens import chat_is_enabled
-
-    if not await chat_is_enabled(db, message.chat.id):
+    if not await handlers.accept_command(message, db):
         return
-    await handlers.persist(db, message)
     cached = _last_asked.get(message.chat.id)
     if cached and time.monotonic() - cached[0] < COOLDOWN:
-        await _answer(message, db, cached[1])
+        await handlers.answer(message, db, cached[1])
         return
     text = await digest_text(db, "daily", datetime.now(timezone.utc))
     if text is None:
-        await _answer(message, db, "табло не відповідає")
+        await handlers.answer(message, db, "табло не відповідає")
         return
     _last_asked[message.chat.id] = (time.monotonic(), text)
-    await _answer(message, db, text)
+    await handlers.answer(message, db, text)
 
 
 def build_router() -> Router:

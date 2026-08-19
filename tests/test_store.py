@@ -402,3 +402,36 @@ async def test_forgetting_a_chat_keeps_the_figures_themselves(db):
     await store.forget_chat(db, -100)
 
     assert await store.pidrahuika_payload(db, "2026-08-19") is not None
+
+
+async def test_a_bot_with_pre_migration_messages_is_not_a_candidate(db):
+    """`sender_is_bot` arrived by migration with DEFAULT 0, so every message a bot sent
+    before it landed reads as human. One such row was enough to put гряг itself into the
+    pool: the live database had ten."""
+    await _said(db, -100, 1, "2026-08-19T10:00:00+00:00", 1)
+    await _said(db, -100, 99, "2026-08-19T10:00:00+00:00", 2)  # the stale row
+    await _said(db, -100, 99, "2026-08-19T11:00:00+00:00", 3, sender_is_bot=True)
+
+    ids = await store.active_user_ids(db, -100, "2026-08-01T00:00:00+00:00")
+
+    assert ids == [1]
+
+
+async def test_the_bots_own_messages_do_not_empty_the_pool(db):
+    """gryag stores its own lines with user_id NULL, and `x NOT IN (… NULL …)` is NULL
+    for every x — which excluded everybody, not just the bots."""
+    await _said(db, -100, 1, "2026-08-19T10:00:00+00:00", 1)
+    await store.save_message(
+        db,
+        chat_id=-100,
+        message_id=2,
+        user_id=None,
+        ts="2026-08-19T10:01:00+00:00",
+        text="я щось сказав",
+        media_kind=None,
+        file_id=None,
+        reply_to=None,
+        is_bot=True,
+    )
+
+    assert await store.active_user_ids(db, -100, "2026-08-01T00:00:00+00:00") == [1]

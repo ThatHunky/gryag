@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -263,3 +263,66 @@ async def test_the_leaderboard_reply_is_stored(db):
         "SELECT COUNT(*) FROM messages WHERE chat_id = ? AND is_bot = 1", (-100,)
     ) as cur:
         assert (await cur.fetchone())[0] == 1
+
+
+async def test_a_replayed_command_is_not_answered(db):
+    """Telegram holds pending updates for 24 hours and this bot deliberately replays them.
+    Rolling on message.date would write a winner into a day that is already over."""
+    from tests.conftest import FakeMessage
+
+    await _populate(db)
+    stale = FakeMessage(
+        text="/pidor", date=datetime.now(timezone.utc) - timedelta(hours=10)
+    )
+
+    await pidor.play_command(stale, db)
+
+    assert stale.replies == []
+    assert await store.pidor_winner(db, -100, pidor.kyiv_day(stale.date)) is None
+
+
+async def test_a_fresh_command_rolls_for_today_not_for_the_moment_it_was_typed(db):
+    from tests.conftest import FakeMessage
+
+    await _populate(db)
+    message = FakeMessage(text="/pidor")
+    message.bot = FakeBot()
+
+    await pidor.play_command(message, db)
+
+    assert await store.pidor_winner(
+        db, -100, pidor.kyiv_day(datetime.now(timezone.utc))
+    ) is not None
+
+
+def test_the_announcement_seed_survives_a_restart():
+    """hash() of a string is randomised per process, so it cannot carry determinism."""
+    assert pidor.announcement_seed(-100, "2026-08-19") == pidor.announcement_seed(
+        -100, "2026-08-19"
+    )
+    assert pidor.announcement_seed(-100, "2026-08-19") != pidor.announcement_seed(
+        -100, "2026-08-20"
+    )
+    assert pidor.announcement_seed(-100, "2026-08-19") != pidor.announcement_seed(
+        -200, "2026-08-19"
+    )
+
+
+async def test_the_scheduled_announcement_does_not_talk_over_a_reply(db):
+    """proactive.run_once takes the same claim, and for the reason its comment gives: an
+    unclaimed post interleaves with a reply in flight and its rows consume the reply caps
+    without ever being checked against them."""
+    from gryag import handlers
+
+    await _populate(db)
+    bot = FakeBot()
+    handlers._claim(-100)
+    try:
+        spoken = await pidor.announce_due(
+            db, bot, datetime(2026, 8, 19, 10, 30, tzinfo=timezone.utc)
+        )
+    finally:
+        handlers._release(-100)
+
+    assert spoken == 0
+    assert bot.sent == []

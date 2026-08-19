@@ -23,8 +23,6 @@ from gryag.handlers import LOCAL_TZ, kyiv_day
 
 log = logging.getLogger(__name__)
 
-__all__ = ["kyiv_day", "choose", "mention", "roll", "announce", "build_router"]
-
 SHOW_DELAY = 1.5
 """Seconds between the warm-up lines and the verdict. The pause is the joke; the tests set
 it to zero."""
@@ -82,6 +80,16 @@ async def roll(db, chat_id: int, now) -> tuple[int, bool] | None:
     return winner, winner == picked
 
 
+def announcement_seed(chat_id: int, day: str) -> int:
+    """Which phrases a given chat's given day gets.
+
+    Arithmetic rather than hash(): Python randomises string hashing per process, so a
+    hash-derived seed changes at every restart — which is the one thing this is supposed
+    to survive.
+    """
+    return abs(chat_id) + int(day.replace("-", ""))
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -109,9 +117,7 @@ async def announce(bot, db, chat_id: int, user_id: int, is_new: bool, now) -> No
     names = await store.user_names(db, chat_id, [user_id])
     username, display_name = names.get(user_id, (None, str(user_id)))
     who = mention(user_id, username, display_name)
-    # The seed is the chat and the day, so a retry after a failed send reads identically
-    # and two different chats on the same day do not.
-    seed = abs(hash((chat_id, kyiv_day(now))))
+    seed = announcement_seed(chat_id, kyiv_day(now))
 
     if not is_new:
         await _say(bot, db, chat_id, phrases.pick(phrases.ALREADY, seed).format(who=who), "HTML")
@@ -140,48 +146,31 @@ async def leaderboard_text(db, chat_id: int, now) -> str:
     return "\n".join(lines)
 
 
-async def _answer(message: Message, db, text: str) -> None:
-    """Reply, and store the reply, like every other thing the bot says."""
-    sent = await message.reply(text)
-    await handlers.persist(db, sent, is_bot=True)
-
-
-async def _ready(message: Message, db) -> bool:
-    """True once the chat is on the whitelist and the message is recorded.
-
-    This router runs before the chat router, so a command it handles never reaches
-    `handle_message` — which means persisting is this module's job, and a command missing
-    from the transcript is a hole in the day the digest summarises.
-    """
-    from gryag.screens import chat_is_enabled
-
-    if not await chat_is_enabled(db, message.chat.id):
-        return False
-    await handlers.persist(db, message)
-    return True
-
-
 async def play_command(message: Message, db) -> None:
-    if not await _ready(message, db):
+    if not await handlers.accept_command(message, db):
         return
     if await config.get(db, "pidor_enabled", message.chat.id) != "1":
         # Not silence: a command that produces nothing reads as a broken bot, which is
         # how the killboard command was first reported.
-        await _answer(message, db, "гру тут вимкнено")
+        await handlers.answer(message, db, "гру тут вимкнено")
         return
-    now = message.date
+    # Deliberately not message.date. A command replayed from the backlog would otherwise
+    # roll for the day it was typed on, writing a winner into a day already over.
+    now = datetime.now(timezone.utc)
     result = await roll(db, message.chat.id, now)
     if result is None:
-        await _answer(message, db, "нема з кого вибирати, хай хтось щось напише")
+        await handlers.answer(message, db, "нема з кого вибирати, хай хтось щось напише")
         return
     winner, is_new = result
     await announce(message.bot, db, message.chat.id, winner, is_new, now)
 
 
 async def stats_command(message: Message, db) -> None:
-    if not await _ready(message, db):
+    if not await handlers.accept_command(message, db):
         return
-    await _answer(message, db, await leaderboard_text(db, message.chat.id, message.date))
+    await handlers.answer(
+        message, db, await leaderboard_text(db, message.chat.id, datetime.now(timezone.utc))
+    )
 
 
 def build_router() -> Router:
@@ -212,9 +201,18 @@ async def announce_due(db, bot, now=None) -> int:
         if await store.muted_until(db, chat_id, now.isoformat(timespec="seconds")):
             log.debug("not announcing in %s: muted", chat_id)
             continue
-        result = await roll(db, chat_id, now)
-        if result is None:
+        # Take the chat the way a reply does, exactly as proactive.run_once does: an
+        # unclaimed post interleaves with an answer already being generated, and its
+        # messages consume the reply caps without ever being checked against them.
+        if not handlers._claim(chat_id):
+            log.debug("not announcing in %s: a reply is in flight", chat_id)
             continue
-        await announce(bot, db, chat_id, result[0], result[1], now)
-        spoken += 1
+        try:
+            result = await roll(db, chat_id, now)
+            if result is None:
+                continue
+            await announce(bot, db, chat_id, result[0], result[1], now)
+            spoken += 1
+        finally:
+            handlers._release(chat_id)
     return spoken

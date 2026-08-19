@@ -202,6 +202,33 @@ async def _chat_enabled(db: aiosqlite.Connection, chat_id: int) -> bool:
     return bool(row and row[0])
 
 
+async def accept_command(message, db) -> bool:
+    """True when a command one of the command routers owns should be acted on.
+
+    Those routers run before the chat router, so a command they handle never reaches
+    `handle_message` — which makes persisting their job, and a command missing from the
+    transcript is a hole in the day the digest summarises.
+
+    Staleness is checked here for the same reason the gate checks it: Telegram holds
+    pending updates for 24 hours and this bot replays them deliberately, so without this
+    a restart answers commands typed last night.
+    """
+    if not await _chat_enabled(db, message.chat.id):
+        return False
+    await persist(db, message)
+    age = max((_utcnow() - message.date).total_seconds(), 0.0)
+    if age > await config.get_int(db, "max_reply_age", message.chat.id):
+        log.info("ignoring a replayed command in %s, %.0fs old", message.chat.id, age)
+        return False
+    return True
+
+
+async def answer(message, db, text: str) -> None:
+    """Reply to a command, and store the reply like anything else the bot says."""
+    sent = await message.reply(text)
+    await persist(db, sent, is_bot=True)
+
+
 def _ban_handler(db, chat_id: int, sender):
     """Let the bot ignore somebody for a while, capped at two days.
 

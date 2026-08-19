@@ -47,7 +47,12 @@ screen with a `← назад` row.
 | 💰 Витрати | `spend_report`, with a day / week / all switch |
 | 👥 Люди | Active bans, image whitelist, pointers to `/nb` and `/unban` |
 | 🎲 Гра | Game on/off, candidate window, announce hour, roll now, leaderboard |
-| 🔇 Тиша | The mute row, on its own screen |
+| 📊 Табло | Digest on/off, morning hour, show now |
+
+Muting and the chat toggle stay on the root screen rather than moving to one of their own.
+Silencing the bot is the most urgent thing this menu does, and a screen deeper is a screen
+too far when a chat is asking it to shut up. That leaves room for 📊 Табло as the sixth
+screen, which the digest needs anyway.
 
 Everything on every screen stays admin-only. The only public surfaces added by this spec
 are the game and digest commands, and neither spends money.

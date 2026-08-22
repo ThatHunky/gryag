@@ -16,7 +16,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from gryag import config, images, menu, store
+from gryag import cleanup, config, images, menu, store
 from gryag.handlers import _spawn
 from gryag.screens import (
     _now,
@@ -64,9 +64,9 @@ async def _rerun_and_report(on_digest, db, chat) -> None:
         await on_digest(db, chat.id)
     except Exception:
         log.exception("rerunning the digest for %s failed", chat.id)
-        await chat.send_message("самарі не вийшло, дивись логи")
+        cleanup.sweep_message(await chat.send_message("самарі не вийшло, дивись логи"))
         return
-    await chat.send_message("самарі перераховане")
+    cleanup.sweep_message(await chat.send_message("самарі перераховане"))
 
 
 def build_router(
@@ -91,7 +91,7 @@ def build_router(
         if not edit or not hasattr(target, "edit_text"):
             # A menu older than 48 hours arrives as InaccessibleMessage, which has no
             # edit_text. Answer fresh rather than raising into the callback.
-            await target.answer(text, reply_markup=markup)
+            cleanup.sweep_message(await target.answer(text, reply_markup=markup), cleanup.MENU_TTL)
             return
         try:
             await target.edit_text(text, reply_markup=markup)
@@ -100,10 +100,13 @@ def build_router(
             # Telegram treats an edit that changes nothing as an error.
             if "message is not modified" not in str(exc):
                 raise
+        # Pushed back on every navigation, so a menu in use never vanishes mid-tap.
+        cleanup.sweep_message(target, cleanup.MENU_TTL)
 
     @router.message(Command("gryag"))
     async def open_menu(message: Message, db) -> None:
         await show(message, db, "root", None, edit=False)
+        cleanup.sweep_message(message, cleanup.MENU_TTL)
 
     @router.callback_query(F.data.startswith("nav:"))
     async def navigate(query: CallbackQuery, db) -> None:
@@ -184,8 +187,11 @@ def build_router(
     async def show_top(query: CallbackQuery, db) -> None:
         from gryag import pidor
 
-        await query.message.answer(
-            await pidor.leaderboard_text(db, query.message.chat.id, datetime.now(timezone.utc))
+        cleanup.sweep_message(
+            await query.message.answer(
+                await pidor.leaderboard_text(db, query.message.chat.id, datetime.now(timezone.utc))
+            ),
+            cleanup.REPORT_TTL,
         )
         await query.answer()
 
@@ -194,7 +200,9 @@ def build_router(
         from gryag import pidrahuika
 
         text = await pidrahuika.digest_text(db, "daily", datetime.now(timezone.utc))
-        await query.message.answer(text or "табло не відповідає")
+        cleanup.sweep_message(
+            await query.message.answer(text or "табло не відповідає"), cleanup.REPORT_TTL
+        )
         await query.answer()
 
     @router.callback_query(F.data == "reload")
@@ -227,9 +235,10 @@ def build_router(
         target = message.reply_to_message.from_user if message.reply_to_message else None
 
         if target is None:
-            await message.reply(
-                "Малювати можуть: " + (", ".join(map(str, allowed)) or "ніхто")
+            cleanup.sweep_message(
+                await message.reply("Малювати можуть: " + (", ".join(map(str, allowed)) or "ніхто"))
             )
+            cleanup.sweep_message(message)
             return
 
         if target.id in allowed:
@@ -242,21 +251,28 @@ def build_router(
         await config.set(
             db, "image_whitelist", images.render_whitelist(allowed), chat_id=message.chat.id
         )
-        await message.reply(verdict)
+        cleanup.sweep_message(await message.reply(verdict))
+        cleanup.sweep_message(message)
 
     @router.message(Command("unban"))
     async def lift_ban(message: Message, db) -> None:
         target = message.reply_to_message.from_user if message.reply_to_message else None
         if target is None:
             bans = await store.active_bans(db, message.chat.id, _now())
-            await message.reply(
-                "Заблоковані: "
-                + (", ".join(f"{who} до {until[11:16]}" for who, until, _ in bans) or "ніхто")
+            cleanup.sweep_message(
+                await message.reply(
+                    "Заблоковані: "
+                    + (", ".join(f"{who} до {until[11:16]}" for who, until, _ in bans) or "ніхто")
+                )
             )
+            cleanup.sweep_message(message)
             return
         lifted = await store.unban_user(db, message.chat.id, target.id)
-        await message.reply(
-            f"{target.full_name} розблокований" if lifted else "він і не був заблокований"
+        cleanup.sweep_message(
+            await message.reply(
+                f"{target.full_name} розблокований" if lifted else "він і не був заблокований"
+            )
         )
+        cleanup.sweep_message(message)
 
     return router

@@ -729,6 +729,116 @@ async def facts_for_users(
     return [(r[0] or "хтось", r[1]) for r in rows if r[3] <= per_user]
 
 
+async def lore_stats(
+    db: aiosqlite.Connection,
+    chat_id: int,
+    start: str,
+    end: str,
+    previous_start: str,
+) -> dict:
+    """Everything the lore is told rather than asked to work out.
+
+    The model is bad at counting three thousand messages and good at being funny about a
+    number handed to it, so every figure in the document comes from here.
+    """
+    window = (chat_id, start, end)
+
+    async with db.execute(
+        "SELECT COUNT(*) FROM messages WHERE chat_id = ? AND ts >= ? AND ts < ?", window
+    ) as cur:
+        total = int((await cur.fetchone())[0])
+
+    async def per_person(since: str, until: str) -> dict[str, int]:
+        async with db.execute(
+            """
+            SELECT COALESCE(u.alias, 'хтось') AS who, COUNT(*) AS n
+            FROM messages m
+            LEFT JOIN users u ON u.chat_id = m.chat_id AND u.user_id = m.user_id
+            WHERE m.chat_id = ? AND m.ts >= ? AND m.ts < ?
+              AND m.is_bot = 0 AND m.sender_is_bot = 0
+            GROUP BY who
+            """,
+            (chat_id, since, until),
+        ) as cur:
+            return {r[0]: int(r[1]) for r in await cur.fetchall()}
+
+    now_counts = await per_person(start, end)
+    then_counts = await per_person(previous_start, start)
+    ranked = sorted(now_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:12]
+
+    async with db.execute(
+        """
+        SELECT r.message_id, COALESCE(u.alias, 'хтось'), COALESCE(m.text, ''),
+               SUM(r.count) AS total
+        FROM reactions r
+        JOIN messages m ON m.chat_id = r.chat_id AND m.message_id = r.message_id
+        LEFT JOIN users u ON u.chat_id = m.chat_id AND u.user_id = m.user_id
+        WHERE r.chat_id = ? AND m.ts >= ? AND m.ts < ?
+        GROUP BY r.message_id
+        ORDER BY total DESC, r.message_id
+        LIMIT 3
+        """,
+        window,
+    ) as cur:
+        reacted = [tuple(r) for r in await cur.fetchall()]
+    top_reacted = [
+        (alias, text, int(count), await reactions_for(db, chat_id, message_id))
+        for message_id, alias, text, count in reacted
+    ]
+
+    async with db.execute(
+        """
+        SELECT substr(ts, 1, 13) AS bucket, COUNT(*) FROM messages
+        WHERE chat_id = ? AND ts >= ? AND ts < ?
+        GROUP BY bucket
+        """,
+        window,
+    ) as cur:
+        hours = [(r[0], int(r[1])) for r in await cur.fetchall()]
+
+    async with db.execute(
+        """
+        SELECT prev, ts, (julianday(ts) - julianday(prev)) * 86400 AS gap FROM (
+            SELECT ts, LAG(ts) OVER (ORDER BY ts, message_id) AS prev FROM messages
+            WHERE chat_id = ? AND ts >= ? AND ts < ?
+        )
+        WHERE prev IS NOT NULL
+        ORDER BY gap DESC LIMIT 1
+        """,
+        window,
+    ) as cur:
+        row = await cur.fetchone()
+    # julianday is a float, so a clean twelve hours comes back as 43199.99998.
+    longest_silence = (round(row[2]), row[0], row[1]) if row else None
+
+    async def champion(clause: str, expression: str) -> tuple[str, int] | None:
+        async with db.execute(
+            f"""
+            SELECT COALESCE(u.alias, 'хтось') AS who, {expression} AS n
+            FROM messages m
+            LEFT JOIN users u ON u.chat_id = m.chat_id AND u.user_id = m.user_id
+            WHERE m.chat_id = ? AND m.ts >= ? AND m.ts < ? AND {clause}
+            GROUP BY who ORDER BY n DESC, who LIMIT 1
+            """,
+            window,
+        ) as cur:
+            found = await cur.fetchone()
+        return (found[0], int(found[1])) if found and found[1] else None
+
+    return {
+        "total": total,
+        "per_person": [
+            (who, count, count - then_counts.get(who, 0)) for who, count in ranked
+        ],
+        "top_reacted": top_reacted,
+        "hours": hours,
+        "longest_silence": longest_silence,
+        "events": await events_between(db, chat_id, start, end),
+        "stickers": await champion("m.media_kind = 'sticker'", "COUNT(*)"),
+        "edits": await champion("m.edits > 0", "SUM(m.edits)"),
+    }
+
+
 async def forget_chat(db: aiosqlite.Connection, chat_id: int) -> dict[str, int]:
     """Erase everything recorded about one chat.
 

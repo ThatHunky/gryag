@@ -408,9 +408,9 @@ async def test_the_persona_can_be_swapped_without_a_restart(db, monkeypatch):
     assert seen == ["перша версія", "друга версія"]
 
 
-async def test_nothing_is_recorded_about_a_chat_nobody_switched_on(db, monkeypatch):
-    """Being added to a group is not consent to record it. The whitelist governs storage,
-    not only speech."""
+async def test_a_chat_nobody_switched_on_is_recorded_but_never_answered(db, monkeypatch):
+    """The whitelist governs speech only. Storage runs everywhere, so that switching a
+    chat on does not start it with no history behind it."""
     quiet = FakeLlm()
     monkeypatch.setattr(handlers.llm, "generate", quiet.generate)
 
@@ -421,7 +421,33 @@ async def test_nothing_is_recorded_about_a_chat_nobody_switched_on(db, monkeypat
 
     assert reply is None
     assert quiet.calls == []
-    assert await store.recent_messages(db, -777, limit=10) == []
+    stored = await store.recent_messages(db, -777, limit=10)
+    assert [r["text"] for r in stored] == ["гряг привіт"]
+
+
+async def test_a_chat_that_was_never_switched_on_still_gets_a_row_of_its_own(db):
+    """Otherwise the admin menu has no title to show for it and `forget_chat` has
+    nothing to find."""
+    await handlers.handle_message(
+        FakeMessage(text="привіт", chat_id=-777), db, client=None, persona="p", bot_id=77
+    )
+
+    async with db.execute("SELECT title, enabled FROM chats WHERE chat_id = ?", (-777,)) as cur:
+        row = await cur.fetchone()
+    assert row[0] == "матсурі"
+    assert row[1] == 0
+
+
+async def test_a_service_event_is_recorded_in_a_chat_nobody_switched_on(db):
+    message = FakeMessage(text=None, message_id=5, chat_id=-777)
+    message.new_chat_title = "новий чат"
+
+    await handlers.handle_message(message, db, None, {"text": "p"}, bot_id=99)
+
+    stored = await store.events_between(
+        db, -777, "2000-01-01T00:00:00+00:00", "2999-01-01T00:00:00+00:00"
+    )
+    assert [e["action"] for e in stored] == ["title"]
 
 
 async def test_an_enabled_chat_is_still_recorded_even_when_the_bot_says_nothing(db, monkeypatch):
@@ -663,11 +689,11 @@ async def test_a_reaction_in_an_enabled_chat_is_stored(db):
     assert await store.reactions_for(db, -100, 1) == [("😁", 1)]
 
 
-async def test_a_reaction_in_a_chat_that_is_not_whitelisted_is_ignored(db):
-    """The whitelist governs storage, not just speech. Being added to a group is not
-    consent to have it recorded."""
-    assert await handlers.handle_reaction(FakeReactionUpdate(new=[FakeReaction("😁")]), db) is False
-    assert await store.reactions_for(db, -100, 1) == []
+async def test_a_reaction_is_recorded_in_a_chat_nobody_switched_on(db):
+    """Reactions are the one thing Telegram never replays, so a chat switched on next
+    week would have a permanent hole where this week's reactions were."""
+    assert await handlers.handle_reaction(FakeReactionUpdate(new=[FakeReaction("😁")]), db) is True
+    assert await store.reactions_for(db, -100, 1) == [("😁", 1)]
 
 
 async def test_removing_a_reaction_lowers_the_count(db):

@@ -215,9 +215,10 @@ async def accept_command(message, db) -> bool:
     pending updates for 24 hours and this bot replays them deliberately, so without this
     a restart answers commands typed last night.
     """
-    if not await _chat_enabled(db, message.chat.id):
-        return False
     await persist(db, message)
+    if not await _chat_enabled(db, message.chat.id):
+        # Stored like anything else, but a chat nobody switched on gets no answer.
+        return False
     age = max((_utcnow() - message.date).total_seconds(), 0.0)
     if age > await config.get_int(db, "max_reply_age", message.chat.id):
         log.info("ignoring a replayed command in %s, %.0fs old", message.chat.id, age)
@@ -398,13 +399,16 @@ async def handle_message(
 ) -> str | None:
     chat_id = message.chat.id
 
-    # The whitelist governs storage, not just speech. Being added to a group is not
-    # consent to have it recorded: until somebody switches the chat on, nothing about it
-    # is written down. Inside an enabled chat the message is still stored before the gate
-    # runs, so history has no holes where the bot chose to stay quiet.
-    if not await _chat_enabled(db, chat_id):
-        log.debug("ignoring %s entirely: not on the whitelist", chat_id)
-        return None
+    # The whitelist governs speech, not storage. Everything is written down everywhere,
+    # so a chat switched on next week arrives with its history already behind it rather
+    # than starting blank — and so the reactions Telegram never replays are not lost in
+    # the meantime. The message is stored before the gate runs for the same reason:
+    # history must have no holes where the bot chose to stay quiet.
+    enabled = await _chat_enabled(db, chat_id)
+    if not enabled:
+        # Gives the chat a row and a title, so the admin menu has something to name and
+        # `forget_chat` has something to find.
+        await store.ensure_chat(db, chat_id, getattr(message.chat, "title", "") or "")
 
     found = events.detect(message)
     if found is not None:
@@ -482,7 +486,7 @@ async def handle_message(
             text=text,
             is_bot=bool(sender and getattr(sender, "is_bot", False)),
             is_self=bool(sender and sender.id == bot_id),
-            chat_enabled=True,  # checked above, before anything was written down
+            chat_enabled=enabled,
             mentions_bot=mentions_bot,
             replies_to_bot=replies_to_bot,
             keywords=keywords,
@@ -698,8 +702,6 @@ async def handle_reaction(update, db: aiosqlite.Connection) -> bool:
     Never answers and never reaches the gate: a reaction is not somebody speaking.
     """
     chat_id = update.chat.id
-    if not await _chat_enabled(db, chat_id):
-        return False
     added, removed = reaction_delta(update.old_reaction or [], update.new_reaction or [])
     if not added and not removed:
         return False

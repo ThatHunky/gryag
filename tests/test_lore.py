@@ -622,7 +622,8 @@ async def test_the_cooldown_survives_a_restart(db):
     assert await store.lore_sent_at(db, CHAT) is not None
 
 
-async def test_the_command_does_nothing_in_a_chat_that_is_not_whitelisted(db):
+async def test_the_command_is_recorded_but_not_answered_in_a_chat_nobody_switched_on(db):
+    """Storage runs everywhere now; acting on a command still does not."""
     await _stored_lore(db)
     message = FakeMessage(text="/lore", chat_id=CHAT)
 
@@ -630,6 +631,8 @@ async def test_the_command_does_nothing_in_a_chat_that_is_not_whitelisted(db):
 
     assert message.documents == []
     assert message.replies == []
+    stored = await store.recent_messages(db, CHAT, limit=5)
+    assert [r["text"] for r in stored] == ["/lore"]
 
 
 async def test_the_sent_document_is_in_the_transcript_like_anything_else_the_bot_says(db):

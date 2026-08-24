@@ -1,0 +1,143 @@
+{
+  "name": "тестовий чат",
+  "type": "private_supergroup",
+  "id": 4291515714,
+  "messages": [
+    {
+      "id": 1,
+      "type": "service",
+      "date": "2026-08-11T16:59:23",
+      "date_unixtime": "1786456763",
+      "actor": "тестовий чат",
+      "actor_id": "channel4291515714",
+      "action": "edit_group_title",
+      "title": "тестовий чат",
+      "text": "",
+      "text_entities": []
+    },
+    {
+      "id": 2,
+      "type": "service",
+      "date": "2026-08-11T17:24:16",
+      "date_unixtime": "1786458256",
+      "actor": "Vitalina",
+      "actor_id": "user854449173",
+      "action": "invite_members",
+      "members": ["Vitalina"],
+      "text": "",
+      "text_entities": []
+    },
+    {
+      "id": 4,
+      "type": "message",
+      "date": "2026-08-11T17:15:33",
+      "date_unixtime": "1786457733",
+      "from": "Raphaël Ambrosius Costeau",
+      "from_id": "user8792101665",
+      "text": [
+        {"type": "bold", "text": "У мене мемна криза."},
+        "\nМемів більше нема."
+      ],
+      "text_entities": [
+        {"type": "bold", "text": "У мене мемна криза."},
+        {"type": "plain", "text": "\nМемів більше нема."}
+      ]
+    },
+    {
+      "id": 5,
+      "type": "message",
+      "date": "2026-08-11T17:01:02",
+      "date_unixtime": "1786456862",
+      "edited": "2026-08-11T17:01:07",
+      "edited_unixtime": "1786456867",
+      "from": "андрійний колайдер",
+      "from_id": "user493770201",
+      "file": "(File not included. Change data exporting settings to download.)",
+      "media_type": "animation",
+      "mime_type": "video/mp4",
+      "text": "тримайте",
+      "text_entities": [{"type": "plain", "text": "тримайте"}],
+      "reactions": [
+        {"type": "emoji", "count": 3, "emoji": "😁"},
+        {"type": "emoji", "count": 1, "emoji": "❤"}
+      ]
+    },
+    {
+      "id": 6,
+      "type": "service",
+      "date": "2026-08-11T20:32:22",
+      "date_unixtime": "1786469542",
+      "actor": "андрійний колайдер",
+      "actor_id": "user493770201",
+      "action": "pin_message",
+      "message_id": 5,
+      "text": "",
+      "text_entities": []
+    },
+    {
+      "id": 7,
+      "type": "message",
+      "date": "2026-08-11T20:33:00",
+      "date_unixtime": "1786469580",
+      "from": "Vitalina",
+      "from_id": "user854449173",
+      "reply_to_message_id": 5,
+      "text": "це вже було",
+      "text_entities": [{"type": "plain", "text": "це вже було"}]
+    },
+    {
+      "id": 8,
+      "type": "message",
+      "date": "2026-08-11T20:33:20",
+      "date_unixtime": "1786469600",
+      "from": "гряг",
+      "from_id": "user8082154386",
+      "text": "було, і буде",
+      "text_entities": [{"type": "plain", "text": "було, і буде"}]
+    },
+    {
+      "id": 9,
+      "type": "message",
+      "date": "2026-08-11T20:34:00",
+      "date_unixtime": "1786469640",
+      "from": "тестовий чат",
+      "from_id": "channel4291515714",
+      "text": "допис каналу",
+      "text_entities": [{"type": "plain", "text": "допис каналу"}]
+    },
+    {
+      "id": 10,
+      "type": "message",
+      "date": "2026-08-11T20:35:00",
+      "date_unixtime": "1786469700",
+      "from": "Пісюнбот",
+      "from_id": "user5047828033",
+      "text": "твій результат: 14 см",
+      "text_entities": [{"type": "plain", "text": "твій результат: 14 см"}]
+    },
+    {
+      "id": 11,
+      "type": "message",
+      "date": "2026-08-11T20:36:00",
+      "date_unixtime": "1786469760",
+      "from": "Vitalina",
+      "from_id": "user854449173",
+      "reply_to_message_id": 88888,
+      "reply_to_peer_id": "channel1234567890",
+      "text": "переслане з іншого чату",
+      "text_entities": [{"type": "plain", "text": "переслане з іншого чату"}]
+    },
+    {
+      "id": 12,
+      "type": "message",
+      "date": "2026-08-11T20:37:00",
+      "date_unixtime": "1786469820",
+      "from": "андрійний колайдер",
+      "from_id": "user493770201",
+      "media_type": "sticker",
+      "sticker_emoji": "🗿",
+      "text": "",
+      "text_entities": []
+    }
+  ]
+}

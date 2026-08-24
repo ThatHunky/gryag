@@ -750,6 +750,84 @@ async def forget_chat(db: aiosqlite.Connection, chat_id: int) -> dict[str, int]:
     return {k: v for k, v in removed.items() if v}
 
 
+async def ensure_chat(db: aiosqlite.Connection, chat_id: int, title: str) -> None:
+    """Record that the chat exists, without switching it on.
+
+    An importer that enabled a chat would be an importer that starts the bot talking in
+    it. Whether gryag speaks anywhere is the admin's decision and only the admin's.
+    """
+    await db.execute(
+        """
+        INSERT INTO chats (chat_id, title, enabled, added_at)
+        VALUES (?, ?, 0, datetime('now'))
+        ON CONFLICT (chat_id) DO NOTHING
+        """,
+        (chat_id, title),
+    )
+    await db.commit()
+
+
+async def bulk_insert_messages(db: aiosqlite.Connection, rows: list[tuple]) -> int:
+    """`save_message` for tens of thousands of rows at once, returning how many landed.
+
+    One transaction rather than one per row: the real export is 43,147 messages, and a
+    commit each is minutes of WAL churn. Columns, in order: chat_id, message_id, user_id,
+    ts, text, media_kind, file_id, reply_to, is_bot, sender_is_bot, edits.
+    """
+    if not rows:
+        return 0
+    before = db.total_changes
+    await db.execute("BEGIN IMMEDIATE")
+    await db.executemany(
+        """
+        INSERT INTO messages
+            (chat_id, message_id, user_id, ts, text, media_kind, file_id, reply_to,
+             is_bot, sender_is_bot, edits)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (chat_id, message_id) DO NOTHING
+        """,
+        rows,
+    )
+    await db.commit()
+    return db.total_changes - before
+
+
+async def bulk_set_reactions(db: aiosqlite.Connection, rows: list[tuple]) -> int:
+    """(chat_id, message_id, emoji, count, updated_at), counts set absolutely."""
+    if not rows:
+        return 0
+    await db.execute("BEGIN IMMEDIATE")
+    await db.executemany(
+        """
+        INSERT INTO reactions (chat_id, message_id, emoji, count, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (chat_id, message_id, emoji) DO UPDATE SET
+            count = excluded.count, updated_at = excluded.updated_at
+        """,
+        rows,
+    )
+    await db.commit()
+    return len(rows)
+
+
+async def bulk_insert_events(db: aiosqlite.Connection, rows: list[tuple]) -> int:
+    """(chat_id, message_id, ts, action, actor_id, payload_json)."""
+    if not rows:
+        return 0
+    before = db.total_changes
+    await db.execute("BEGIN IMMEDIATE")
+    await db.executemany(
+        """
+        INSERT INTO events (chat_id, message_id, ts, action, actor_id, payload)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (chat_id, message_id) DO NOTHING
+        """,
+        rows,
+    )
+    await db.commit()
+    return db.total_changes - before
+
+
 async def enabled_chats(db: aiosqlite.Connection) -> list[int]:
     async with db.execute("SELECT chat_id FROM chats WHERE enabled = 1") as cur:
         return [r[0] for r in await cur.fetchall()]

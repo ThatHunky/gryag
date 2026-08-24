@@ -121,6 +121,40 @@ CREATE TABLE IF NOT EXISTS chat_state (
     last_ambient_ts TEXT,
     muted_until     TEXT
 );
+
+CREATE TABLE IF NOT EXISTS reactions (
+    chat_id    INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    emoji      TEXT    NOT NULL,
+    count      INTEGER NOT NULL,
+    updated_at TEXT,
+    PRIMARY KEY (chat_id, message_id, emoji)
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    chat_id    INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    ts         TEXT    NOT NULL,
+    action     TEXT    NOT NULL,
+    actor_id   INTEGER,
+    payload    TEXT,
+    PRIMARY KEY (chat_id, message_id)
+);
+
+CREATE TABLE IF NOT EXISTS lore (
+    chat_id      INTEGER NOT NULL,
+    version      INTEGER NOT NULL,
+    text         TEXT    NOT NULL,
+    created_at   TEXT    NOT NULL,
+    model        TEXT,
+    tokens       INTEGER,
+    window_start TEXT,
+    window_end   TEXT,
+    PRIMARY KEY (chat_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reactions_chat ON reactions (chat_id, count DESC);
+CREATE INDEX IF NOT EXISTS idx_events_chat_ts ON events (chat_id, ts);
 """
 
 MESSAGE_COLUMNS = """
@@ -137,6 +171,12 @@ MIGRATIONS = (
     "ALTER TABLE usage ADD COLUMN searched INTEGER NOT NULL DEFAULT 0",
     # A mention needs @username, and until the game arrived nothing ever needed one.
     "ALTER TABLE users ADD COLUMN username TEXT",
+    # The lore's stats block names an edit champion, and nothing has ever counted an
+    # edit: update_message_text overwrote the text and left no trace it had happened.
+    "ALTER TABLE messages ADD COLUMN edits INTEGER NOT NULL DEFAULT 0",
+    # /lore is open to the whole chat, so its cooldown has to outlive a restart. In
+    # memory every deploy is a fresh spam window.
+    "ALTER TABLE chat_state ADD COLUMN last_lore_ts TEXT",
 )
 
 
@@ -254,11 +294,224 @@ async def update_message_text(
     so a deleted message stays in the transcript. Nothing here can change that.
     """
     cur = await db.execute(
-        "UPDATE messages SET text = ? WHERE chat_id = ? AND message_id = ?",
+        "UPDATE messages SET text = ?, edits = edits + 1 WHERE chat_id = ? AND message_id = ?",
         (text, chat_id, message_id),
     )
     await db.commit()
     return cur.rowcount > 0
+
+
+async def apply_reaction(
+    db: aiosqlite.Connection,
+    *,
+    chat_id: int,
+    message_id: int,
+    added: list[str],
+    removed: list[str],
+    ts: str,
+) -> None:
+    """Move the stored counts by one person's change of mind.
+
+    Counts drift low across downtime and that is accepted: Telegram replays pending
+    *messages* for 24 hours but never replays reaction updates, so anything reacted to
+    while the bot is down is lost for good. Good enough for "which message made the chat
+    laugh"; not good enough for anything that must be exact, and nothing here is.
+    """
+    for emoji in added:
+        await db.execute(
+            """
+            INSERT INTO reactions (chat_id, message_id, emoji, count, updated_at)
+            VALUES (?, ?, ?, 1, ?)
+            ON CONFLICT (chat_id, message_id, emoji) DO UPDATE SET
+                count = count + 1, updated_at = excluded.updated_at
+            """,
+            (chat_id, message_id, emoji, ts),
+        )
+    for emoji in removed:
+        # A removal for something never seen added is the normal shape of a restart, not
+        # an error, so this touches nothing rather than writing a negative count.
+        await db.execute(
+            """
+            UPDATE reactions SET count = count - 1, updated_at = ?
+            WHERE chat_id = ? AND message_id = ? AND emoji = ?
+            """,
+            (ts, chat_id, message_id, emoji),
+        )
+    await db.execute(
+        "DELETE FROM reactions WHERE chat_id = ? AND message_id = ? AND count <= 0",
+        (chat_id, message_id),
+    )
+    await db.commit()
+
+
+async def set_reaction_count(
+    db: aiosqlite.Connection,
+    *,
+    chat_id: int,
+    message_id: int,
+    emoji: str,
+    count: int,
+    ts: str,
+) -> None:
+    """The importer's path: an export states the total, it does not describe a change."""
+    await db.execute(
+        """
+        INSERT INTO reactions (chat_id, message_id, emoji, count, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (chat_id, message_id, emoji) DO UPDATE SET
+            count = excluded.count, updated_at = excluded.updated_at
+        """,
+        (chat_id, message_id, emoji, count, ts),
+    )
+    await db.commit()
+
+
+async def reactions_for(
+    db: aiosqlite.Connection, chat_id: int, message_id: int
+) -> list[tuple[str, int]]:
+    """(emoji, count), most reacted first."""
+    async with db.execute(
+        """
+        SELECT emoji, count FROM reactions
+        WHERE chat_id = ? AND message_id = ?
+        ORDER BY count DESC, emoji
+        """,
+        (chat_id, message_id),
+    ) as cur:
+        return [(r[0], r[1]) for r in await cur.fetchall()]
+
+
+async def save_event(
+    db: aiosqlite.Connection,
+    *,
+    chat_id: int,
+    message_id: int,
+    ts: str,
+    action: str,
+    actor_id: int | None,
+    payload: dict,
+) -> None:
+    """A join, a leave, a pin, a rename. Never recoverable later — the Bot API does not
+    let anybody go back for them — so a duplicate is cheaper than a miss."""
+    await db.execute(
+        """
+        INSERT INTO events (chat_id, message_id, ts, action, actor_id, payload)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (chat_id, message_id) DO NOTHING
+        """,
+        (chat_id, message_id, ts, action, actor_id, json.dumps(payload, ensure_ascii=False)),
+    )
+    await db.commit()
+
+
+async def events_between(
+    db: aiosqlite.Connection, chat_id: int, start: str, end: str
+) -> list[dict]:
+    """Every event in the window, oldest first, with the actor's alias and parsed payload."""
+    async with db.execute(
+        """
+        SELECT e.message_id, e.ts, e.action, e.actor_id, e.payload,
+               COALESCE(u.alias, 'хтось') AS alias
+        FROM events e
+        LEFT JOIN users u ON u.chat_id = e.chat_id AND u.user_id = e.actor_id
+        WHERE e.chat_id = ? AND e.ts >= ? AND e.ts < ?
+        ORDER BY e.ts, e.message_id
+        """,
+        (chat_id, start, end),
+    ) as cur:
+        rows = [dict(r) for r in await cur.fetchall()]
+    for row in rows:
+        row["payload"] = json.loads(row["payload"]) if row["payload"] else {}
+    return rows
+
+
+async def save_lore(
+    db: aiosqlite.Connection,
+    *,
+    chat_id: int,
+    text: str,
+    model: str,
+    tokens: int,
+    window_start: str,
+    window_end: str,
+    created_at: str,
+) -> int:
+    """Store a new version and return its number.
+
+    Versions accumulate rather than overwrite. A document the model is free to amend is a
+    document that can quietly lose a good line; keeping every version makes that
+    recoverable for a few kilobytes a week.
+    """
+    await db.execute("BEGIN IMMEDIATE")
+    async with db.execute(
+        "SELECT COALESCE(MAX(version), 0) + 1 FROM lore WHERE chat_id = ?", (chat_id,)
+    ) as cur:
+        version = int((await cur.fetchone())[0])
+    await db.execute(
+        """
+        INSERT INTO lore
+            (chat_id, version, text, created_at, model, tokens, window_start, window_end)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (chat_id, version, text, created_at, model, tokens, window_start, window_end),
+    )
+    await db.commit()
+    return version
+
+
+async def latest_lore(db: aiosqlite.Connection, chat_id: int) -> dict | None:
+    async with db.execute(
+        "SELECT * FROM lore WHERE chat_id = ? ORDER BY version DESC LIMIT 1", (chat_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def lore_sent_at(db: aiosqlite.Connection, chat_id: int) -> str | None:
+    async with db.execute(
+        "SELECT last_lore_ts FROM chat_state WHERE chat_id = ?", (chat_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    return row[0] if row else None
+
+
+async def mark_lore_sent(db: aiosqlite.Connection, chat_id: int, ts: str) -> None:
+    await db.execute(
+        """
+        INSERT INTO chat_state (chat_id, last_lore_ts) VALUES (?, ?)
+        ON CONFLICT (chat_id) DO UPDATE SET last_lore_ts = excluded.last_lore_ts
+        """,
+        (chat_id, ts),
+    )
+    await db.commit()
+
+
+async def messages_between(
+    db: aiosqlite.Connection, chat_id: int, start: str, end: str
+) -> list[dict]:
+    """Everything said between two instants, oldest first. `end` is exclusive.
+
+    `messages_for_day` is the digest's window and cannot serve this: a lore window is up
+    to four days long and starts wherever the previous document stopped.
+    """
+    async with db.execute(
+        f"""
+        SELECT {MESSAGE_COLUMNS} FROM messages m
+        LEFT JOIN users u ON u.chat_id = m.chat_id AND u.user_id = m.user_id
+        WHERE m.chat_id = ? AND m.ts >= ? AND m.ts < ?
+        ORDER BY m.ts, m.message_id
+        """,
+        (chat_id, start, end),
+    ) as cur:
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def oldest_message_ts(db: aiosqlite.Connection, chat_id: int) -> str | None:
+    async with db.execute(
+        "SELECT MIN(ts) FROM messages WHERE chat_id = ?", (chat_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    return row[0]
 
 
 async def recent_messages(
@@ -485,6 +738,7 @@ async def forget_chat(db: aiosqlite.Connection, chat_id: int) -> dict[str, int]:
     removed: dict[str, int] = {}
     for table in (
         "messages", "users", "facts", "summaries", "usage", "bans", "chat_state",
+        "reactions", "events", "lore",
         # pidrahuika_days is deliberately absent: the killboard's figures are not this
         # chat's data. They are the same for everybody, and dropping them here would
         # break tomorrow's delta in every other chat.

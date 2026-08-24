@@ -435,3 +435,244 @@ async def test_the_bots_own_messages_do_not_empty_the_pool(db):
     )
 
     assert await store.active_user_ids(db, -100, "2026-08-01T00:00:00+00:00") == [1]
+
+
+async def _seed_message(db, message_id=1, user_id=1, ts="2026-08-19T10:00:00+00:00",
+                        text="msg", media_kind=None, is_bot=False):
+    await store.save_message(
+        db,
+        chat_id=-100,
+        message_id=message_id,
+        user_id=user_id,
+        ts=ts,
+        text=text,
+        media_kind=media_kind,
+        file_id=None,
+        reply_to=None,
+        is_bot=is_bot,
+    )
+
+
+async def test_a_reaction_that_was_added_starts_at_one(db):
+    await store.apply_reaction(
+        db, chat_id=-100, message_id=7, added=["😁"], removed=[], ts="2026-08-19T10:00:00+00:00"
+    )
+
+    assert await store.reactions_for(db, -100, 7) == [("😁", 1)]
+
+
+async def test_two_people_reacting_with_the_same_emoji_count_twice(db):
+    for _ in range(2):
+        await store.apply_reaction(
+            db, chat_id=-100, message_id=7, added=["😁"], removed=[],
+            ts="2026-08-19T10:00:00+00:00",
+        )
+
+    assert await store.reactions_for(db, -100, 7) == [("😁", 2)]
+
+
+async def test_taking_a_reaction_back_to_zero_removes_the_row(db):
+    await store.apply_reaction(
+        db, chat_id=-100, message_id=7, added=["😁"], removed=[], ts="2026-08-19T10:00:00+00:00"
+    )
+
+    await store.apply_reaction(
+        db, chat_id=-100, message_id=7, added=[], removed=["😁"], ts="2026-08-19T10:01:00+00:00"
+    )
+
+    assert await store.reactions_for(db, -100, 7) == []
+
+
+async def test_removing_a_reaction_that_was_never_recorded_does_not_go_negative(db):
+    """Reaction updates are not replayed across downtime, so the bot regularly sees a
+    removal for something it never saw added."""
+    await store.apply_reaction(
+        db, chat_id=-100, message_id=7, added=[], removed=["❤"], ts="2026-08-19T10:00:00+00:00"
+    )
+
+    assert await store.reactions_for(db, -100, 7) == []
+
+
+async def test_swapping_one_reaction_for_another_moves_the_count(db):
+    await store.apply_reaction(
+        db, chat_id=-100, message_id=7, added=["😁"], removed=[], ts="2026-08-19T10:00:00+00:00"
+    )
+
+    await store.apply_reaction(
+        db, chat_id=-100, message_id=7, added=["❤"], removed=["😁"],
+        ts="2026-08-19T10:01:00+00:00",
+    )
+
+    assert await store.reactions_for(db, -100, 7) == [("❤", 1)]
+
+
+async def test_the_importer_sets_a_count_absolutely(db):
+    await store.apply_reaction(
+        db, chat_id=-100, message_id=7, added=["😁"], removed=[], ts="2026-08-19T10:00:00+00:00"
+    )
+
+    await store.set_reaction_count(
+        db, chat_id=-100, message_id=7, emoji="😁", count=12, ts="2026-08-19T10:02:00+00:00"
+    )
+
+    assert await store.reactions_for(db, -100, 7) == [("😁", 12)]
+
+
+async def test_an_event_is_stored_with_its_payload(db):
+    await store.save_event(
+        db, chat_id=-100, message_id=3, ts="2026-08-19T10:00:00+00:00",
+        action="title", actor_id=1, payload={"title": "чат матсурі"},
+    )
+
+    events = await store.events_between(db, -100, "2026-08-19T00:00:00+00:00", "2026-08-20T00:00:00+00:00")
+
+    assert [(e["action"], e["payload"]["title"]) for e in events] == [("title", "чат матсурі")]
+
+
+async def test_events_outside_the_window_are_not_returned(db):
+    await store.save_event(
+        db, chat_id=-100, message_id=3, ts="2026-08-17T10:00:00+00:00",
+        action="pin", actor_id=1, payload={},
+    )
+
+    events = await store.events_between(db, -100, "2026-08-19T00:00:00+00:00", "2026-08-20T00:00:00+00:00")
+
+    assert events == []
+
+
+async def test_an_event_carries_the_actors_alias(db):
+    await _seed_user(db, user_id=1, alias="oleh")
+    await store.save_event(
+        db, chat_id=-100, message_id=3, ts="2026-08-19T10:00:00+00:00",
+        action="pin", actor_id=1, payload={"message_id": 2},
+    )
+
+    events = await store.events_between(db, -100, "2026-08-19T00:00:00+00:00", "2026-08-20T00:00:00+00:00")
+
+    assert events[0]["alias"] == "oleh"
+
+
+async def test_storing_the_same_event_twice_does_not_duplicate(db):
+    for _ in range(2):
+        await store.save_event(
+            db, chat_id=-100, message_id=3, ts="2026-08-19T10:00:00+00:00",
+            action="pin", actor_id=1, payload={},
+        )
+
+    events = await store.events_between(db, -100, "2026-08-19T00:00:00+00:00", "2026-08-20T00:00:00+00:00")
+
+    assert len(events) == 1
+
+
+async def test_the_first_lore_version_is_one(db):
+    version = await store.save_lore(
+        db, chat_id=-100, text="# лор", model="m", tokens=2,
+        window_start="2026-08-17T00:00:00+00:00", window_end="2026-08-19T00:00:00+00:00",
+        created_at="2026-08-19T05:00:00+00:00",
+    )
+
+    assert version == 1
+
+
+async def test_every_lore_version_is_kept_and_the_latest_is_returned(db):
+    for n, text in enumerate(("перша", "друга"), start=1):
+        await store.save_lore(
+            db, chat_id=-100, text=text, model="m", tokens=1,
+            window_start="2026-08-17T00:00:00+00:00", window_end=f"2026-08-{n + 18}T00:00:00+00:00",
+            created_at=f"2026-08-{n + 18}T05:00:00+00:00",
+        )
+
+    latest = await store.latest_lore(db, -100)
+
+    assert latest["version"] == 2
+    assert latest["text"] == "друга"
+    assert latest["window_end"] == "2026-08-20T00:00:00+00:00"
+    async with db.execute("SELECT COUNT(*) FROM lore WHERE chat_id = ?", (-100,)) as cur:
+        assert (await cur.fetchone())[0] == 2
+
+
+async def test_a_chat_with_no_lore_has_none(db):
+    assert await store.latest_lore(db, -100) is None
+
+
+async def test_when_the_lore_was_last_sent_survives_a_restart(db):
+    await store.mark_lore_sent(db, -100, "2026-08-19T10:00:00+00:00")
+
+    assert await store.lore_sent_at(db, -100) == "2026-08-19T10:00:00+00:00"
+
+
+async def test_a_chat_that_never_asked_for_the_lore_has_no_timestamp(db):
+    assert await store.lore_sent_at(db, -100) is None
+
+
+async def test_marking_the_lore_sent_does_not_clear_a_mute(db):
+    """chat_state is one row per chat and four different features write to it."""
+    await store.set_mute(db, -100, "2999-01-01T00:00:00+00:00")
+
+    await store.mark_lore_sent(db, -100, "2026-08-19T10:00:00+00:00")
+
+    assert await store.muted_until(db, -100, "2026-08-19T10:00:00+00:00") is not None
+
+
+async def test_messages_between_spans_days_and_excludes_the_far_end(db):
+    await _seed_user(db)
+    for n, ts in enumerate(
+        ("2026-08-18T23:00:00+00:00", "2026-08-19T10:00:00+00:00", "2026-08-20T10:00:00+00:00")
+    ):
+        await _seed_message(db, message_id=n, ts=ts, text=f"msg {n}")
+
+    rows = await store.messages_between(
+        db, -100, "2026-08-18T00:00:00+00:00", "2026-08-20T00:00:00+00:00"
+    )
+
+    assert [r["text"] for r in rows] == ["msg 0", "msg 1"]
+    assert rows[0]["alias"] == "oleh"
+
+
+async def test_the_oldest_message_is_where_a_first_lore_window_starts(db):
+    await _seed_user(db)
+    await _seed_message(db, message_id=2, ts="2026-08-19T10:00:00+00:00")
+    await _seed_message(db, message_id=1, ts="2026-08-18T10:00:00+00:00")
+
+    assert await store.oldest_message_ts(db, -100) == "2026-08-18T10:00:00+00:00"
+
+
+async def test_a_chat_with_no_messages_has_no_oldest(db):
+    assert await store.oldest_message_ts(db, -100) is None
+
+
+async def test_an_edit_is_counted_not_just_applied(db):
+    await _seed_user(db)
+    await _seed_message(db, message_id=1, text="before")
+
+    await store.update_message_text(db, -100, 1, "after")
+    await store.update_message_text(db, -100, 1, "after again")
+
+    async with db.execute(
+        "SELECT text, edits FROM messages WHERE chat_id = ? AND message_id = ?", (-100, 1)
+    ) as cur:
+        row = await cur.fetchone()
+    assert row[0] == "after again"
+    assert row[1] == 2
+
+
+async def test_forgetting_a_chat_forgets_its_reactions_events_and_lore(db):
+    await store.apply_reaction(
+        db, chat_id=-100, message_id=7, added=["😁"], removed=[], ts="2026-08-19T10:00:00+00:00"
+    )
+    await store.save_event(
+        db, chat_id=-100, message_id=3, ts="2026-08-19T10:00:00+00:00",
+        action="pin", actor_id=1, payload={},
+    )
+    await store.save_lore(
+        db, chat_id=-100, text="# лор", model="m", tokens=2,
+        window_start="2026-08-17T00:00:00+00:00", window_end="2026-08-19T00:00:00+00:00",
+        created_at="2026-08-19T05:00:00+00:00",
+    )
+
+    removed = await store.forget_chat(db, -100)
+
+    assert removed["reactions"] == 1
+    assert removed["events"] == 1
+    assert removed["lore"] == 1
+    assert await store.latest_lore(db, -100) is None

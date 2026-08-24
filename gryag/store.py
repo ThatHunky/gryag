@@ -812,12 +812,16 @@ async def lore_stats(
     longest_silence = (round(row[2]), row[0], row[1]) if row else None
 
     async def champion(clause: str, expression: str) -> tuple[str, int] | None:
+        # Bots are excluded here for the same reason `per_person` excludes them. Without
+        # it the first real run crowned Пісюнбот "головний редактор реальності" for
+        # editing its own 58 messages, which is a bot's behaviour, not a person's habit.
         async with db.execute(
             f"""
             SELECT COALESCE(u.alias, 'хтось') AS who, {expression} AS n
             FROM messages m
             LEFT JOIN users u ON u.chat_id = m.chat_id AND u.user_id = m.user_id
-            WHERE m.chat_id = ? AND m.ts >= ? AND m.ts < ? AND {clause}
+            WHERE m.chat_id = ? AND m.ts >= ? AND m.ts < ?
+              AND m.is_bot = 0 AND m.sender_is_bot = 0 AND {clause}
             GROUP BY who ORDER BY n DESC, who LIMIT 1
             """,
             window,

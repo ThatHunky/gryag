@@ -645,3 +645,22 @@ def test_the_command_is_not_treated_as_another_bots():
 
     assert gate.foreign_command("/lore", handlers.OWN_COMMANDS) is False
     assert gate.foreign_command("/лор", handlers.OWN_COMMANDS) is False
+
+
+async def test_a_bot_cannot_be_the_sticker_or_edit_champion(db):
+    """`per_person` filters bots out and these did not, so the first real run crowned
+    Пісюнбот "головний редактор реальності" for editing its own messages 58 times."""
+    await seed_window(db)
+    await store.upsert_user(db, chat_id=CHAT, user_id=9, display_name="Пісюнбот", alias="Пісюнбот")
+    for n in range(5):
+        await store.save_message(
+            db, chat_id=CHAT, message_id=200 + n, user_id=9,
+            ts="2026-08-19T10:00:00+00:00", text="бот", media_kind="sticker",
+            file_id=None, reply_to=None, is_bot=False, sender_is_bot=True,
+        )
+        await store.update_message_text(db, CHAT, 200 + n, "бот, виправлений")
+
+    stats = await store.lore_stats(db, CHAT, START, END, BEFORE)
+
+    assert stats["stickers"] == ("maria", 2)
+    assert stats["edits"] == ("oleh", 1)

@@ -677,3 +677,20 @@ async def test_forgetting_a_chat_forgets_its_reactions_events_and_lore(db):
     assert removed["events"] == 1
     assert removed["lore"] == 1
     assert await store.latest_lore(db, -100) is None
+
+
+async def test_a_stored_message_carries_the_username_for_telling_namesakes_apart(db):
+    """A human in this chat calls themselves «гряг», the same as the bot. The renderer
+    needs their @username to tell the two apart."""
+    await store.upsert_user(
+        db, chat_id=-100, user_id=6560599034, display_name="гряг", alias="гряг",
+        username="gria_g",
+    )
+    await store.save_message(
+        db, chat_id=-100, message_id=1, user_id=6560599034, ts="2026-08-19T10:00:00+00:00",
+        text="я не бот", media_kind=None, file_id=None, reply_to=None, is_bot=False,
+    )
+
+    rows = await store.recent_messages(db, -100, limit=5)
+
+    assert rows[0]["username"] == "gria_g"

@@ -90,7 +90,9 @@ def render_line(msg: dict) -> str:
     name = (
         context.BOT_ALIAS
         if msg.get("is_bot")
-        else context.pretty_name(msg.get("display_name"), msg.get("alias"))
+        else context.disambiguate(
+            context.pretty_name(msg.get("display_name"), msg.get("alias")), msg
+        )
     )
     marker = context.MEDIA_MARKERS.get(msg.get("media_kind") or "", "")
     text = (msg.get("text") or "").strip()

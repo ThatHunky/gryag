@@ -95,8 +95,25 @@ def pretty_name(display_name: str | None, alias: str | None) -> str:
     return (alias or "").strip() or "хтось"
 
 
+def disambiguate(name: str, msg: dict) -> str:
+    """Tell a person apart from the bot when they share its name.
+
+    A human in the measured chat calls themselves «гряг», the same as the bot. Rendered
+    plainly, both come out as `гряг:` and the model cannot tell its own lines from
+    theirs — nor can anything reading the transcript afterwards.
+    """
+    if name.casefold() != BOT_ALIAS.casefold():
+        return name
+    username = (msg.get("username") or "").strip()
+    return f"{name}(@{username})" if username else f"{name}(не бот)"
+
+
 def render_line(msg: dict) -> str:
-    name = BOT_ALIAS if msg.get("is_bot") else (msg.get("alias") or "хтось")
+    name = (
+        BOT_ALIAS
+        if msg.get("is_bot")
+        else disambiguate(msg.get("alias") or "хтось", msg)
+    )
     marker = MEDIA_MARKERS.get(msg.get("media_kind") or "", "")
     text = (msg.get("text") or "").strip()
     body = f"{marker} {text}".strip() if marker else text

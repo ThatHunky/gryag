@@ -101,9 +101,16 @@ def media_kind_for(message: dict) -> str | None:
     return None
 
 
-def _flags(sender: str) -> tuple[int, int]:
+BOT_USER_ID = 8082154386
+"""@gryag_bot. Identity is the id, never the display name: a human in this chat calls
+themselves «гряг» too, and matching on the name marked 445 of their messages as the
+bot's own — which drives the reply caps, the bot streak, and who is left out of the
+підарас draw."""
+
+
+def _flags(sender: str, user_id: int, bot_id: int) -> tuple[int, int]:
     """(is_bot, sender_is_bot). `is_bot` means gryag said it and drives the reply caps."""
-    if sender == context.BOT_ALIAS:
+    if user_id == bot_id:
         return 1, 1
     return 0, int(sender in context.OTHER_BOT_ALIASES)
 
@@ -117,7 +124,9 @@ def _reply_to(message: dict) -> int | None:
     return message.get("reply_to_message_id")
 
 
-async def load(db: aiosqlite.Connection, path: str) -> dict[str, int]:
+async def load(
+    db: aiosqlite.Connection, path: str, bot_id: int = BOT_USER_ID
+) -> dict[str, int]:
     """Import one export. Returns how many rows landed in each table."""
     with open(path, encoding="utf-8") as handle:
         export = json.load(handle)
@@ -160,7 +169,7 @@ async def load(db: aiosqlite.Connection, path: str) -> dict[str, int]:
             continue
         sender = str(item.get("from") or "")
         people[user_id] = sender
-        is_bot, sender_is_bot = _flags(sender)
+        is_bot, sender_is_bot = _flags(sender, user_id, bot_id)
         messages.append(
             (
                 chat_id,
@@ -213,11 +222,14 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description="Backfill from a Telegram JSON export")
     parser.add_argument("path", help="path to result.json")
     parser.add_argument("--db", default=None, help="database file (default: DB_PATH)")
+    parser.add_argument(
+        "--bot-id", type=int, default=BOT_USER_ID, help="whose messages are gryag's own"
+    )
     args = parser.parse_args()
 
     db = await store.connect(args.db or config.secrets().db_path)
     try:
-        counts = await load(db, args.path)
+        counts = await load(db, args.path, args.bot_id)
     finally:
         await db.close()
     for table, number in counts.items():

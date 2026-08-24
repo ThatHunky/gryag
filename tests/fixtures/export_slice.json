@@ -23,7 +23,9 @@
       "actor": "Vitalina",
       "actor_id": "user854449173",
       "action": "invite_members",
-      "members": ["Vitalina"],
+      "members": [
+        "Vitalina"
+      ],
       "text": "",
       "text_entities": []
     },
@@ -35,12 +37,21 @@
       "from": "Raphaël Ambrosius Costeau",
       "from_id": "user8792101665",
       "text": [
-        {"type": "bold", "text": "У мене мемна криза."},
+        {
+          "type": "bold",
+          "text": "У мене мемна криза."
+        },
         "\nМемів більше нема."
       ],
       "text_entities": [
-        {"type": "bold", "text": "У мене мемна криза."},
-        {"type": "plain", "text": "\nМемів більше нема."}
+        {
+          "type": "bold",
+          "text": "У мене мемна криза."
+        },
+        {
+          "type": "plain",
+          "text": "\nМемів більше нема."
+        }
       ]
     },
     {
@@ -56,10 +67,23 @@
       "media_type": "animation",
       "mime_type": "video/mp4",
       "text": "тримайте",
-      "text_entities": [{"type": "plain", "text": "тримайте"}],
+      "text_entities": [
+        {
+          "type": "plain",
+          "text": "тримайте"
+        }
+      ],
       "reactions": [
-        {"type": "emoji", "count": 3, "emoji": "😁"},
-        {"type": "emoji", "count": 1, "emoji": "❤"}
+        {
+          "type": "emoji",
+          "count": 3,
+          "emoji": "😁"
+        },
+        {
+          "type": "emoji",
+          "count": 1,
+          "emoji": "❤"
+        }
       ]
     },
     {
@@ -83,7 +107,12 @@
       "from_id": "user854449173",
       "reply_to_message_id": 5,
       "text": "це вже було",
-      "text_entities": [{"type": "plain", "text": "це вже було"}]
+      "text_entities": [
+        {
+          "type": "plain",
+          "text": "це вже було"
+        }
+      ]
     },
     {
       "id": 8,
@@ -93,7 +122,12 @@
       "from": "гряг",
       "from_id": "user8082154386",
       "text": "було, і буде",
-      "text_entities": [{"type": "plain", "text": "було, і буде"}]
+      "text_entities": [
+        {
+          "type": "plain",
+          "text": "було, і буде"
+        }
+      ]
     },
     {
       "id": 9,
@@ -103,7 +137,12 @@
       "from": "тестовий чат",
       "from_id": "channel4291515714",
       "text": "допис каналу",
-      "text_entities": [{"type": "plain", "text": "допис каналу"}]
+      "text_entities": [
+        {
+          "type": "plain",
+          "text": "допис каналу"
+        }
+      ]
     },
     {
       "id": 10,
@@ -113,7 +152,12 @@
       "from": "Пісюнбот",
       "from_id": "user5047828033",
       "text": "твій результат: 14 см",
-      "text_entities": [{"type": "plain", "text": "твій результат: 14 см"}]
+      "text_entities": [
+        {
+          "type": "plain",
+          "text": "твій результат: 14 см"
+        }
+      ]
     },
     {
       "id": 11,
@@ -125,7 +169,12 @@
       "reply_to_message_id": 88888,
       "reply_to_peer_id": "channel1234567890",
       "text": "переслане з іншого чату",
-      "text_entities": [{"type": "plain", "text": "переслане з іншого чату"}]
+      "text_entities": [
+        {
+          "type": "plain",
+          "text": "переслане з іншого чату"
+        }
+      ]
     },
     {
       "id": 12,
@@ -138,6 +187,21 @@
       "sticker_emoji": "🗿",
       "text": "",
       "text_entities": []
+    },
+    {
+      "id": 13,
+      "type": "message",
+      "date": "2026-08-11T20:38:00",
+      "date_unixtime": "1786469880",
+      "from": "гряг",
+      "from_id": "user6560599034",
+      "text": "я людина, а не бот",
+      "text_entities": [
+        {
+          "type": "plain",
+          "text": "я людина, а не бот"
+        }
+      ]
     }
   ]
 }

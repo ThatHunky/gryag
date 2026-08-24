@@ -229,3 +229,29 @@ def test_gifs_and_audio_get_a_marker_like_every_other_kind():
     """Without one they render as an empty line, which is what `[без тексту]` came from."""
     assert context.render_line({"media_kind": "animation", "text": "", "alias": "o"}) == "o: [гіфка]"
     assert context.render_line({"media_kind": "audio", "text": "", "alias": "o"}) == "o: [аудіо]"
+
+
+def test_a_person_who_shares_the_bots_name_is_told_apart_by_username():
+    """@gria_g is a human whose display name is «гряг». Rendered plainly, the model sees
+    two speakers with one name and cannot tell its own lines from theirs."""
+    line = context.render_line(
+        {"alias": "гряг", "display_name": "гряг", "username": "gria_g", "text": "я не бот"}
+    )
+
+    assert line == "гряг(@gria_g): я не бот"
+
+
+def test_the_bot_itself_keeps_the_bare_name():
+    line = context.render_line({"is_bot": True, "text": "я бот"})
+
+    assert line == "гряг: я бот"
+
+
+def test_a_namesake_with_no_username_is_still_told_apart():
+    line = context.render_line({"alias": "гряг", "display_name": "гряг", "text": "теж я"})
+
+    assert line == "гряг(не бот): теж я"
+
+
+def test_everybody_else_is_untouched():
+    assert context.render_line({"alias": "oleh", "username": "oleh", "text": "привіт"}) == "oleh: привіт"

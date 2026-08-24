@@ -161,8 +161,10 @@ CREATE INDEX IF NOT EXISTS idx_events_chat_ts ON events (chat_id, ts);
 
 MESSAGE_COLUMNS = """
     m.message_id, m.user_id, m.ts, m.text, m.media_kind, m.file_id,
-    m.reply_to, m.is_bot, m.sender_is_bot, u.alias, u.display_name
+    m.reply_to, m.is_bot, m.sender_is_bot, u.alias, u.display_name, u.username
 """
+"""`username` is only ever rendered when somebody's name collides with the bot's, which
+is one person in one chat — but the renderer cannot ask for it after the fact."""
 
 MIGRATIONS = (
     # `is_bot` means "gryag said this" and drives the reply caps. Messages from *other*

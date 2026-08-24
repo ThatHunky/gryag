@@ -208,3 +208,22 @@ async def test_the_report_counts_every_table(db):
     assert counts["users"] > 0
     assert counts["reactions"] == 2
     assert counts["events"] == 3
+
+
+async def test_a_person_who_calls_themselves_гряг_is_not_the_bot(db):
+    """@gria_g is a human in this chat whose display name is «гряг», the same as the
+    bot's. Matching the bot by display name marked 445 of their messages as gryag's own,
+    which drives the reply caps, the bot streak and who is in the підарас draw."""
+    await import_export.load(db, str(FIXTURE))
+
+    rows = await store.recent_messages(db, CHAT, limit=50)
+    human = next(r for r in rows if r["message_id"] == 13)
+    assert human["is_bot"] == 0
+    assert human["sender_is_bot"] == 0
+
+
+async def test_the_bot_is_recognised_by_its_id_not_its_name(db):
+    await import_export.load(db, str(FIXTURE))
+
+    rows = await store.recent_messages(db, CHAT, limit=50)
+    assert next(r for r in rows if r["message_id"] == 8)["is_bot"] == 1

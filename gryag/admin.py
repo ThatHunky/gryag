@@ -69,8 +69,25 @@ async def _rerun_and_report(on_digest, db, chat) -> None:
     cleanup.sweep_message(await chat.send_message("самарі перераховане"))
 
 
+async def _lore_and_report(on_lore, db, chat) -> None:
+    """Rewrite one chat's lore and say how it went.
+
+    Spawned rather than awaited inside the callback: a rewrite takes tens of seconds, and
+    a callback held open that long is redelivered by Telegram.
+    """
+    try:
+        wrote = await on_lore(db, chat.id)
+    except Exception:
+        log.exception("rewriting the lore for %s failed", chat.id)
+        cleanup.sweep_message(await chat.send_message("лор не вийшов, дивись логи"))
+        return
+    cleanup.sweep_message(
+        await chat.send_message("лор переписаний" if wrote else "лор не переписався, дивись логи")
+    )
+
+
 def build_router(
-    admin_ids: tuple[int, ...], on_reload=None, on_digest=None, persona=None
+    admin_ids: tuple[int, ...], on_reload=None, on_digest=None, on_lore=None, persona=None
 ) -> Router:
     router = Router(name="admin")
     router.message.filter(F.from_user.id.in_(admin_ids))
@@ -223,6 +240,14 @@ def build_router(
         # concurrent digest on the same connection.
         chat = query.message.chat
         _spawn(_rerun_and_report(on_digest, db, chat))
+
+    @router.callback_query(F.data == "lore")
+    async def rewrite_lore(query: CallbackQuery, db) -> None:
+        if on_lore is None:
+            await query.answer("недоступно")
+            return
+        await query.answer("переписую, це надовго")
+        _spawn(_lore_and_report(on_lore, db, query.message.chat))
 
     @router.message(Command("nb"))
     async def toggle_whitelist(message: Message, db) -> None:

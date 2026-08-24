@@ -168,6 +168,14 @@ async def screen_text(db: aiosqlite.Connection, chat_id: int, screen: menu.Scree
         return f"{header}\n/pidrahuika працює завжди; це — тільки ранковий пост"
     if screen.key == "voice":
         return f"{header}\nперсона: {_persona_size()} символів"
+    if screen.key == "lore":
+        latest = await store.latest_lore(db, chat_id)
+        if latest is None:
+            return f"{header}\nще не написаний"
+        return (
+            f"{header}\nверсія {latest['version']} від {latest['created_at'][:10]}, "
+            f"{len(latest['text'])} символів\n/lore кидає його в чат"
+        )
     return header
 
 
@@ -182,6 +190,9 @@ _ACTIONS: dict[str, list[list[InlineKeyboardButton]]] = {
     ]],
     "board": [[
         InlineKeyboardButton(text="📊 показати", callback_data="board:now"),
+    ]],
+    "lore": [[
+        InlineKeyboardButton(text="↻ переписати", callback_data="lore"),
     ]],
     "spend": [[
         InlineKeyboardButton(text="доба", callback_data="spend:day"),

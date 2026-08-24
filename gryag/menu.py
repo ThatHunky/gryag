@@ -137,6 +137,35 @@ SECTIONS: dict[str, tuple[str, tuple[Setting, ...]]] = {
             ),
         ),
     ),
+    "lore": (
+        "Лор",
+        (
+            Setting(
+                "lore_enabled",
+                "Пише лор",
+                (Choice("так", "1"), Choice("ні", "0")),
+            ),
+            Setting(
+                "lore_model",
+                "Модель",
+                (
+                    # Pinned, not `gemini-flash-latest`: that alias is repointed with no
+                    # notice, and a document whose voice quietly changes is the case
+                    # nobody catches until it has happened three times.
+                    Choice("3.7 flash", "gemini-3.7-flash"),
+                    Choice("flash-latest", "gemini-flash-latest"),
+                    Choice("2.5 lite", "gemini-2.5-flash-lite"),
+                ),
+            ),
+            Setting("lore_interval_days", "Переписує раз на", _numbers(1, 2, 7, suffix=" дн.")),
+            Setting(
+                "lore_thinking",
+                "Думання",
+                (Choice("авто", "-1"), Choice("вимкнене", "0")),
+            ),
+            Setting("lore_max_chars", "Обсяг", _numbers(10000, 20000, 40000, suffix=" зн.")),
+        ),
+    ),
 }
 
 
@@ -157,6 +186,7 @@ SCREENS: tuple[Screen, ...] = (
     Screen("people", "👥", "Люди"),
     Screen("game", "🎲", "Гра", ("game",)),
     Screen("board", "📊", "Табло", ("board",)),
+    Screen("lore", "📜", "Лор", ("lore",)),
 )
 """Six buttons, two rows of three. Muting and the chat toggle stay on the root screen:
 silencing the bot is the most urgent thing the menu does, and a screen deeper is a screen

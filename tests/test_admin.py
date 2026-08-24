@@ -168,3 +168,57 @@ async def test_spend_can_be_narrowed_to_the_last_day(db):
     assert "0.0011" in day
     # "all" groups both calls into one row, so the old spend shows up in the total.
     assert "10.0010" in everything
+
+
+async def test_rewriting_the_lore_reports_back_to_the_chat(db):
+    ran: list[int] = []
+    said: list[str] = []
+
+    async def on_lore(conn, chat_id: int) -> bool:
+        ran.append(chat_id)
+        return True
+
+    class FakeChat:
+        id = -100
+
+        async def send_message(self, text: str) -> None:
+            said.append(text)
+
+    await admin._lore_and_report(on_lore, db, FakeChat())
+
+    assert ran == [-100]
+    assert "лор" in said[0].lower()
+
+
+async def test_a_lore_run_that_wrote_nothing_says_so(db):
+    said: list[str] = []
+
+    async def on_lore(conn, chat_id: int) -> bool:
+        return False
+
+    class FakeChat:
+        id = -100
+
+        async def send_message(self, text: str) -> None:
+            said.append(text)
+
+    await admin._lore_and_report(on_lore, db, FakeChat())
+
+    assert "не" in said[0]
+
+
+async def test_a_lore_run_that_raised_does_not_vanish(db):
+    said: list[str] = []
+
+    async def on_lore(conn, chat_id: int) -> bool:
+        raise RuntimeError("quota")
+
+    class FakeChat:
+        id = -100
+
+        async def send_message(self, text: str) -> None:
+            said.append(text)
+
+    await admin._lore_and_report(on_lore, db, FakeChat())
+
+    assert said

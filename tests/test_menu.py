@@ -76,3 +76,23 @@ def test_looking_up_a_screen_by_key():
 def test_looking_up_a_screen_that_does_not_exist_falls_back_to_the_first():
     """Callback data outlives deploys: a button from yesterday's layout must not raise."""
     assert menu.screen("nope") is menu.SCREENS[0]
+
+
+def test_the_lore_section_exists_and_names_every_knob_the_spec_lists():
+    keys = [s.key for s in menu.SECTIONS["lore"][1]]
+
+    assert keys == [
+        "lore_enabled", "lore_model", "lore_interval_days",
+        "lore_thinking", "lore_max_chars",
+    ]
+
+
+def test_every_model_the_lore_offers_has_a_price():
+    from gryag import llm
+
+    setting = next(s for s in menu.SECTIONS["lore"][1] if s.key == "lore_model")
+    assert all(choice.value in llm.PRICES for choice in setting.choices)
+
+
+def test_the_lore_has_a_screen_of_its_own():
+    assert menu.screen("lore").title == "Лор"

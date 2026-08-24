@@ -86,6 +86,11 @@ async def build(secrets: config.Secrets) -> "Runtime":
         if await digest.summarise_day(conn, client, chat_id, day, model):
             await digest.rebuild_week(conn, client, chat_id, model)
 
+    async def rerun_lore(conn, chat_id: int) -> bool:
+        """One chat, the one whose button was tapped, and the interval is bypassed: the
+        admin has already decided to pay for it."""
+        return await lore.generate(conn, client, chat_id, force=True)
+
     bot = Bot(secrets.bot_token, default=DefaultBotProperties(parse_mode=None))
     me = await bot.get_me()
     logging.info("running as @%s (id %s)", me.username, me.id)
@@ -105,6 +110,7 @@ async def build(secrets: config.Secrets) -> "Runtime":
             secrets.admin_ids,
             on_reload=reload_persona,
             on_digest=rerun_digest,
+            on_lore=rerun_lore,
             persona=persona,
         )
     )

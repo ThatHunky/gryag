@@ -2,7 +2,7 @@ import json
 import types as pytypes
 from datetime import datetime, timedelta, timezone
 
-from gryag import context, lore, store
+from gryag import admin, config, context, lore, store
 
 CHAT = -100
 START = "2026-08-18T00:00:00+00:00"
@@ -332,3 +332,211 @@ def test_a_beat_without_a_quote_renders_without_an_empty_one():
     rendered = lore.render_beats([{"who": ["oleh"], "what": "щось", "kind": "event"}])
 
     assert "«»" not in rendered
+
+
+async def enabled(db):
+    await admin.enable_chat(db, CHAT, "матсурі")
+
+
+async def test_a_first_run_writes_version_one(db):
+    await enabled(db)
+    await seed_window(db)
+    client = FakeClient(beats_payload("посварилися"), "# Лор\n\nТут щось сталося.")
+
+    assert await lore.generate(db, client, CHAT, now=NOW) is True
+
+    latest = await store.latest_lore(db, CHAT)
+    assert latest["version"] == 1
+    assert latest["text"] == "# Лор\n\nТут щось сталося."
+    assert latest["window_end"] == NOW.isoformat(timespec="seconds")
+
+
+async def test_the_rewrite_is_shown_the_current_document_the_beats_and_the_figures(db):
+    await enabled(db)
+    await seed_window(db)
+    await store.replace_facts(db, CHAT, "2026-08-18", [(1, "з Тернополя")])
+    await store.save_lore(
+        db, chat_id=CHAT, text="СТАРИЙ ЛОР", model="m", tokens=2,
+        window_start=BEFORE, window_end=START, created_at="2026-08-18T05:00:00+00:00",
+    )
+    client = FakeClient(beats_payload("посварилися через дистрибутиви"), "# новий")
+
+    await lore.generate(db, client, CHAT, now=NOW, force=True)
+
+    sent = client.calls[-1]["contents"]
+    assert "СТАРИЙ ЛОР" in sent
+    assert "посварилися через дистрибутиви" in sent
+    assert "Повідомлень за період" in sent
+    assert "з Тернополя" in sent
+    assert "матсурі" in sent
+
+
+async def test_the_document_is_clamped_to_the_configured_size(db):
+    await enabled(db)
+    await seed_window(db)
+    await config.set(db, "lore_max_chars", "100", chat_id=CHAT)
+    client = FakeClient(beats_payload("щось"), "я" * 5000)
+
+    await lore.generate(db, client, CHAT, now=NOW)
+
+    assert len((await store.latest_lore(db, CHAT))["text"]) <= 100
+
+
+async def test_a_refused_rewrite_leaves_the_previous_version_standing(db):
+    await enabled(db)
+    await seed_window(db)
+    await store.save_lore(
+        db, chat_id=CHAT, text="ЦЕ МАЄ ВИЖИТИ", model="m", tokens=2,
+        window_start=BEFORE, window_end=START, created_at="2026-08-18T05:00:00+00:00",
+    )
+    client = FakeClient(beats_payload("щось"), None)
+
+    assert await lore.generate(db, client, CHAT, now=NOW, force=True) is False
+
+    latest = await store.latest_lore(db, CHAT)
+    assert latest["version"] == 1
+    assert latest["text"] == "ЦЕ МАЄ ВИЖИТИ"
+
+
+async def test_an_empty_rewrite_is_a_failure_not_an_empty_document(db):
+    await enabled(db)
+    await seed_window(db)
+    client = FakeClient(beats_payload("щось"), "")
+
+    assert await lore.generate(db, client, CHAT, now=NOW) is False
+    assert await store.latest_lore(db, CHAT) is None
+
+
+async def test_a_harvest_that_refuses_entirely_never_reaches_the_rewrite(db):
+    await enabled(db)
+    await seed_window(db)
+    client = FakeClient(None)
+
+    assert await lore.generate(db, client, CHAT, now=NOW) is False
+    assert len(client.calls) == 1
+    assert await store.latest_lore(db, CHAT) is None
+
+
+async def test_a_chat_with_nothing_in_the_window_costs_nothing(db):
+    await enabled(db)
+    client = FakeClient(beats_payload("щось"), "# новий")
+
+    assert await lore.generate(db, client, CHAT, now=NOW) is False
+    assert client.calls == []
+
+
+async def test_the_interval_is_respected_without_spending_anything(db):
+    await enabled(db)
+    await seed_window(db)
+    await store.save_lore(
+        db, chat_id=CHAT, text="учорашній", model="m", tokens=2,
+        window_start=BEFORE, window_end=START,
+        created_at=(NOW - timedelta(hours=6)).isoformat(timespec="seconds"),
+    )
+    client = FakeClient(beats_payload("щось"), "# новий")
+
+    assert await lore.generate(db, client, CHAT, now=NOW) is False
+    assert client.calls == []
+
+
+async def test_the_interval_having_passed_lets_a_run_through(db):
+    await enabled(db)
+    await seed_window(db)
+    await store.save_lore(
+        db, chat_id=CHAT, text="позавчорашній", model="m", tokens=2,
+        window_start=BEFORE, window_end=START,
+        created_at=(NOW - timedelta(days=3)).isoformat(timespec="seconds"),
+    )
+    client = FakeClient(beats_payload("щось"), "# новий")
+
+    assert await lore.generate(db, client, CHAT, now=NOW) is True
+
+
+async def test_the_button_bypasses_the_interval(db):
+    """The timer paces the cost; the admin has already decided to pay it."""
+    await enabled(db)
+    await seed_window(db)
+    await store.save_lore(
+        db, chat_id=CHAT, text="щойно", model="m", tokens=2,
+        window_start=BEFORE, window_end=START,
+        created_at=(NOW - timedelta(hours=1)).isoformat(timespec="seconds"),
+    )
+    client = FakeClient(beats_payload("щось"), "# новий")
+
+    assert await lore.generate(db, client, CHAT, now=NOW, force=True) is True
+
+
+async def test_a_chat_with_the_lore_switched_off_is_skipped(db):
+    await enabled(db)
+    await seed_window(db)
+    await config.set(db, "lore_enabled", "0", chat_id=CHAT)
+    client = FakeClient(beats_payload("щось"), "# новий")
+
+    assert await lore.generate(db, client, CHAT, now=NOW) is False
+    assert client.calls == []
+
+
+async def test_switching_it_off_does_not_block_the_button(db):
+    await enabled(db)
+    await seed_window(db)
+    await config.set(db, "lore_enabled", "0", chat_id=CHAT)
+    client = FakeClient(beats_payload("щось"), "# новий")
+
+    assert await lore.generate(db, client, CHAT, now=NOW, force=True) is True
+
+
+async def test_thinking_comes_from_the_menu_knob(db):
+    await enabled(db)
+    await seed_window(db)
+    await config.set(db, "lore_thinking", "0", chat_id=CHAT)
+    client = FakeClient(beats_payload("щось"), "# новий")
+
+    await lore.generate(db, client, CHAT, now=NOW)
+
+    assert all(c["config"].thinking_config.thinking_budget == 0 for c in client.calls)
+
+
+async def test_both_stages_are_billed_to_the_lore(db):
+    await enabled(db)
+    await seed_window(db)
+    client = FakeClient(beats_payload("щось"), "# новий")
+
+    await lore.generate(db, client, CHAT, now=NOW)
+
+    async with db.execute("SELECT COUNT(*), SUM(cost_usd) FROM usage WHERE purpose = 'lore'") as cur:
+        calls, cost = await cur.fetchone()
+    assert calls == 2
+    assert cost > 0
+
+
+async def test_a_run_covers_every_enabled_chat_and_nothing_else(db):
+    await enabled(db)
+    await seed_window(db)
+    await db.execute("INSERT INTO chats (chat_id, enabled) VALUES (-200, 0)")
+    await db.commit()
+    client = FakeClient(beats_payload("щось"), "# новий")
+
+    await lore.run(db, client, now=NOW)
+
+    assert await store.latest_lore(db, CHAT) is not None
+    assert await store.latest_lore(db, -200) is None
+
+
+async def test_a_run_that_fails_in_one_chat_still_reaches_the_next(db):
+    """One chat's refusal is not a reason for the other to go a week without a rewrite."""
+    await enabled(db)
+    await seed_window(db)
+    await admin.enable_chat(db, -200, "інший")
+    await store.save_message(
+        db, chat_id=-200, message_id=1, user_id=3, ts="2026-08-19T10:00:00+00:00",
+        text="привіт", media_kind=None, file_id=None, reply_to=None, is_bot=False,
+    )
+    # `chats.chat_id` is an INTEGER PRIMARY KEY, so it is the rowid and -200 is visited
+    # first. The refusal is queued for whoever goes first, and the point of the test is
+    # that whoever goes second is still served.
+    client = FakeClient(None, beats_payload("щось"), "# новий")
+
+    await lore.run(db, client, now=NOW)
+
+    assert (await store.latest_lore(db, -200)) is None
+    assert (await store.latest_lore(db, CHAT)) is not None

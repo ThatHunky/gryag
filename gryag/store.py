@@ -938,6 +938,12 @@ async def bulk_insert_events(db: aiosqlite.Connection, rows: list[tuple]) -> int
     return db.total_changes - before
 
 
+async def chat_title(db: aiosqlite.Connection, chat_id: int) -> str:
+    async with db.execute("SELECT title FROM chats WHERE chat_id = ?", (chat_id,)) as cur:
+        row = await cur.fetchone()
+    return row[0] if row and row[0] else str(chat_id)
+
+
 async def enabled_chats(db: aiosqlite.Connection) -> list[int]:
     async with db.execute("SELECT chat_id FROM chats WHERE enabled = 1") as cur:
         return [r[0] for r in await cur.fetchall()]

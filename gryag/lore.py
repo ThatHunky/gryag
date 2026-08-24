@@ -14,6 +14,7 @@ cast list, so the model does not rediscover who everybody is on every run.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -21,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 import aiosqlite
 from google.genai import types
 
-from gryag import digest, llm, store
+from gryag import config, context, digest, llm, store
 from gryag.handlers import LOCAL_TZ
 
 log = logging.getLogger(__name__)
@@ -312,3 +313,202 @@ def render_beats(beats: list[dict]) -> str:
         tail = f" «{quote}»" if quote else ""
         lines.append(f"- [{beat.get('kind', 'event')}] {who}: {beat.get('what', '')}{tail}")
     return "\n".join(lines)
+
+
+REWRITE_PROMPT = """Ти ведеш одну живу сторінку — лор групового чату «{title}».
+Вона не дописується знизу, вона щоразу переписується цілком.
+
+Ось поточна версія:
+---
+{current}
+---
+
+Ось що сталося відтоді:
+{beats}
+
+Ось цифри за той самий період. Вони пораховані точно — не перераховуй їх, не округлюй і
+не вигадуй інших:
+{stats}
+
+Хто є хто в цьому чаті:
+{cast}
+
+Перепиши сторінку. Правила:
+
+* Українською, у тому ж розмовному регістрі, що й сам чат, — це має бути смішно тому, хто
+  там сидить, а не схоже на протокол зборів.
+* Markdown: заголовки, списки, цитати. Без обгортки та без коду.
+* Це одна сторінка, а не хроніка по датах. Можеш переписати рядок, злити два в один,
+  викинути жарт, який помер. Але викидати — тільки коли є за що: місце звільняється
+  стисканням, а не обрізанням.
+* Нове не важливіше за старе тільки тому, що воно нове.
+* Цитати наводь дослівно, як їх подано вище.
+* Не звертайся до читача, не пояснюй, що це за документ, і не підписуйся.
+* Максимум {max_chars} символів."""
+
+
+async def rewrite(
+    db: aiosqlite.Connection,
+    client,
+    chat_id: int,
+    *,
+    current: str,
+    beats: list[dict],
+    stats: str,
+    cast: str,
+    title: str,
+    model: str,
+    thinking: int,
+    max_chars: int,
+) -> str | None:
+    """The whole document, rewritten, or None if it did not come back usable.
+
+    The voice lives in the prompt above rather than in `eval/persona-v3.txt`: that persona
+    is tuned for one-line chat replies and fights this format.
+    """
+    result = await _call(
+        client,
+        model,
+        REWRITE_PROMPT.format(
+            title=title,
+            current=current or "(сторінки ще нема — напиши першу)",
+            beats=render_beats(beats) or "(нічого нового)",
+            stats=stats,
+            cast=cast or "(нічого не відомо)",
+            max_chars=max_chars,
+        ),
+        schema=None,
+        thinking=thinking,
+        # Thinking bills against the same allowance, so the budget has to cover both the
+        # document and however long the model decides to think about it.
+        max_tokens=int(max_chars / context.CHARS_PER_TOKEN) + HARVEST_MAX_TOKENS,
+    )
+    if result is None:
+        return None
+    text, usage = result
+    await _record(db, chat_id, model, usage)
+    return text
+
+
+async def generate(
+    db: aiosqlite.Connection,
+    client,
+    chat_id: int,
+    *,
+    now: datetime | None = None,
+    force: bool = False,
+) -> bool:
+    """Rewrite one chat's lore. Returns whether a new version was stored.
+
+    Every early exit above the first model call is free, which is the point: the timer
+    fires daily and most days have nothing to do.
+    """
+    now = now or datetime.now(timezone.utc)
+    if not force and await config.get(db, "lore_enabled", chat_id) != "1":
+        return False
+
+    previous = await store.latest_lore(db, chat_id)
+    interval = await config.get_int(db, "lore_interval_days", chat_id)
+    if not force and previous and previous["created_at"]:
+        age = now - datetime.fromisoformat(previous["created_at"])
+        if age < timedelta(days=interval):
+            log.info("lore for %s is %s old, nothing to do", chat_id, age)
+            return False
+
+    window = pick_window(previous, await store.oldest_message_ts(db, chat_id), now)
+    if window is None:
+        log.info("nothing stored for %s to write a lore from", chat_id)
+        return False
+    start, end = window
+
+    messages = await store.messages_between(db, chat_id, start, end)
+    if not messages:
+        log.info("nothing said in %s between %s and %s", chat_id, start, end)
+        return False
+
+    model = await config.get(db, "lore_model", chat_id)
+    thinking = await config.get_int(db, "lore_thinking", chat_id)
+    beats = await harvest(db, client, chat_id, messages, model, thinking)
+    if beats is None:
+        return False
+
+    span = datetime.fromisoformat(end) - datetime.fromisoformat(start)
+    stats = render_stats(
+        await store.lore_stats(
+            db,
+            chat_id,
+            start,
+            end,
+            (datetime.fromisoformat(start) - span).isoformat(timespec="seconds"),
+        )
+    )
+    present = await store.active_user_ids(db, chat_id, start)
+    cast = "; ".join(
+        f"{who} — {fact}" for who, fact in await store.facts_for_users(db, chat_id, present)
+    )
+
+    max_chars = await config.get_int(db, "lore_max_chars", chat_id)
+    text = await rewrite(
+        db,
+        client,
+        chat_id,
+        current=(previous or {}).get("text", ""),
+        beats=beats,
+        stats=stats,
+        cast=cast,
+        title=await store.chat_title(db, chat_id),
+        model=model,
+        thinking=thinking,
+        max_chars=max_chars,
+    )
+    if not text:
+        log.error("the rewrite failed for %s; the previous version stands", chat_id)
+        return False
+
+    # `clamp` takes a token budget; the knob is in characters, and the ratio is the same
+    # measured 2.5 the rest of the project uses.
+    text = context.clamp(text, int(max_chars / context.CHARS_PER_TOKEN))
+    version = await store.save_lore(
+        db,
+        chat_id=chat_id,
+        text=text,
+        model=model,
+        tokens=context.estimate_tokens(text),
+        window_start=start,
+        window_end=end,
+        created_at=now.isoformat(timespec="seconds"),
+    )
+    log.info(
+        "wrote lore version %s for %s: %s characters from %s messages",
+        version,
+        chat_id,
+        len(text),
+        len(messages),
+    )
+    return True
+
+
+async def run(db: aiosqlite.Connection, client, now: datetime | None = None) -> None:
+    for chat_id in await store.enabled_chats(db):
+        try:
+            await generate(db, client, chat_id, now=now)
+        except Exception:
+            # One chat's failure is not a reason for the next to go a week without a
+            # rewrite. The timer is the only thing that ever calls this.
+            log.exception("writing the lore for %s failed", chat_id)
+
+
+async def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    secrets = config.secrets()
+    db = await store.connect(secrets.db_path)
+    try:
+        await run(db, llm.build_client(secrets.gemini_api_key))
+    finally:
+        await db.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

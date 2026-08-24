@@ -90,6 +90,21 @@ DEFAULTS: dict[str, str] = {
     # Підрахуйка: the USF public killboard. Off until a chat asks for it.
     "pidrahuika_enabled": "0",
     "pidrahuika_hour": "9",
+    # Лор: one living page per chat, rewritten from the raw transcript on a timer.
+    "lore_enabled": "1",
+    # The pinned model, not `gemini-flash-latest`. That alias is repointed with no notice
+    # and no API signal, and a document whose voice is quietly rewritten by a swapped
+    # model is exactly the case nobody catches until it has happened three times.
+    "lore_model": "gemini-3.7-flash",
+    "lore_interval_days": "2",
+    # Thinking is the single largest cost lever in this feature: it takes a run from about
+    # $0.10 to an estimated $0.25-0.35. A knob rather than a constant, so a run that
+    # thinks for a dollar can be turned down without a deploy.
+    "lore_thinking": "-1",
+    "lore_max_chars": "20000",
+    # /lore is a database read and an upload, so it cannot be made expensive by being
+    # spammed — but it can be made annoying. Seconds.
+    "lore_cooldown": "600",
 }
 
 

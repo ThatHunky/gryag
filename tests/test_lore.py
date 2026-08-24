@@ -1,4 +1,8 @@
-from gryag import lore, store
+import json
+import types as pytypes
+from datetime import datetime, timedelta, timezone
+
+from gryag import context, lore, store
 
 CHAT = -100
 START = "2026-08-18T00:00:00+00:00"
@@ -155,3 +159,176 @@ async def test_the_rendered_block_survives_an_empty_window(db):
 
     assert isinstance(text, str)
     assert "0" in text
+
+
+
+class FakeUsage:
+    prompt_token_count = 60000
+    cached_content_token_count = None
+    candidates_token_count = 900
+    thoughts_token_count = 4000
+
+
+class FakeResponse:
+    def __init__(self, text, blocked=False):
+        self.text = text
+        self.usage_metadata = FakeUsage()
+        self.candidates = None if blocked else [object()]
+        self.prompt_feedback = (
+            pytypes.SimpleNamespace(block_reason="PROHIBITED_CONTENT") if blocked else None
+        )
+
+
+class FakeClient:
+    """Replies in order; a `None` entry stands for a chunk Google refused outright."""
+
+    def __init__(self, *responses):
+        self._responses = list(responses)
+        self.calls: list[dict] = []
+        self.aio = pytypes.SimpleNamespace(models=self)
+
+    async def generate_content(self, *, model, contents, config):
+        self.calls.append({"model": model, "contents": contents, "config": config})
+        nxt = self._responses.pop(0) if self._responses else ""
+        if nxt is None:
+            return FakeResponse("", blocked=True)
+        return FakeResponse(nxt)
+
+
+def beats_payload(*whats):
+    return json.dumps(
+        {"beats": [{"who": ["oleh"], "what": w, "quote": "цитата", "kind": "joke"} for w in whats]}
+    )
+
+
+NOW = datetime(2026, 8, 20, 5, 0, tzinfo=timezone.utc)
+
+
+def test_the_first_window_starts_at_the_oldest_message():
+    window = lore.pick_window(None, "2026-08-19T10:00:00+00:00", NOW)
+
+    assert window == ("2026-08-19T10:00:00+00:00", "2026-08-20T05:00:00+00:00")
+
+
+def test_a_later_window_starts_where_the_last_one_stopped():
+    previous = {"window_end": "2026-08-19T05:00:00+00:00"}
+
+    window = lore.pick_window(previous, "2026-08-11T00:00:00+00:00", NOW)
+
+    assert window[0] == "2026-08-19T05:00:00+00:00"
+
+
+def test_a_missed_run_is_capped_at_four_days():
+    """A fortnight of this chat is a 500,000-token harvest, and four days is already more
+    than one rewrite can absorb."""
+    previous = {"window_end": "2026-08-01T05:00:00+00:00"}
+
+    start, end = lore.pick_window(previous, "2026-07-01T00:00:00+00:00", NOW)
+
+    assert start == (NOW - timedelta(days=lore.MAX_WINDOW_DAYS)).isoformat(timespec="seconds")
+    assert end == NOW.isoformat(timespec="seconds")
+
+
+def test_a_chat_with_nothing_stored_has_no_window():
+    assert lore.pick_window(None, None, NOW) is None
+
+
+def test_a_window_that_ends_before_it_starts_is_no_window():
+    """A previous version written after a clock skew, or a re-run inside the same second."""
+    previous = {"window_end": "2026-08-21T00:00:00+00:00"}
+
+    assert lore.pick_window(previous, "2026-08-11T00:00:00+00:00", NOW) is None
+
+
+async def test_the_harvest_returns_the_beats_it_was_given(db):
+    await seed_window(db)
+    messages = await store.messages_between(db, CHAT, START, END)
+    client = FakeClient(beats_payload("посварилися через дистрибутиви"))
+
+    beats = await lore.harvest(db, client, CHAT, messages, "m", thinking=-1)
+
+    assert [b["what"] for b in beats] == ["посварилися через дистрибутиви"]
+
+
+async def test_the_harvest_thinks_when_it_is_told_to(db):
+    await seed_window(db)
+    messages = await store.messages_between(db, CHAT, START, END)
+    client = FakeClient(beats_payload("щось"))
+
+    await lore.harvest(db, client, CHAT, messages, "m", thinking=-1)
+
+    assert client.calls[0]["config"].thinking_config.thinking_budget == -1
+
+
+async def test_no_more_than_eight_beats_survive_one_chunk(db):
+    await seed_window(db)
+    messages = await store.messages_between(db, CHAT, START, END)
+    client = FakeClient(beats_payload(*[f"подія {n}" for n in range(20)]))
+
+    beats = await lore.harvest(db, client, CHAT, messages, "m", thinking=-1)
+
+    assert len(beats) == lore.MAX_BEATS
+
+
+async def test_one_refused_chunk_costs_only_that_chunk(db):
+    await store.upsert_user(db, chat_id=CHAT, user_id=1, display_name="Олег", alias="oleh")
+    filler = int(lore.CHUNK_TOKENS * context.CHARS_PER_TOKEN / 6) + 50
+    for n, text in enumerate(("перший " * filler, "другий " * filler, "третій " * filler)):
+        await store.save_message(
+            db, chat_id=CHAT, message_id=100 + n, user_id=1,
+            ts=f"2026-08-18T0{n}:00:00+00:00", text=text, media_kind=None,
+            file_id=None, reply_to=None, is_bot=False,
+        )
+    messages = await store.messages_between(db, CHAT, START, END)
+    client = FakeClient(beats_payload("перша"), None, beats_payload("третя"))
+
+    beats = await lore.harvest(db, client, CHAT, messages, "m", thinking=-1)
+
+    assert [b["what"] for b in beats] == ["перша", "третя"]
+
+
+async def test_a_harvest_where_every_chunk_refuses_is_a_failure_not_an_empty_list(db):
+    await seed_window(db)
+    messages = await store.messages_between(db, CHAT, START, END)
+
+    assert await lore.harvest(db, FakeClient(None), CHAT, messages, "m", thinking=-1) is None
+
+
+async def test_unparseable_output_does_not_raise(db):
+    await seed_window(db)
+    messages = await store.messages_between(db, CHAT, START, END)
+
+    assert await lore.harvest(db, FakeClient("not json"), CHAT, messages, "m", thinking=-1) is None
+
+
+async def test_the_harvest_records_what_it_spent_under_its_own_purpose(db):
+    await seed_window(db)
+    messages = await store.messages_between(db, CHAT, START, END)
+
+    await lore.harvest(
+        db, FakeClient(beats_payload("щось")), CHAT, messages, "gemini-3.7-flash", thinking=-1
+    )
+
+    async with db.execute("SELECT purpose, model, thought_tok, cost_usd FROM usage") as cur:
+        rows = [tuple(r) for r in await cur.fetchall()]
+    assert rows[0][0] == "lore"
+    assert rows[0][1] == "gemini-3.7-flash"
+    assert rows[0][2] == 4000
+    assert rows[0][3] > 0
+
+
+def test_beats_render_with_their_quotes_intact():
+    beats = [{"who": ["oleh", "maria"], "what": "посварилися", "quote": "ти дурень", "kind": "drama"}]
+
+    rendered = lore.render_beats(beats)
+
+    assert "oleh, maria" in rendered
+    assert "посварилися" in rendered
+    assert "ти дурень" in rendered
+    assert "drama" in rendered
+
+
+def test_a_beat_without_a_quote_renders_without_an_empty_one():
+    rendered = lore.render_beats([{"who": ["oleh"], "what": "щось", "kind": "event"}])
+
+    assert "«»" not in rendered

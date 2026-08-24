@@ -55,3 +55,16 @@ async def test_reply_caps_are_high_enough_for_a_busy_chat(db):
     evening of people trying it out. The valve is for runaway loops, not for rationing."""
     assert await config.get_int(db, "hourly_reply_cap") >= 300
     assert await config.get_int(db, "daily_reply_cap") >= 1500
+
+
+def test_every_lore_key_has_a_default():
+    for key in (
+        "lore_enabled", "lore_model", "lore_interval_days",
+        "lore_thinking", "lore_max_chars", "lore_cooldown",
+    ):
+        assert key in config.DEFAULTS
+
+
+def test_the_lore_runs_on_a_pinned_model_not_on_an_alias():
+    """`gemini-flash-latest` is repointed with no notice and no API signal."""
+    assert config.DEFAULTS["lore_model"] == "gemini-3.7-flash"

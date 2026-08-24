@@ -14,12 +14,32 @@ cast list, so the model does not rediscover who everybody is on every run.
 
 from __future__ import annotations
 
+import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+import aiosqlite
+from google.genai import types
+
+from gryag import digest, llm, store
 from gryag.handlers import LOCAL_TZ
 
 log = logging.getLogger(__name__)
+
+MAX_WINDOW_DAYS = 4
+"""A missed run must not silently produce a 130,000-token harvest, and four days of this
+chat is already more than the document can absorb in one rewrite."""
+
+CHUNK_TOKENS = 2000
+"""Blast-radius control, not a token economy. A stretch of this chat's real transcript has
+already come back `PROHIBITED_CONTENT` with no candidates at all, and that filter is not
+configurable — BLOCK_NONE on the four harm categories does not touch it."""
+
+MAX_BEATS = 8
+
+HARVEST_MAX_TOKENS = 8000
+"""Thinking tokens count against max_output_tokens on these models, so a budget sized for
+the JSON alone comes back empty as soon as thinking is on."""
 
 ACTION_LABELS = {
     "join": "прийшли",
@@ -114,4 +134,181 @@ def render_stats(stats: dict) -> str:
     if stats["edits"]:
         lines.append(f"Найбільше редагувань: {stats['edits'][0]} ({stats['edits'][1]})")
 
+    return "\n".join(lines)
+
+
+BEAT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "beats": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "who": {"type": "array", "items": {"type": "string"}},
+                    "what": {"type": "string"},
+                    "quote": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["joke", "drama", "event", "gag"]},
+                },
+                "required": ["who", "what", "kind"],
+            },
+        }
+    },
+    "required": ["beats"],
+}
+
+HARVEST_PROMPT = """Нижче — шматок переписки групового чату, у форматі `нік: текст`.
+
+Витягни те, що варто пам'ятати як історію цього чату: жарти, які пішли в обіг, сварки,
+події, дурні витівки. Максимум {max_beats} записів, і краще менше — беззмістовний обмін
+репліками не подія.
+
+У кожному записі:
+* `who` — ніки учасників, яких це стосується, точно як у переписці;
+* `what` — що сталося, одним-двома реченнями українською;
+* `quote` — дослівна фраза з переписки, без якої це не смішно. Не вигадуй і не
+  переписуй. Якщо такої фрази нема — не заповнюй поле;
+* `kind` — `joke`, `drama`, `event` або `gag`.
+
+Переписка:
+{transcript}"""
+
+
+async def _call(
+    client,
+    model: str,
+    prompt: str,
+    *,
+    schema: dict | None,
+    thinking: int,
+    max_tokens: int,
+) -> tuple[str, object] | None:
+    """One model call, or None for anything that did not come back usable.
+
+    Shaped like `digest._generate_json`, with thinking and the output budget as
+    parameters: the digest runs with thinking off and the lore does not.
+    """
+    cfg = types.GenerateContentConfig(
+        max_output_tokens=max_tokens,
+        thinking_config=types.ThinkingConfig(thinking_budget=thinking),
+        response_mime_type="application/json" if schema else None,
+        response_schema=schema,
+        safety_settings=[
+            types.SafetySetting(category=c, threshold="BLOCK_NONE")
+            for c in llm.HARM_CATEGORIES
+        ],
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+    )
+    try:
+        response = await client.aio.models.generate_content(
+            model=model, contents=prompt, config=cfg
+        )
+    except Exception:
+        log.exception("lore call failed on %s", model)
+        return None
+
+    if not response.candidates:
+        feedback = getattr(response, "prompt_feedback", None)
+        log.warning(
+            "lore chunk refused: %s", getattr(feedback, "block_reason", "no candidates")
+        )
+        return None
+
+    text = (response.text or "").strip()
+    if not text:
+        # An empty body is what a thinking budget that ate the whole output allowance
+        # looks like. Storing it would replace the document with nothing.
+        log.warning("lore returned an empty body on %s", model)
+        return None
+    return text, response.usage_metadata
+
+
+async def _record(db: aiosqlite.Connection, chat_id: int, model: str, usage) -> None:
+    counts = (
+        usage.prompt_token_count or 0,
+        usage.cached_content_token_count or 0,
+        usage.candidates_token_count or 0,
+        usage.thoughts_token_count or 0,
+    )
+    await store.record_usage(
+        db,
+        chat_id=chat_id,
+        purpose="lore",
+        model=model,
+        prompt_tok=counts[0],
+        cached_tok=counts[1],
+        visible_tok=counts[2],
+        thought_tok=counts[3],
+        latency_ms=0,
+        cost_usd=llm.cost_usd(model, *counts),
+    )
+
+
+def pick_window(
+    previous: dict | None, oldest: str | None, now: datetime
+) -> tuple[str, str] | None:
+    """(start, end) for this run, or None when there is nothing to read."""
+    end = now.isoformat(timespec="seconds")
+    start = (previous or {}).get("window_end") or oldest
+    if not start:
+        return None
+    floor = (now - timedelta(days=MAX_WINDOW_DAYS)).isoformat(timespec="seconds")
+    start = max(start, floor)
+    if start >= end:
+        return None
+    return start, end
+
+
+async def harvest(
+    db: aiosqlite.Connection,
+    client,
+    chat_id: int,
+    messages: list[dict],
+    model: str,
+    thinking: int,
+) -> list[dict] | None:
+    """Every beat worth keeping from the window, or None if the whole harvest failed."""
+    chunks = digest.chunk_transcript(messages, max_tokens=CHUNK_TOKENS)
+    beats: list[dict] = []
+    refused = 0
+    for chunk in chunks:
+        result = await _call(
+            client,
+            model,
+            HARVEST_PROMPT.format(max_beats=MAX_BEATS, transcript=chunk),
+            schema=BEAT_SCHEMA,
+            thinking=thinking,
+            max_tokens=HARVEST_MAX_TOKENS,
+        )
+        if result is None:
+            refused += 1
+            continue
+        text, usage = result
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            log.error("lore harvest returned unparseable json: %s", text[:200])
+            refused += 1
+            continue
+        # Capped here as well as asked for in the prompt: the ceiling is the design's,
+        # not the model's to negotiate.
+        beats.extend(list(payload.get("beats") or [])[:MAX_BEATS])
+        await _record(db, chat_id, model, usage)
+
+    if chunks and refused == len(chunks):
+        log.error("every one of %s chunks failed for %s", len(chunks), chat_id)
+        return None
+    if refused:
+        log.warning("%s of %s chunks refused for %s", refused, len(chunks), chat_id)
+    log.info("harvested %s beats from %s chunks for %s", len(beats), len(chunks), chat_id)
+    return beats
+
+
+def render_beats(beats: list[dict]) -> str:
+    lines: list[str] = []
+    for beat in beats:
+        who = ", ".join(str(w) for w in (beat.get("who") or [])) or "хтось"
+        quote = str(beat.get("quote") or "").strip()
+        tail = f" «{quote}»" if quote else ""
+        lines.append(f"- [{beat.get('kind', 'event')}] {who}: {beat.get('what', '')}{tail}")
     return "\n".join(lines)

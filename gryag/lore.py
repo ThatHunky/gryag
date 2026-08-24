@@ -134,8 +134,15 @@ def _events_line(events: list[dict], chat_id: int | None = None) -> str:
         if not matching:
             continue
         if action in ("join", "leave"):
+            # The payload holds the raw Telegram full_name, which is where the
+            # 63-character display names live. Cleaned like every other name on the page,
+            # or the same person appears twice under two different ones.
             people = [
-                name for e in matching for name in (e["payload"].get("members") or [e["alias"]])
+                # The actor's name is the fallback: `events_between` has already cleaned
+                # it, and somebody joining on their own is both actor and member.
+                context.pretty_name(name, e["alias"])
+                for e in matching
+                for name in (e["payload"].get("members") or [e["alias"]])
             ]
             parts.append(f"{label}: {', '.join(people)}")
         elif action in ("title", "topic"):

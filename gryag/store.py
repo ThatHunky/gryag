@@ -765,9 +765,14 @@ async def lore_stats(
             """,
             (chat_id, since, until),
         ) as cur:
-            return {
-                context.pretty_name(r[0], r[1]): int(r[2]) for r in await cur.fetchall()
-            }
+            # Summed rather than assigned: SQL groups by user and the key is a name, so
+            # two people whose display names clean to the same string would otherwise
+            # overwrite each other and one of them would vanish from the block.
+            counts: dict[str, int] = {}
+            for display_name, alias, number in await cur.fetchall():
+                who = context.pretty_name(display_name, alias)
+                counts[who] = counts.get(who, 0) + int(number)
+            return counts
 
     now_counts = await per_person(start, end)
     then_counts = await per_person(previous_start, start)

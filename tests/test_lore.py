@@ -778,3 +778,39 @@ async def test_a_beat_citing_a_message_that_is_not_in_the_window_loses_its_id(db
 
     assert beats[0]["message_id"] == 5
     assert "message_id" not in beats[1]
+
+
+async def test_two_people_whose_names_clean_the_same_are_not_collapsed(db):
+    """Grouped by user in SQL but keyed by name in Python: without a sum, one of them
+    silently vanishes from the stats and the other's delta is measured against the
+    wrong baseline."""
+    for user_id, display in ((7, "Саша"), (8, "Саша 🙂")):
+        await store.upsert_user(
+            db, chat_id=CHAT, user_id=user_id, display_name=display, alias=f"s{user_id}"
+        )
+    for n, user_id in enumerate((7, 7, 8)):
+        await store.save_message(
+            db, chat_id=CHAT, message_id=400 + n, user_id=user_id,
+            ts="2026-08-19T10:00:00+00:00", text="привіт", media_kind=None,
+            file_id=None, reply_to=None, is_bot=False,
+        )
+
+    stats = await store.lore_stats(db, CHAT, START, END, BEFORE)
+
+    assert stats["per_person"] == [("Саша", 3, 3)]
+
+
+async def test_a_join_names_people_the_same_way_the_rest_of_the_page_does(db):
+    """`events._people` stores the raw Telegram full_name, and one member of this chat
+    has 63 characters of keyboard mash for a display name."""
+    mash = "bshdhdhdhgehdifidhsvdjfofushsvdhjdiduegdjducudvehejsexicudhsvshz undefined"
+    await store.upsert_user(db, chat_id=CHAT, user_id=9, display_name=mash, alias="блеб")
+    await store.save_event(
+        db, chat_id=CHAT, message_id=500, ts="2026-08-19T12:00:00+00:00",
+        action="join", actor_id=9, payload={"members": [mash], "member_ids": [9]},
+    )
+
+    text = lore.render_stats(await store.lore_stats(db, CHAT, START, END, BEFORE))
+
+    assert "прийшли: блеб" in text
+    assert mash not in text

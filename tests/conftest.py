@@ -47,10 +47,19 @@ class FakeMessage:
         self.bot = None  # disables the typing indicator; see handlers._typing
         self.replies: list[str] = []
         self.photos: list[bytes] = []
+        self.documents: list[tuple[str, bytes, str]] = []
 
     async def reply_photo(self, photo):
         self.photos.append(photo.data)
         return FakeMessage(text="", message_id=self.message_id + 2000, is_bot=True)
+
+    async def reply_document(self, document, caption=None):
+        self.documents.append((document.filename, document.data, caption or ""))
+        sent = FakeMessage(text="", message_id=self.message_id + 3000, is_bot=True)
+        # `persist` runs `media.detect` over whatever comes back, and a document that
+        # detects as nothing lands in the transcript as an empty line.
+        sent.document = pytypes.SimpleNamespace(file_id="lore.md")
+        return sent
 
     async def reply(self, text):
         """The bot always answers as a Telegram reply, quoting what triggered it."""

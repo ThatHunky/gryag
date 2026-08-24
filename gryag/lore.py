@@ -20,9 +20,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 import aiosqlite
+from aiogram import F, Router
+from aiogram.filters import Command
+from aiogram.types import BufferedInputFile, Message
 from google.genai import types
 
-from gryag import config, context, digest, llm, store
+from gryag import config, context, digest, handlers, llm, store
 from gryag.handlers import LOCAL_TZ
 
 log = logging.getLogger(__name__)
@@ -496,6 +499,51 @@ async def run(db: aiosqlite.Connection, client, now: datetime | None = None) -> 
             # One chat's failure is not a reason for the next to go a week without a
             # rewrite. The timer is the only thing that ever calls this.
             log.exception("writing the lore for %s failed", chat_id)
+
+
+async def send_command(message: Message, db: aiosqlite.Connection) -> None:
+    """`/lore`, and `/лор` for the one people actually type.
+
+    Open to anybody in an enabled chat, because the document is the chat's own. Writing it
+    is what spends money and what can degrade it, and that stays with the timer and the
+    admin.
+    """
+    if not await handlers.accept_command(message, db):
+        return
+    chat_id = message.chat.id
+
+    cooldown = await config.get_int(db, "lore_cooldown", chat_id)
+    since = await handlers._since(await store.lore_sent_at(db, chat_id))
+    if since < cooldown:
+        # A line rather than silence: from inside the chat, being ignored and being broken
+        # look exactly the same.
+        await handlers.answer(
+            message, db, f"щойно кидав, наступний через {round((cooldown - since) / 60)} хв"
+        )
+        return
+
+    latest = await store.latest_lore(db, chat_id)
+    if latest is None:
+        await handlers.answer(message, db, "лору ще нема, зачекай")
+        return
+
+    written = datetime.fromisoformat(latest["created_at"]).astimezone(LOCAL_TZ)
+    sent = await message.reply_document(
+        BufferedInputFile(latest["text"].encode("utf-8"), filename="lore.md"),
+        caption=f"лор чату, версія {latest['version']}, від {written:%d.%m}",
+    )
+    await handlers.persist(db, sent, is_bot=True)
+    await store.mark_lore_sent(db, chat_id, handlers._utcnow().isoformat(timespec="seconds"))
+
+
+def build_router() -> Router:
+    """Registered before the chat router, so a handled command stops there."""
+    router = Router(name="lore")
+    router.message(Command("lore"))(send_command)
+    # Telegram only registers ASCII commands with BotFather, so the Cyrillic one is
+    # matched as ordinary text.
+    router.message(F.text.regexp(r"^/лор(?:@\w+)?(?:\s|$)"))(send_command)
+    return router
 
 
 async def main() -> None:

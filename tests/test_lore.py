@@ -540,3 +540,108 @@ async def test_a_run_that_fails_in_one_chat_still_reaches_the_next(db):
 
     assert (await store.latest_lore(db, -200)) is None
     assert (await store.latest_lore(db, CHAT)) is not None
+
+
+from gryag import handlers
+from tests.conftest import FakeMessage
+
+
+async def _stored_lore(db, text="# Лор\n\nБуло діло."):
+    await store.save_lore(
+        db, chat_id=CHAT, text=text, model="m", tokens=5,
+        window_start=BEFORE, window_end=START, created_at="2026-08-19T05:00:00+00:00",
+    )
+
+
+async def test_the_command_sends_the_document(db):
+    await enabled(db)
+    await _stored_lore(db)
+    message = FakeMessage(text="/lore", chat_id=CHAT)
+
+    await lore.send_command(message, db)
+
+    filename, payload, caption = message.documents[0]
+    assert filename == "lore.md"
+    assert payload.decode() == "# Лор\n\nБуло діло."
+    assert "1" in caption
+
+
+async def test_the_command_never_calls_the_model(db):
+    """Reading the lore is free. That is what makes it safe to open to the whole chat."""
+    await enabled(db)
+    await _stored_lore(db)
+
+    await lore.send_command(FakeMessage(text="/lore", chat_id=CHAT), db)
+
+    async with db.execute("SELECT COUNT(*) FROM usage") as cur:
+        assert (await cur.fetchone())[0] == 0
+
+
+async def test_a_chat_with_no_lore_yet_is_told_so_instead_of_getting_a_file(db):
+    await enabled(db)
+    message = FakeMessage(text="/lore", chat_id=CHAT)
+
+    await lore.send_command(message, db)
+
+    assert message.documents == []
+    assert message.replies
+
+
+async def test_a_second_request_inside_the_cooldown_gets_a_line_not_a_file(db):
+    await enabled(db)
+    await _stored_lore(db)
+    await lore.send_command(FakeMessage(text="/lore", chat_id=CHAT), db)
+    second = FakeMessage(text="/lore", message_id=2, chat_id=CHAT)
+
+    await lore.send_command(second, db)
+
+    assert second.documents == []
+    assert second.replies
+
+
+async def test_the_cooldown_expires(db):
+    await enabled(db)
+    await _stored_lore(db)
+    await store.mark_lore_sent(db, CHAT, "2020-01-01T00:00:00+00:00")
+    message = FakeMessage(text="/lore", chat_id=CHAT)
+
+    await lore.send_command(message, db)
+
+    assert message.documents
+
+
+async def test_the_cooldown_survives_a_restart(db):
+    """In memory, every deploy would be a fresh spam window."""
+    await enabled(db)
+    await _stored_lore(db)
+
+    await lore.send_command(FakeMessage(text="/lore", chat_id=CHAT), db)
+
+    assert await store.lore_sent_at(db, CHAT) is not None
+
+
+async def test_the_command_does_nothing_in_a_chat_that_is_not_whitelisted(db):
+    await _stored_lore(db)
+    message = FakeMessage(text="/lore", chat_id=CHAT)
+
+    await lore.send_command(message, db)
+
+    assert message.documents == []
+    assert message.replies == []
+
+
+async def test_the_sent_document_is_in_the_transcript_like_anything_else_the_bot_says(db):
+    await enabled(db)
+    await _stored_lore(db)
+
+    await lore.send_command(FakeMessage(text="/lore", message_id=50, chat_id=CHAT), db)
+
+    rows = await store.recent_messages(db, CHAT, limit=10)
+    assert any(r["is_bot"] and r["media_kind"] == "document" for r in rows)
+
+
+def test_the_command_is_not_treated_as_another_bots():
+    from gryag import gate
+
+    assert gate.foreign_command("/lore", handlers.OWN_COMMANDS) is False
+    assert gate.foreign_command("/лор", handlers.OWN_COMMANDS) is False

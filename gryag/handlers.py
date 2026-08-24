@@ -24,7 +24,9 @@ from gryag import config, context, events, gate, images, llm, media, store
 
 log = logging.getLogger(__name__)
 
-OWN_COMMANDS = ("gryag", "nb", "unban", "pidor", "pidorstats", "pidrahuika", "sbs")
+OWN_COMMANDS = (
+    "gryag", "nb", "unban", "pidor", "pidorstats", "pidrahuika", "sbs", "lore", "лор"
+)
 """Everything else starting with a slash belongs to another bot; see gate.foreign_command."""
 
 

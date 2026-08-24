@@ -415,7 +415,7 @@ async def events_between(
     async with db.execute(
         """
         SELECT e.message_id, e.ts, e.action, e.actor_id, e.payload,
-               u.display_name, u.alias
+               u.display_name, u.alias, u.username
         FROM events e
         LEFT JOIN users u ON u.chat_id = e.chat_id AND u.user_id = e.actor_id
         WHERE e.chat_id = ? AND e.ts >= ? AND e.ts < ?
@@ -426,7 +426,9 @@ async def events_between(
         rows = [dict(r) for r in await cur.fetchall()]
     for row in rows:
         row["payload"] = json.loads(row["payload"]) if row["payload"] else {}
-        row["alias"] = context.pretty_name(row.pop("display_name"), row.pop("alias"))
+        row["alias"] = _document_name(
+            row.pop("display_name"), row.pop("alias"), row.pop("username")
+        )
     return rows
 
 
@@ -734,6 +736,15 @@ async def facts_for_users(
     return [(r[0] or "хтось", r[1]) for r in rows if r[3] <= per_user]
 
 
+def _document_name(display_name, alias, username) -> str:
+    """The name a person gets on the page: whole, and told apart from the bot when they
+    share its name. Every stats path goes through this or they disagree with each other
+    and with the transcript."""
+    return context.disambiguate(
+        context.pretty_name(display_name, alias), {"username": username}
+    )
+
+
 async def lore_stats(
     db: aiosqlite.Connection,
     chat_id: int,
@@ -758,7 +769,7 @@ async def lore_stats(
         # `context.pretty_name`, which SQL cannot call.
         async with db.execute(
             """
-            SELECT u.display_name, u.alias, COUNT(*) AS n
+            SELECT u.display_name, u.alias, u.username, COUNT(*) AS n
             FROM messages m
             LEFT JOIN users u ON u.chat_id = m.chat_id AND u.user_id = m.user_id
             WHERE m.chat_id = ? AND m.ts >= ? AND m.ts < ?
@@ -771,8 +782,8 @@ async def lore_stats(
             # two people whose display names clean to the same string would otherwise
             # overwrite each other and one of them would vanish from the block.
             counts: dict[str, int] = {}
-            for display_name, alias, number in await cur.fetchall():
-                who = context.pretty_name(display_name, alias)
+            for display_name, alias, username, number in await cur.fetchall():
+                who = _document_name(display_name, alias, username)
                 counts[who] = counts.get(who, 0) + int(number)
             return counts
 
@@ -782,7 +793,7 @@ async def lore_stats(
 
     async with db.execute(
         """
-        SELECT r.message_id, u.display_name, u.alias, COALESCE(m.text, ''),
+        SELECT r.message_id, u.display_name, u.alias, u.username, COALESCE(m.text, ''),
                m.media_kind, SUM(r.count) AS total
         FROM reactions r
         JOIN messages m ON m.chat_id = r.chat_id AND m.message_id = r.message_id
@@ -797,14 +808,14 @@ async def lore_stats(
         reacted = [tuple(r) for r in await cur.fetchall()]
     top_reacted = [
         (
-            context.pretty_name(display_name, alias),
+            _document_name(display_name, alias, username),
             text,
             media_kind,
             message_id,
             int(count),
             await reactions_for(db, chat_id, message_id),
         )
-        for message_id, display_name, alias, text, media_kind, count in reacted
+        for message_id, display_name, alias, username, text, media_kind, count in reacted
     ]
 
     async with db.execute(
@@ -838,7 +849,7 @@ async def lore_stats(
         # editing its own 58 messages, which is a bot's behaviour, not a person's habit.
         async with db.execute(
             f"""
-            SELECT u.display_name, u.alias, {expression} AS n
+            SELECT u.display_name, u.alias, u.username, {expression} AS n
             FROM messages m
             LEFT JOIN users u ON u.chat_id = m.chat_id AND u.user_id = m.user_id
             WHERE m.chat_id = ? AND m.ts >= ? AND m.ts < ?
@@ -849,8 +860,8 @@ async def lore_stats(
         ) as cur:
             found = await cur.fetchone()
         return (
-            (context.pretty_name(found[0], found[1]), int(found[2]))
-            if found and found[2]
+            (_document_name(found[0], found[1], found[2]), int(found[3]))
+            if found and found[3]
             else None
         )
 

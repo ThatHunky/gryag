@@ -814,3 +814,22 @@ async def test_a_join_names_people_the_same_way_the_rest_of_the_page_does(db):
 
     assert "прийшли: блеб" in text
     assert mash not in text
+
+
+async def test_the_stats_tell_the_bots_namesake_apart_too(db):
+    """The transcript renderer disambiguates and the stats block did not, so the page
+    listed the bot in its pantheon and the human under the same bare name in the counts."""
+    await store.upsert_user(
+        db, chat_id=CHAT, user_id=6560599034, display_name="гряг", alias="гряг",
+        username="gria_g",
+    )
+    await store.save_message(
+        db, chat_id=CHAT, message_id=600, user_id=6560599034,
+        ts="2026-08-19T10:00:00+00:00", text="я людина", media_kind="sticker",
+        file_id=None, reply_to=None, is_bot=False,
+    )
+
+    stats = await store.lore_stats(db, CHAT, START, END, BEFORE)
+
+    assert stats["per_person"] == [("гряг(@gria_g)", 1, 1)]
+    assert stats["stickers"] == ("гряг(@gria_g)", 1)

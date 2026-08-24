@@ -677,3 +677,18 @@ async def test_removing_a_reaction_lowers_the_count(db):
     await handlers.handle_reaction(FakeReactionUpdate(old=[FakeReaction("😁")], new=[]), db)
 
     assert await store.reactions_for(db, -100, 1) == []
+
+
+async def test_a_service_message_goes_to_events_and_not_to_the_transcript(db):
+    await admin.enable_chat(db, -100, "матсурі")
+    message = FakeMessage(text=None, message_id=5)
+    message.new_chat_title = "чат матсурі"
+
+    await handlers.handle_message(message, db, None, {"text": "p"}, bot_id=99)
+
+    stored = await store.events_between(
+        db, -100, "2000-01-01T00:00:00+00:00", "2999-01-01T00:00:00+00:00"
+    )
+    assert [(e["action"], e["payload"]["title"]) for e in stored] == [("title", "чат матсурі")]
+    assert await store.recent_messages(db, -100, limit=10) == []
+    assert message.replies == []

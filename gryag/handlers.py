@@ -20,7 +20,7 @@ from aiogram import Router
 from aiogram.types import BufferedInputFile, Message
 from aiogram.utils.chat_action import ChatActionSender
 
-from gryag import config, context, gate, images, llm, media, store
+from gryag import config, context, events, gate, images, llm, media, store
 
 log = logging.getLogger(__name__)
 
@@ -403,6 +403,26 @@ async def handle_message(
     if not await _chat_enabled(db, chat_id):
         log.debug("ignoring %s entirely: not on the whitelist", chat_id)
         return None
+
+    found = events.detect(message)
+    if found is not None:
+        action, payload = found
+        actor = message.from_user
+        await store.save_event(
+            db,
+            chat_id=chat_id,
+            message_id=message.message_id,
+            ts=message.date.isoformat(timespec="seconds"),
+            action=action,
+            actor_id=actor.id if actor else None,
+            payload=payload,
+        )
+        log.info("recorded a %s in %s", action, chat_id)
+        # Deliberately not persisted to `messages`: a service message is not somebody
+        # speaking, and letting one into the transcript put an empty line into every
+        # context window and every digest chunk.
+        return None
+
     await persist(db, message)
 
     now = message.date

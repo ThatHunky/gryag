@@ -35,6 +35,15 @@ class FakeMessage:
         self.entities = entities or []
         self.photo = self.voice = self.video = None
         self.video_note = self.sticker = self.document = None
+        # Service fields. Absent on an ordinary message, which is what None means here.
+        self.new_chat_members = None
+        self.left_chat_member = None
+        self.pinned_message = None
+        self.new_chat_title = None
+        self.migrate_from_chat_id = None
+        self.boost_added = None
+        self.forum_topic_created = None
+        self.forum_topic_edited = None
         self.bot = None  # disables the typing indicator; see handlers._typing
         self.replies: list[str] = []
         self.photos: list[bytes] = []

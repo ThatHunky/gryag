@@ -45,6 +45,11 @@ class Runtime:
     persona: dict
 
 
+ALLOWED_UPDATES = ["message", "edited_message", "callback_query", "message_reaction"]
+"""`message_reaction` arrives only where the bot is an administrator, and only when it is
+named here — the default list leaves it out. Where it never arrives, the lore is built
+without reactions and nothing else changes."""
+
 WEBHOOK_PATH = "/webhook"
 PERSONA_PATH = Path(__file__).resolve().parent.parent / "eval" / "persona-v3.txt"
 
@@ -134,7 +139,7 @@ async def serve_webhook(secrets: config.Secrets) -> None:
         f"{secrets.webhook_base}{WEBHOOK_PATH}",
         secret_token=secrets.webhook_secret,
         drop_pending_updates=False,
-        allowed_updates=["message", "edited_message", "callback_query"],
+        allowed_updates=ALLOWED_UPDATES,
     )
     app = web.Application()
     SimpleRequestHandler(
@@ -157,9 +162,7 @@ async def serve_polling(secrets: config.Secrets) -> None:
     # `max_reply_age` in the gate is what stops the bot answering stale messages.
     await rt.bot.delete_webhook(drop_pending_updates=False)
     logging.info("polling mode")
-    await rt.dispatcher.start_polling(
-        rt.bot, allowed_updates=["message", "edited_message", "callback_query"]
-    )
+    await rt.dispatcher.start_polling(rt.bot, allowed_updates=ALLOWED_UPDATES)
 
 
 def main() -> None:

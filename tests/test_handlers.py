@@ -2,7 +2,7 @@ import asyncio
 import types as pytypes
 from datetime import datetime, timedelta, timezone
 
-from gryag import config, handlers, llm, store
+from gryag import admin, config, handlers, llm, store
 from tests.conftest import FakeMessage
 
 
@@ -617,3 +617,63 @@ def test_local_time_follows_daylight_saving():
 
     assert summer.startswith("2026-08-19 02:35")
     assert winter.startswith("2026-12-19 01:35")
+
+
+class FakeReaction:
+    """`ReactionTypeEmoji` in the shape the handler reads it."""
+
+    def __init__(self, emoji=None, custom_emoji_id=None):
+        self.type = "emoji" if emoji else "custom_emoji"
+        self.emoji = emoji
+        self.custom_emoji_id = custom_emoji_id
+
+
+class FakeReactionUpdate:
+    def __init__(self, *, message_id=1, chat_id=-100, old=(), new=(), date=None):
+        self.message_id = message_id
+        self.chat = pytypes.SimpleNamespace(id=chat_id, title="матсурі")
+        self.old_reaction = list(old)
+        self.new_reaction = list(new)
+        self.date = date or datetime.now(timezone.utc)
+        self.user = pytypes.SimpleNamespace(id=1, full_name="Олег", is_bot=False)
+
+
+def test_the_delta_between_two_reaction_lists():
+    added, removed = handlers.reaction_delta(
+        [FakeReaction("😁"), FakeReaction("❤")], [FakeReaction("❤"), FakeReaction("🔥")]
+    )
+
+    assert added == ["🔥"]
+    assert removed == ["😁"]
+
+
+def test_custom_emoji_are_not_counted():
+    """A custom emoji has no unicode character to put in the document, and the lore is a
+    Markdown file people read."""
+    added, removed = handlers.reaction_delta([], [FakeReaction(custom_emoji_id="55")])
+
+    assert added == []
+    assert removed == []
+
+
+async def test_a_reaction_in_an_enabled_chat_is_stored(db):
+    await admin.enable_chat(db, -100, "матсурі")
+
+    assert await handlers.handle_reaction(FakeReactionUpdate(new=[FakeReaction("😁")]), db) is True
+    assert await store.reactions_for(db, -100, 1) == [("😁", 1)]
+
+
+async def test_a_reaction_in_a_chat_that_is_not_whitelisted_is_ignored(db):
+    """The whitelist governs storage, not just speech. Being added to a group is not
+    consent to have it recorded."""
+    assert await handlers.handle_reaction(FakeReactionUpdate(new=[FakeReaction("😁")]), db) is False
+    assert await store.reactions_for(db, -100, 1) == []
+
+
+async def test_removing_a_reaction_lowers_the_count(db):
+    await admin.enable_chat(db, -100, "матсурі")
+    await handlers.handle_reaction(FakeReactionUpdate(new=[FakeReaction("😁")]), db)
+
+    await handlers.handle_reaction(FakeReactionUpdate(old=[FakeReaction("😁")], new=[]), db)
+
+    assert await store.reactions_for(db, -100, 1) == []

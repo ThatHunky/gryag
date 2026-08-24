@@ -652,6 +652,46 @@ async def handle_edit(message, db) -> bool:
     )
 
 
+def reaction_delta(old: list, new: list) -> tuple[list[str], list[str]]:
+    """(added, removed) for one person changing their mind.
+
+    Telegram sends the person's whole before-and-after list, not a change, so the
+    difference has to be taken here. Custom and paid reactions carry an id instead of a
+    character and are dropped: the lore is a Markdown file somebody reads.
+    """
+
+    def emojis(reactions: list) -> list[str]:
+        return [r.emoji for r in reactions if getattr(r, "emoji", None)]
+
+    before, after = emojis(old), emojis(new)
+    return (
+        [e for e in after if e not in before],
+        [e for e in before if e not in after],
+    )
+
+
+async def handle_reaction(update, db: aiosqlite.Connection) -> bool:
+    """Apply a `message_reaction` update. Returns whether anything was stored.
+
+    Never answers and never reaches the gate: a reaction is not somebody speaking.
+    """
+    chat_id = update.chat.id
+    if not await _chat_enabled(db, chat_id):
+        return False
+    added, removed = reaction_delta(update.old_reaction or [], update.new_reaction or [])
+    if not added and not removed:
+        return False
+    await store.apply_reaction(
+        db,
+        chat_id=chat_id,
+        message_id=update.message_id,
+        added=added,
+        removed=removed,
+        ts=update.date.isoformat(timespec="seconds"),
+    )
+    return True
+
+
 def build_router() -> Router:
     router = Router(name="chat")
 
@@ -665,5 +705,9 @@ def build_router() -> Router:
     @router.edited_message()
     async def on_edit(message: Message, db) -> None:
         await handle_edit(message, db)
+
+    @router.message_reaction()
+    async def on_reaction(update, db) -> None:
+        await handle_reaction(update, db)
 
     return router

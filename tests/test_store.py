@@ -549,7 +549,8 @@ async def test_an_event_carries_the_actors_alias(db):
 
     events = await store.events_between(db, -100, "2026-08-19T00:00:00+00:00", "2026-08-20T00:00:00+00:00")
 
-    assert events[0]["alias"] == "oleh"
+    # The whole name, not the eight-character prompt alias: this is read by people.
+    assert events[0]["alias"] == "User 1"
 
 
 async def test_storing_the_same_event_twice_does_not_duplicate(db):

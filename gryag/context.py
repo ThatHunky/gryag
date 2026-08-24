@@ -29,6 +29,10 @@ BOUNDARY = (
 
 MEDIA_MARKERS = {
     "photo": "[фото]",
+    # Animations and audio had no marker at all, so a GIF — 315 of them in this chat —
+    # rendered as an empty line with a name in front of it.
+    "animation": "[гіфка]",
+    "audio": "[аудіо]",
     "voice": "[голосове]",
     "video": "[відео]",
     "video_note": "[кружок]",
@@ -59,6 +63,36 @@ def alias_for(display_name: str) -> str:
     candidate = first[0] if first else ""
     candidate = re.sub(r"[^\w'-]", "", candidate, flags=re.UNICODE)[:8]
     return candidate or "хтось"
+
+
+PRETTY_NAME_MAX = 24
+"""Long enough for «Vsevolod Dobrovolskyi», short enough to exclude the 63-character
+display name one member of this chat actually has."""
+
+_DECORATION = re.compile(r"[^\w\s'-]", re.UNICODE)
+"""Emoji, flags, brackets and slashes. Replaced with a space rather than deleted, or
+«артемопокалипсис/локшина» comes out as one welded word."""
+
+_JUNK_TOKEN = re.compile(r"^[_'-]+$")
+
+
+def pretty_name(display_name: str | None, alias: str | None) -> str:
+    """A name fit for a document, as opposed to `alias_for`, which is fit for a prompt.
+
+    `alias_for` takes the first word and cuts it at eight characters, which buys 13-18%
+    of the context block and is the right trade there. In the lore it produced
+    `Anonymou`, `андрійни` and `позорниц` — people's names cut mid-word in a page they
+    read. This never cuts mid-word: it cleans the display name, falls back to its first
+    word if that is too long, and to the alias when the display name is unusable.
+    """
+    words = _DECORATION.sub(" ", display_name or "").split()
+    cleaned = " ".join(w for w in words if not _JUNK_TOKEN.match(w))
+    if 0 < len(cleaned) <= PRETTY_NAME_MAX:
+        return cleaned
+    first = cleaned.split(" ")[0] if cleaned else ""
+    if 0 < len(first) <= PRETTY_NAME_MAX:
+        return first
+    return (alias or "").strip() or "хтось"
 
 
 def render_line(msg: dict) -> str:

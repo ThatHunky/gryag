@@ -25,7 +25,7 @@ from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, Message
 from google.genai import types
 
-from gryag import config, context, digest, handlers, llm, store
+from gryag import config, context, handlers, llm, store
 from gryag.handlers import LOCAL_TZ
 
 log = logging.getLogger(__name__)
@@ -70,6 +70,54 @@ def local_hours(buckets: list[tuple[str, int]]) -> list[int]:
     return counts
 
 
+def message_link(chat_id: int, message_id: int | None) -> str | None:
+    """A t.me link straight to the message. Only supergroups and channels have them."""
+    raw = str(chat_id)
+    if message_id is None or not raw.startswith("-100"):
+        return None
+    return f"https://t.me/c/{raw[4:]}/{message_id}"
+
+
+def render_line(msg: dict) -> str:
+    """`[id] Ім'я: текст`, which is not how the live context renders a message.
+
+    Two deliberate differences. The id is here so a beat can cite the message it came
+    from and the document can link to it. The name is `context.pretty_name`, not the
+    eight-character alias the prompt uses — the alias saves 13-18% of the context block,
+    which matters in a window sent on every reply and not in a job that runs twice a
+    week, and it was what put `Anonymou` and `позорниц` into the first lore.
+    """
+    name = (
+        context.BOT_ALIAS
+        if msg.get("is_bot")
+        else context.pretty_name(msg.get("display_name"), msg.get("alias"))
+    )
+    marker = context.MEDIA_MARKERS.get(msg.get("media_kind") or "", "")
+    text = (msg.get("text") or "").strip()
+    body = f"{marker} {text}".strip() if marker else text
+    return f"[{msg.get('message_id')}] {name}: {body}"
+
+
+def chunk_transcript(messages: list[dict], max_tokens: int = CHUNK_TOKENS) -> list[str]:
+    """`digest.chunk_transcript`, but over `render_line` above. Never breaks a message."""
+    chunks: list[str] = []
+    current: list[str] = []
+    size = 0
+    for message in messages:
+        if not context.is_context_worthy(message):
+            continue
+        line = render_line(message)
+        cost = context.estimate_tokens(line) + 1
+        if current and size + cost > max_tokens:
+            chunks.append("\n".join(current))
+            current, size = [], 0
+        current.append(line)
+        size += cost
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
 def _duration(seconds: int) -> str:
     hours, minutes = divmod(round(seconds / 60), 60)
     return f"{hours} год {minutes} хв" if hours else f"{minutes} хв"
@@ -79,7 +127,7 @@ def _local_time(ts: str) -> str:
     return datetime.fromisoformat(ts).astimezone(LOCAL_TZ).strftime("%d.%m %H:%M")
 
 
-def _events_line(events: list[dict]) -> str:
+def _events_line(events: list[dict], chat_id: int | None = None) -> str:
     parts: list[str] = []
     for action, label in ACTION_LABELS.items():
         matching = [e for e in events if e["action"] == action]
@@ -93,12 +141,19 @@ def _events_line(events: list[dict]) -> str:
         elif action in ("title", "topic"):
             titles = [str(e["payload"].get("title") or "") for e in matching]
             parts.append(f"{label}: {', '.join(t for t in titles if t)}")
+        elif action == "pin":
+            links = [
+                link
+                for e in matching
+                if (link := message_link(chat_id, e["payload"].get("message_id")))
+            ]
+            parts.append(f"{label}: {len(matching)}" + (f" ({', '.join(links)})" if links else ""))
         else:
             parts.append(f"{label}: {len(matching)}")
     return "; ".join(parts)
 
 
-def render_stats(stats: dict) -> str:
+def render_stats(stats: dict, chat_id: int | None = None) -> str:
     """The figures, as a block the rewrite prompt quotes verbatim."""
     lines = [f"Повідомлень за період: {stats['total']}"]
 
@@ -108,10 +163,17 @@ def render_stats(stats: dict) -> str:
         )
         lines.append(f"Хто скільки написав (у дужках — зміна проти минулого разу): {people}")
 
-    for alias, text, total, reactions in stats["top_reacted"]:
+    for name, text, media_kind, message_id, total, reactions in stats["top_reacted"]:
         emojis = ", ".join(f"{emoji} {count}" for emoji, count in reactions)
-        body = " ".join((text or "[без тексту]").split())[:200]
-        lines.append(f"Найбільше реакцій — {alias}: «{body}» — {emojis} (разом {total})")
+        # A message with no text is a photo or a sticker, not a blank: the first real run
+        # printed «[без тексту]» three times because the media kind was never read.
+        marker = context.MEDIA_MARKERS.get(media_kind or "", "")
+        body = " ".join(f"{marker} {text or ''}".split())[:200] or "[без тексту]"
+        link = message_link(chat_id, message_id)
+        lines.append(
+            f"Найбільше реакцій — {name}: «{body}» — {emojis} (разом {total})"
+            + (f" {link}" if link else "")
+        )
 
     counts = local_hours(stats["hours"])
     if any(counts):
@@ -129,7 +191,7 @@ def render_stats(stats: dict) -> str:
             f"з {_local_time(from_ts)} до {_local_time(to_ts)}"
         )
 
-    events = _events_line(stats["events"])
+    events = _events_line(stats["events"], chat_id)
     if events:
         lines.append(f"Події: {events}")
 
@@ -152,6 +214,7 @@ BEAT_SCHEMA = {
                     "who": {"type": "array", "items": {"type": "string"}},
                     "what": {"type": "string"},
                     "quote": {"type": "string"},
+                    "message_id": {"type": "integer"},
                     "kind": {"type": "string", "enum": ["joke", "drama", "event", "gag"]},
                 },
                 "required": ["who", "what", "kind"],
@@ -172,7 +235,12 @@ HARVEST_PROMPT = """Нижче — шматок переписки групов�
 * `what` — що сталося, одним-двома реченнями українською;
 * `quote` — дослівна фраза з переписки, без якої це не смішно. Не вигадуй і не
   переписуй. Якщо такої фрази нема — не заповнюй поле;
+* `message_id` — число у квадратних дужках на початку того рядка, з якого це взято.
+  Копіюй його точно, не вигадуй і не рахуй сам. Якщо не впевнений — не заповнюй поле;
 * `kind` — `joke`, `drama`, `event` або `gag`.
+
+Кожен рядок переписки починається з `[номер]` — це номер повідомлення, а не частина
+тексту. У `quote` номер не переписуй.
 
 Переписка:
 {transcript}"""
@@ -272,9 +340,13 @@ async def harvest(
     thinking: int,
 ) -> list[dict] | None:
     """Every beat worth keeping from the window, or None if the whole harvest failed."""
-    chunks = digest.chunk_transcript(messages, max_tokens=CHUNK_TOKENS)
+    chunks = chunk_transcript(messages, max_tokens=CHUNK_TOKENS)
+    # The model is handed message ids and can invent them, and an invented link points at
+    # somebody else's message. Anything not actually in the window loses its id.
+    real_ids = {m["message_id"] for m in messages}
     beats: list[dict] = []
     refused = 0
+    invented = 0
     for chunk in chunks:
         result = await _call(
             client,
@@ -296,7 +368,10 @@ async def harvest(
             continue
         # Capped here as well as asked for in the prompt: the ceiling is the design's,
         # not the model's to negotiate.
-        beats.extend(list(payload.get("beats") or [])[:MAX_BEATS])
+        for beat in list(payload.get("beats") or [])[:MAX_BEATS]:
+            if beat.get("message_id") not in real_ids:
+                invented += beat.pop("message_id", None) is not None
+            beats.append(beat)
         await _record(db, chat_id, model, usage)
 
     if chunks and refused == len(chunks):
@@ -304,17 +379,23 @@ async def harvest(
         return None
     if refused:
         log.warning("%s of %s chunks refused for %s", refused, len(chunks), chat_id)
+    if invented:
+        log.warning("%s beats cited a message id that is not in the window", invented)
     log.info("harvested %s beats from %s chunks for %s", len(beats), len(chunks), chat_id)
     return beats
 
 
-def render_beats(beats: list[dict]) -> str:
+def render_beats(beats: list[dict], chat_id: int | None = None) -> str:
     lines: list[str] = []
     for beat in beats:
         who = ", ".join(str(w) for w in (beat.get("who") or [])) or "хтось"
         quote = str(beat.get("quote") or "").strip()
         tail = f" «{quote}»" if quote else ""
-        lines.append(f"- [{beat.get('kind', 'event')}] {who}: {beat.get('what', '')}{tail}")
+        link = message_link(chat_id, beat.get("message_id"))
+        lines.append(
+            f"- [{beat.get('kind', 'event')}] {who}: {beat.get('what', '')}{tail}"
+            + (f" {link}" if link else "")
+        )
     return "\n".join(lines)
 
 
@@ -346,6 +427,10 @@ REWRITE_PROMPT = """Ти ведеш одну живу сторінку — ло�
   стисканням, а не обрізанням.
 * Нове не важливіше за старе тільки тому, що воно нове.
 * Цитати наводь дослівно, як їх подано вище.
+* Посилання https://t.me/... переноси в нову версію разом із тим, про що вони. Оформлюй
+  їх як Markdown-посилання на слові чи цитаті, а не голим URL, і нічого в них не міняй.
+  Не вигадуй посилань, яких тобі не дали.
+* Імена людей пиши повністю, точно як подано вище — не скорочуй і не обрізай.
 * Не звертайся до читача, не пояснюй, що це за документ, і не підписуйся.
 * Максимум {max_chars} символів."""
 
@@ -375,7 +460,7 @@ async def rewrite(
         REWRITE_PROMPT.format(
             title=title,
             current=current or "(сторінки ще нема — напиши першу)",
-            beats=render_beats(beats) or "(нічого нового)",
+            beats=render_beats(beats, chat_id) or "(нічого нового)",
             stats=stats,
             cast=cast or "(нічого не відомо)",
             max_chars=max_chars,
@@ -443,7 +528,8 @@ async def generate(
             start,
             end,
             (datetime.fromisoformat(start) - span).isoformat(timespec="seconds"),
-        )
+        ),
+        chat_id,
     )
     present = await store.active_user_ids(db, chat_id, start)
     cast = "; ".join(

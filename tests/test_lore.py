@@ -61,7 +61,7 @@ async def test_messages_per_person_carry_the_change_against_the_previous_window(
 
     stats = await store.lore_stats(db, CHAT, START, END, BEFORE)
 
-    assert stats["per_person"] == [("maria", 3, 3), ("oleh", 3, 1)]
+    assert stats["per_person"] == [("Марія", 3, 3), ("Олег", 3, 1)]
 
 
 async def test_the_most_reacted_message_comes_back_with_its_reactions(db):
@@ -69,7 +69,9 @@ async def test_the_most_reacted_message_comes_back_with_its_reactions(db):
 
     stats = await store.lore_stats(db, CHAT, START, END, BEFORE)
 
-    assert stats["top_reacted"] == [("oleh", "смішне, виправлене", 3, [("😁", 2), ("❤", 1)])]
+    assert stats["top_reacted"] == [
+        ("Олег", "смішне, виправлене", None, 5, 3, [("😁", 2), ("❤", 1)])
+    ]
 
 
 async def test_a_reaction_on_a_message_outside_the_window_is_not_counted(db):
@@ -110,8 +112,8 @@ async def test_the_sticker_and_edit_champions(db):
 
     stats = await store.lore_stats(db, CHAT, START, END, BEFORE)
 
-    assert stats["stickers"] == ("maria", 2)
-    assert stats["edits"] == ("oleh", 1)
+    assert stats["stickers"] == ("Марія", 2)
+    assert stats["edits"] == ("Олег", 1)
 
 
 async def test_nobody_edited_anything_is_not_a_champion(db):
@@ -146,8 +148,8 @@ async def test_the_rendered_block_states_the_numbers_it_was_given(db):
 
     text = lore.render_stats(await store.lore_stats(db, CHAT, START, END, BEFORE))
 
-    assert "oleh 3" in text
-    assert "maria 3" in text
+    assert "Олег 3" in text
+    assert "Марія 3" in text
     assert "смішне, виправлене" in text
     assert "😁 2" in text
     assert "чат матсурі" in text
@@ -662,5 +664,114 @@ async def test_a_bot_cannot_be_the_sticker_or_edit_champion(db):
 
     stats = await store.lore_stats(db, CHAT, START, END, BEFORE)
 
-    assert stats["stickers"] == ("maria", 2)
-    assert stats["edits"] == ("oleh", 1)
+    assert stats["stickers"] == ("Марія", 2)
+    assert stats["edits"] == ("Олег", 1)
+
+
+async def test_a_link_points_at_the_message_in_the_chat():
+    assert lore.message_link(-1004291515714, 27667) == "https://t.me/c/4291515714/27667"
+
+
+async def test_a_plain_group_has_no_message_links():
+    """t.me/c/ links only exist for supergroups and channels."""
+    assert lore.message_link(-1234, 5) is None
+
+
+async def test_the_stats_use_whole_names_not_the_eight_character_alias(db):
+    await store.upsert_user(
+        db, chat_id=CHAT, user_id=3, display_name="андрійний колайдер", alias="андрійни"
+    )
+    await store.save_message(
+        db, chat_id=CHAT, message_id=300, user_id=3, ts="2026-08-19T10:00:00+00:00",
+        text="щось", media_kind="sticker", file_id=None, reply_to=None, is_bot=False,
+    )
+
+    stats = await store.lore_stats(db, CHAT, START, END, BEFORE)
+
+    assert stats["per_person"] == [("андрійний колайдер", 1, 1)]
+    assert stats["stickers"] == ("андрійний колайдер", 1)
+
+
+async def test_a_reacted_message_with_no_text_says_what_it_was(db):
+    """The first real lore printed «[без тексту]» three times over."""
+    await store.upsert_user(db, chat_id=CHAT, user_id=1, display_name="Олег", alias="oleh")
+    await store.save_message(
+        db, chat_id=CHAT, message_id=9, user_id=1, ts="2026-08-19T10:00:00+00:00",
+        text="", media_kind="photo", file_id=None, reply_to=None, is_bot=False,
+    )
+    await store.apply_reaction(
+        db, chat_id=CHAT, message_id=9, added=["😁"], removed=[], ts="2026-08-19T10:01:00+00:00"
+    )
+
+    stats = await store.lore_stats(db, CHAT, START, END, BEFORE)
+
+    assert stats["top_reacted"][0][2] == "photo"
+    assert stats["top_reacted"][0][3] == 9
+
+
+async def test_the_rendered_block_names_the_media_and_links_to_it(db):
+    await store.upsert_user(db, chat_id=CHAT, user_id=1, display_name="Олег", alias="oleh")
+    await store.save_message(
+        db, chat_id=CHAT, message_id=9, user_id=1, ts="2026-08-19T10:00:00+00:00",
+        text="", media_kind="photo", file_id=None, reply_to=None, is_bot=False,
+    )
+    await store.apply_reaction(
+        db, chat_id=CHAT, message_id=9, added=["😁"], removed=[], ts="2026-08-19T10:01:00+00:00"
+    )
+
+    text = lore.render_stats(await store.lore_stats(db, -100, START, END, BEFORE), chat_id=-1004291515714)
+
+    assert "[фото]" in text
+    assert "без тексту" not in text
+    assert "https://t.me/c/4291515714/9" in text
+
+
+async def test_a_pin_is_rendered_with_a_link_to_what_was_pinned(db):
+    await seed_window(db)
+
+    text = lore.render_stats(
+        await store.lore_stats(db, CHAT, START, END, BEFORE), chat_id=-1004291515714
+    )
+
+    assert "https://t.me/c/4291515714/5" in text
+
+
+async def test_the_harvest_transcript_carries_message_ids_and_whole_names(db):
+    await store.upsert_user(
+        db, chat_id=CHAT, user_id=3, display_name="андрійний колайдер", alias="андрійни"
+    )
+    await store.save_message(
+        db, chat_id=CHAT, message_id=4242, user_id=3, ts="2026-08-19T10:00:00+00:00",
+        text="привіт", media_kind=None, file_id=None, reply_to=None, is_bot=False,
+    )
+    messages = await store.messages_between(db, CHAT, START, END)
+
+    rendered = lore.render_line(messages[0])
+
+    assert rendered == "[4242] андрійний колайдер: привіт"
+
+
+async def test_a_beat_is_rendered_with_a_link_when_the_model_cited_a_message():
+    beats = [{"who": ["Олег"], "what": "щось", "kind": "joke", "message_id": 77}]
+
+    rendered = lore.render_beats(beats, chat_id=-1004291515714)
+
+    assert "https://t.me/c/4291515714/77" in rendered
+
+
+async def test_a_beat_citing_a_message_that_is_not_in_the_window_loses_its_id(db):
+    """The model is handed ids and can invent them. An invented link points at somebody
+    else's message, so an id that was not in the window is dropped rather than rendered."""
+    await seed_window(db)
+    messages = await store.messages_between(db, CHAT, START, END)
+    payload = json.dumps({
+        "beats": [
+            {"who": ["oleh"], "what": "справжнє", "kind": "joke", "message_id": 5},
+            {"who": ["oleh"], "what": "вигадане", "kind": "joke", "message_id": 999999},
+        ]
+    })
+
+    beats = await lore.harvest(db, FakeClient(payload), CHAT, messages, "m", thinking=-1)
+
+    assert beats[0]["message_id"] == 5
+    assert "message_id" not in beats[1]

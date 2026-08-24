@@ -10,6 +10,8 @@ import json
 
 import aiosqlite
 
+from gryag import context
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS chats (
     chat_id  INTEGER PRIMARY KEY,
@@ -411,7 +413,7 @@ async def events_between(
     async with db.execute(
         """
         SELECT e.message_id, e.ts, e.action, e.actor_id, e.payload,
-               COALESCE(u.alias, 'хтось') AS alias
+               u.display_name, u.alias
         FROM events e
         LEFT JOIN users u ON u.chat_id = e.chat_id AND u.user_id = e.actor_id
         WHERE e.chat_id = ? AND e.ts >= ? AND e.ts < ?
@@ -422,6 +424,7 @@ async def events_between(
         rows = [dict(r) for r in await cur.fetchall()]
     for row in rows:
         row["payload"] = json.loads(row["payload"]) if row["payload"] else {}
+        row["alias"] = context.pretty_name(row.pop("display_name"), row.pop("alias"))
     return rows
 
 
@@ -749,18 +752,22 @@ async def lore_stats(
         total = int((await cur.fetchone())[0])
 
     async def per_person(since: str, until: str) -> dict[str, int]:
+        # Grouped by user rather than by alias: the readable name is built in Python by
+        # `context.pretty_name`, which SQL cannot call.
         async with db.execute(
             """
-            SELECT COALESCE(u.alias, 'хтось') AS who, COUNT(*) AS n
+            SELECT u.display_name, u.alias, COUNT(*) AS n
             FROM messages m
             LEFT JOIN users u ON u.chat_id = m.chat_id AND u.user_id = m.user_id
             WHERE m.chat_id = ? AND m.ts >= ? AND m.ts < ?
               AND m.is_bot = 0 AND m.sender_is_bot = 0
-            GROUP BY who
+            GROUP BY m.user_id
             """,
             (chat_id, since, until),
         ) as cur:
-            return {r[0]: int(r[1]) for r in await cur.fetchall()}
+            return {
+                context.pretty_name(r[0], r[1]): int(r[2]) for r in await cur.fetchall()
+            }
 
     now_counts = await per_person(start, end)
     then_counts = await per_person(previous_start, start)
@@ -768,8 +775,8 @@ async def lore_stats(
 
     async with db.execute(
         """
-        SELECT r.message_id, COALESCE(u.alias, 'хтось'), COALESCE(m.text, ''),
-               SUM(r.count) AS total
+        SELECT r.message_id, u.display_name, u.alias, COALESCE(m.text, ''),
+               m.media_kind, SUM(r.count) AS total
         FROM reactions r
         JOIN messages m ON m.chat_id = r.chat_id AND m.message_id = r.message_id
         LEFT JOIN users u ON u.chat_id = m.chat_id AND u.user_id = m.user_id
@@ -782,8 +789,15 @@ async def lore_stats(
     ) as cur:
         reacted = [tuple(r) for r in await cur.fetchall()]
     top_reacted = [
-        (alias, text, int(count), await reactions_for(db, chat_id, message_id))
-        for message_id, alias, text, count in reacted
+        (
+            context.pretty_name(display_name, alias),
+            text,
+            media_kind,
+            message_id,
+            int(count),
+            await reactions_for(db, chat_id, message_id),
+        )
+        for message_id, display_name, alias, text, media_kind, count in reacted
     ]
 
     async with db.execute(
@@ -817,17 +831,21 @@ async def lore_stats(
         # editing its own 58 messages, which is a bot's behaviour, not a person's habit.
         async with db.execute(
             f"""
-            SELECT COALESCE(u.alias, 'хтось') AS who, {expression} AS n
+            SELECT u.display_name, u.alias, {expression} AS n
             FROM messages m
             LEFT JOIN users u ON u.chat_id = m.chat_id AND u.user_id = m.user_id
             WHERE m.chat_id = ? AND m.ts >= ? AND m.ts < ?
               AND m.is_bot = 0 AND m.sender_is_bot = 0 AND {clause}
-            GROUP BY who ORDER BY n DESC, who LIMIT 1
+            GROUP BY m.user_id ORDER BY n DESC, u.alias LIMIT 1
             """,
             window,
         ) as cur:
             found = await cur.fetchone()
-        return (found[0], int(found[1])) if found and found[1] else None
+        return (
+            (context.pretty_name(found[0], found[1]), int(found[2]))
+            if found and found[2]
+            else None
+        )
 
     return {
         "total": total,

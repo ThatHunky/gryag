@@ -188,3 +188,44 @@ def test_absent_memory_adds_nothing():
                                chat_title="c", week_summary="", today_summary=None, facts=[])
 
     assert with_none == with_empty
+
+
+def test_a_pretty_name_is_never_cut_mid_word():
+    """`alias_for` truncates at eight characters to save prompt tokens, which is right for
+    the live context and wrong for a document people read: it produced `Anonymou`,
+    `андрійни` and `позорниц` in the first lore."""
+    assert context.pretty_name("Anonymous", "Anonymou") == "Anonymous"
+    assert context.pretty_name("андрійний колайдер", "андрійни") == "андрійний колайдер"
+    assert context.pretty_name("DarkBlossom", "DarkBlos") == "DarkBlossom"
+
+
+def test_a_pretty_name_drops_decoration():
+    assert context.pretty_name("позорниця🇺🇦", "позорниц") == "позорниця"
+    assert context.pretty_name("Markinim ^_^", "Markinim") == "Markinim"
+
+
+def test_a_long_name_falls_back_to_its_first_word():
+    assert (
+        context.pretty_name("артемопокалипсис/локшина малинова", "артемопо")
+        == "артемопокалипсис"
+    )
+    assert context.pretty_name("TikArchive | TikTok Downloader", "TikArchi") == "TikArchive"
+
+
+def test_an_unusable_display_name_falls_back_to_the_alias():
+    """One member's display name is 63 characters of keyboard mash, and their alias is
+    the only readable name anybody has."""
+    mash = "bshdhdhdhgehdifidhsvdjfofushsvdhjdiduegdjducudvehejsexicudhsvshz undefined"
+
+    assert context.pretty_name(mash, "блеб") == "блеб"
+
+
+def test_a_pretty_name_with_nothing_to_work_from():
+    assert context.pretty_name("", "") == "хтось"
+    assert context.pretty_name(None, None) == "хтось"
+
+
+def test_gifs_and_audio_get_a_marker_like_every_other_kind():
+    """Without one they render as an empty line, which is what `[без тексту]` came from."""
+    assert context.render_line({"media_kind": "animation", "text": "", "alias": "o"}) == "o: [гіфка]"
+    assert context.render_line({"media_kind": "audio", "text": "", "alias": "o"}) == "o: [аудіо]"

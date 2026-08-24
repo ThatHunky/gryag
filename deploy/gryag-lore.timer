@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the gryag lore job once a day
+
+[Timer]
+# After the 04:00 digest and inside the same measured dead zone: 03:00-07:00 carries
+# 0-11 messages an hour against a peak of 958 at 22:00. Whether it actually writes
+# anything is `lore_interval_days`, not this — OnCalendar cannot express "every second
+# day" without breaking across month boundaries.
+OnCalendar=*-*-* 05:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

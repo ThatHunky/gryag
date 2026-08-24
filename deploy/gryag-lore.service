@@ -1,0 +1,11 @@
+[Unit]
+Description=gryag chat lore — rewrite the living document
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=thathunky
+WorkingDirectory=/home/thathunky/bots/gryag-v2
+ExecStart=/home/thathunky/bots/gryag-v2/.venv/bin/python -m gryag.lore
+StandardOutput=journal
+StandardError=journal

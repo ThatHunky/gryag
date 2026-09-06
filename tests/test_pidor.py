@@ -149,6 +149,8 @@ async def test_announcing_an_old_winner_is_one_message(db):
     await pidor.announce(bot, db, -100, 3, False, datetime(2026, 8, 19, 12, tzinfo=timezone.utc))
 
     assert len(bot.sent) == 1
+    assert "@user3" not in bot.sent[0][1]
+    assert "людина 3" in bot.sent[0][1]
 
 
 async def test_the_announcement_is_stored_as_the_bots_own_message(db):

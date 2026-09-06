@@ -116,12 +116,15 @@ async def _say(bot, db, chat_id: int, text: str, parse_mode: str | None = None) 
 async def announce(bot, db, chat_id: int, user_id: int, is_new: bool, now) -> None:
     names = await store.user_names(db, chat_id, [user_id])
     username, display_name = names.get(user_id, (None, str(user_id)))
-    who = mention(user_id, username, display_name)
     seed = announcement_seed(chat_id, kyiv_day(now))
-
     if not is_new:
-        await _say(bot, db, chat_id, phrases.pick(phrases.ALREADY, seed).format(who=who), "HTML")
+        # Sequential/repeated commands do not tag the person; only the original search tags them.
+        who = html.escape(display_name or username or str(user_id))
+        template = random.choice(phrases.ALREADY)
+        await _say(bot, db, chat_id, template.format(who=who), "HTML")
         return
+
+    who = mention(user_id, username, display_name)
 
     await _say(bot, db, chat_id, phrases.pick(phrases.WARMUP, seed))
     await asyncio.sleep(SHOW_DELAY)

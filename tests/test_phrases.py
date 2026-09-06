@@ -37,3 +37,13 @@ def test_picking_spreads_across_the_pool():
     seen = {phrases.pick(phrases.WARMUP, seed) for seed in range(200)}
 
     assert len(seen) > 10
+
+
+def test_the_by_the_white_idiom_names_the_language_the_bot_speaks():
+    """«русским по белому» is an idiom about the language the speaker just spoke. Carrying
+    the frame into Ukrainian but leaving the language word alone had гряг insisting, in a
+    Ukrainian sentence, that it had said it in Russian."""
+    for name in ("WARMUP", "VERDICT", "ALREADY", "DIGEST"):
+        for line in getattr(phrases, name):
+            if "по білому" in line:
+                assert "українською по білому" in line, line

@@ -192,6 +192,8 @@ class FakeClient:
     async def generate_content(self, *, model, contents, config):
         self.calls.append({"model": model, "contents": contents, "config": config})
         nxt = self._responses.pop(0) if self._responses else ""
+        if isinstance(nxt, FakeResponse):
+            return nxt
         if nxt is None:
             return FakeResponse("", blocked=True)
         return FakeResponse(nxt)
@@ -633,6 +635,28 @@ async def test_the_command_is_answered_even_in_a_chat_nobody_switched_on(db):
     assert message.documents[0][0] == "lore.md"
     stored = await store.recent_messages(db, CHAT, limit=5)
     assert "/lore" in [r["text"] for r in stored]
+
+
+async def test_a_truncated_rewrite_with_max_tokens_is_refused(db):
+    """A model response cut short by max_output_tokens must not overwrite the lore."""
+    await enabled(db)
+    await seed_window(db)
+    await store.save_lore(
+        db, chat_id=CHAT, text="СТАРИЙ ДОКУМЕНТ", model="m", tokens=2,
+        window_start=BEFORE, window_end=START, created_at="2026-08-18T05:00:00+00:00",
+    )
+    truncated_candidate = pytypes.SimpleNamespace(finish_reason="MAX_TOKENS")
+    truncated_response = FakeResponse("обрізаний текст...")
+    truncated_response.candidates = [truncated_candidate]
+
+    client = FakeClient(beats_payload("щось"))
+    client._responses.append(truncated_response)
+
+    assert await lore.generate(db, client, CHAT, now=NOW, force=True) is False
+
+    latest = await store.latest_lore(db, CHAT)
+    assert latest["version"] == 1
+    assert latest["text"] == "СТАРИЙ ДОКУМЕНТ"
 
 
 async def test_the_sent_document_is_in_the_transcript_like_anything_else_the_bot_says(db):

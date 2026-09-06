@@ -45,6 +45,11 @@ HARVEST_MAX_TOKENS = 8000
 """Thinking tokens count against max_output_tokens on these models, so a budget sized for
 the JSON alone comes back empty as soon as thinking is on."""
 
+REWRITE_MAX_TOKENS = 64000
+"""The document rewrite allowance. Models like gemini-3.7-flash and gemini-2.5 support
+up to 65,536 output tokens, and thinking tokens bill against this same ceiling. Sizing it
+generously guarantees the model can think as much as it wants without truncating the document."""
+
 ACTION_LABELS = {
     "join": "прийшли",
     "leave": "пішли",
@@ -295,11 +300,21 @@ async def _call(
         )
         return None
 
+    candidate = response.candidates[0]
+    finish_reason = getattr(candidate, "finish_reason", None)
+    if finish_reason in (types.FinishReason.MAX_TOKENS, "MAX_TOKENS"):
+        log.warning("lore call truncated by max_output_tokens on %s", model)
+        return None
+
     text = (response.text or "").strip()
     if not text:
-        # An empty body is what a thinking budget that ate the whole output allowance
-        # looks like. Storing it would replace the document with nothing.
-        log.warning("lore returned an empty body on %s", model)
+        log.warning(
+            "lore returned an empty body on %s (finish_reason=%s, feedback=%s, parts=%s)",
+            model,
+            finish_reason,
+            getattr(response, "prompt_feedback", None),
+            getattr(getattr(candidate, "content", None), "parts", None),
+        )
         return None
     return text, response.usage_metadata
 
@@ -356,7 +371,9 @@ async def harvest(
     beats: list[dict] = []
     refused = 0
     invented = 0
-    for chunk in chunks:
+    for i, chunk in enumerate(chunks, 1):
+        if i % 10 == 0 or i == 1 or i == len(chunks):
+            log.info("harvest chunk %s/%s for %s", i, len(chunks), chat_id)
         result = await _call(
             client,
             model,
@@ -444,6 +461,20 @@ REWRITE_PROMPT = """Ти ведеш одну живу сторінку — ло�
 * Максимум {max_chars} символів."""
 
 
+def clean_clamp(text: str, max_chars: int) -> str:
+    """Trim to max_chars cleanly at a paragraph boundary if possible, falling back to clamp."""
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    last_para = cut.rfind("\n\n")
+    if last_para > int(max_chars * 0.8):
+        return cut[:last_para].rstrip()
+    last_nl = cut.rfind("\n")
+    if last_nl > int(max_chars * 0.8):
+        return cut[:last_nl].rstrip()
+    return context.clamp(text, int(max_chars / context.CHARS_PER_TOKEN))
+
+
 async def rewrite(
     db: aiosqlite.Connection,
     client,
@@ -472,13 +503,14 @@ async def rewrite(
             beats=render_beats(beats, chat_id) or "(нічого нового)",
             stats=stats,
             cast=cast or "(нічого не відомо)",
-            max_chars=max_chars,
+            max_chars=int(max_chars * 0.85),
         ),
         schema=None,
         thinking=thinking,
-        # Thinking bills against the same allowance, so the budget has to cover both the
-        # document and however long the model decides to think about it.
-        max_tokens=int(max_chars / context.CHARS_PER_TOKEN) + HARVEST_MAX_TOKENS,
+        # Thinking bills against the same allowance, so sizing generously guarantees
+        # the model can think for 10-15k tokens and still write the full document without
+        # getting cut off mid-sentence.
+        max_tokens=REWRITE_MAX_TOKENS,
     )
     if result is None:
         return None
@@ -563,9 +595,7 @@ async def generate(
         log.error("the rewrite failed for %s; the previous version stands", chat_id)
         return False
 
-    # `clamp` takes a token budget; the knob is in characters, and the ratio is the same
-    # measured 2.5 the rest of the project uses.
-    text = context.clamp(text, int(max_chars / context.CHARS_PER_TOKEN))
+    text = clean_clamp(text, max_chars)
     version = await store.save_lore(
         db,
         chat_id=chat_id,

@@ -216,9 +216,6 @@ async def accept_command(message, db) -> bool:
     a restart answers commands typed last night.
     """
     await persist(db, message)
-    if not await _chat_enabled(db, message.chat.id):
-        # Stored like anything else, but a chat nobody switched on gets no answer.
-        return False
     age = max((_utcnow() - message.date).total_seconds(), 0.0)
     if age > await config.get_int(db, "max_reply_age", message.chat.id):
         log.info("ignoring a replayed command in %s, %.0fs old", message.chat.id, age)

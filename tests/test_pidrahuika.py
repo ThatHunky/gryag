@@ -248,14 +248,15 @@ async def test_the_command_answers_even_when_the_morning_post_is_off(db, _board)
     assert "Підрахуйка" in message.replies[0]
 
 
-async def test_the_command_says_nothing_in_a_chat_that_was_never_switched_on(db, _board):
+async def test_the_command_is_answered_even_in_a_chat_that_was_never_switched_on(db, _board):
     from tests.conftest import FakeMessage
 
     message = FakeMessage(text="/pidrahuika")
 
     await pidrahuika.show_command(message, db)
 
-    assert message.replies == []
+    assert message.replies
+    assert "Підрахуйка" in message.replies[0]
 
 
 async def test_the_commands_answer_is_stored_like_anything_else_the_bot_says(db, _board):

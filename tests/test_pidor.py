@@ -326,3 +326,20 @@ async def test_the_scheduled_announcement_does_not_talk_over_a_reply(db):
 
     assert spoken == 0
     assert bot.sent == []
+
+
+async def test_pidor_works_in_a_chat_that_was_never_switched_on(db):
+    """Commands run even if conversational replies are disabled (chats.enabled = 0)."""
+    from tests.conftest import FakeMessage
+
+    await _populate(db, chat_id=-200)
+    await admin.disable_chat(db, -200)
+    message = FakeMessage(text="/pidor", chat_id=-200)
+    message.bot = FakeBot()
+
+    await pidor.play_command(message, db)
+
+    assert await store.pidor_winner(
+        db, -200, pidor.kyiv_day(datetime.now(timezone.utc))
+    ) is not None
+

@@ -22,7 +22,19 @@ HARM_CATEGORIES = (
     "HARM_CATEGORY_HATE_SPEECH",
     "HARM_CATEGORY_SEXUALLY_EXPLICIT",
     "HARM_CATEGORY_DANGEROUS_CONTENT",
+    "HARM_CATEGORY_CIVIC_INTEGRITY",
 )
+
+
+def safety_settings() -> list[types.SafetySetting]:
+    """Every configurable filter switched off, for every call the bot makes.
+
+    OFF rather than BLOCK_NONE: BLOCK_NONE still scores each response and only declines to
+    act on the score, OFF skips the filter. Checked on 2026-09-17 against every model in
+    config — the chat, digest, lore and image models all accept it with CIVIC_INTEGRITY.
+    `PROHIBITED_CONTENT` is not one of these and nothing here switches it off.
+    """
+    return [types.SafetySetting(category=c, threshold="OFF") for c in HARM_CATEGORIES]
 
 PRICES: dict[str, tuple[float, float, float]] = {
     # model: (input, output, cached input) in USD per 1M tokens.
@@ -155,10 +167,7 @@ async def generate(
         system_instruction=system,
         max_output_tokens=max_output_tokens,
         thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
-        safety_settings=[
-            types.SafetySetting(category=category, threshold="BLOCK_NONE")
-            for category in HARM_CATEGORIES
-        ],
+        safety_settings=safety_settings(),
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         tools=build_tools(has_media=media is not None) if use_tools else None,
         # Mixing our own function with Google's server-side tools is refused outright

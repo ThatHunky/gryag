@@ -37,7 +37,7 @@ chat is already more than the document can absorb in one rewrite."""
 CHUNK_TOKENS = 2000
 """Blast-radius control, not a token economy. A stretch of this chat's real transcript has
 already come back `PROHIBITED_CONTENT` with no candidates at all, and that filter is not
-configurable — BLOCK_NONE on the four harm categories does not touch it."""
+configurable — switching every harm category OFF does not touch it."""
 
 MAX_BEATS = 8
 
@@ -279,10 +279,7 @@ async def _call(
         thinking_config=types.ThinkingConfig(thinking_budget=thinking),
         response_mime_type="application/json" if schema else None,
         response_schema=schema,
-        safety_settings=[
-            types.SafetySetting(category=c, threshold="BLOCK_NONE")
-            for c in llm.HARM_CATEGORIES
-        ],
+        safety_settings=llm.safety_settings(),
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
     try:

@@ -36,7 +36,7 @@ CHUNK_TOKENS = 2000
 
 Sending the whole day at once was refused outright: 8,000 tokens of this chat's real
 transcript came back with `block_reason: PROHIBITED_CONTENT` and no candidates at all.
-That filter is not configurable — BLOCK_NONE on the four harm categories does not touch
+That filter is not configurable — switching every harm category OFF does not touch
 it. Chunking means one refused stretch costs that stretch, not the whole day."""
 
 DAY_SCHEMA = {
@@ -122,10 +122,7 @@ async def _generate_json(
         thinking_config=types.ThinkingConfig(thinking_budget=0),
         response_mime_type="application/json",
         response_schema=schema,
-        safety_settings=[
-            types.SafetySetting(category=c, threshold="BLOCK_NONE")
-            for c in llm.HARM_CATEGORIES
-        ],
+        safety_settings=llm.safety_settings(),
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
     try:

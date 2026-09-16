@@ -173,8 +173,9 @@ async def test_safety_is_disabled_on_every_category():
     )
 
     settings = client.calls[0]["config"].safety_settings
-    assert len(settings) == 4
-    assert all(s.threshold == "BLOCK_NONE" for s in settings)
+    assert {s.category for s in settings} == set(llm.HARM_CATEGORIES)
+    assert "HARM_CATEGORY_CIVIC_INTEGRITY" in llm.HARM_CATEGORIES
+    assert all(s.threshold == "OFF" for s in settings)
 
 
 async def test_reports_how_many_searches_were_grounded():

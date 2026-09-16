@@ -119,10 +119,7 @@ async def generate(
 
     config = types.GenerateContentConfig(
         response_modalities=["IMAGE"],
-        safety_settings=[
-            types.SafetySetting(category=category, threshold="BLOCK_NONE")
-            for category in llm.HARM_CATEGORIES
-        ],
+        safety_settings=llm.safety_settings(),
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
 

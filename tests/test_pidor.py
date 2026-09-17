@@ -345,3 +345,35 @@ async def test_pidor_works_in_a_chat_that_was_never_switched_on(db):
         db, -200, pidor.kyiv_day(datetime.now(timezone.utc))
     ) is not None
 
+
+class MarkupBot(FakeBot):
+    def __init__(self):
+        super().__init__()
+        self.markups: list = []
+
+    async def send_message(self, chat_id, text, parse_mode=None, reply_markup=None, **kwargs):
+        self.markups.append(reply_markup)
+        return await super().send_message(chat_id, text, parse_mode=parse_mode)
+
+
+async def test_only_the_verdict_carries_the_donate_buttons(db, monkeypatch):
+    monkeypatch.setenv("DONATE_JAR_URL", "https://send.monobank.ua/jar/3KMKUPJ4TP")
+    await _populate(db)
+    bot = MarkupBot()
+
+    await pidor.announce(bot, db, -100, 3, True, datetime(2026, 8, 19, 12, tzinfo=timezone.utc))
+
+    warmup_1, warmup_2, verdict = bot.markups
+    assert warmup_1 is None and warmup_2 is None
+    assert verdict.inline_keyboard[0][0].url == "https://send.monobank.ua/jar/3KMKUPJ4TP"
+
+
+async def test_a_repeat_of_todays_winner_has_no_buttons(db, monkeypatch):
+    monkeypatch.setenv("DONATE_JAR_URL", "https://send.monobank.ua/jar/3KMKUPJ4TP")
+    await _populate(db)
+    bot = MarkupBot()
+
+    await pidor.announce(bot, db, -100, 3, False, datetime(2026, 8, 19, 12, tzinfo=timezone.utc))
+
+    assert bot.markups == [None]
+

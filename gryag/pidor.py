@@ -18,7 +18,7 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from gryag import config, handlers, phrases, store
+from gryag import config, donate, handlers, phrases, store
 from gryag.handlers import LOCAL_TZ, kyiv_day
 
 log = logging.getLogger(__name__)
@@ -94,8 +94,12 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-async def _say(bot, db, chat_id: int, text: str, parse_mode: str | None = None) -> None:
-    sent = await bot.send_message(chat_id, text, parse_mode=parse_mode)
+async def _say(
+    bot, db, chat_id: int, text: str, parse_mode: str | None = None, reply_markup=None
+) -> None:
+    sent = await bot.send_message(
+        chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup
+    )
     # Stored like any other thing the bot says, so it counts against the reply caps and
     # shows up in the context window. A drawing that skipped this once made the model
     # apologise for not having drawn it.
@@ -130,7 +134,14 @@ async def announce(bot, db, chat_id: int, user_id: int, is_new: bool, now) -> No
     await asyncio.sleep(SHOW_DELAY)
     await _say(bot, db, chat_id, phrases.pick(phrases.WARMUP, seed + 1))
     await asyncio.sleep(SHOW_DELAY)
-    await _say(bot, db, chat_id, phrases.pick(phrases.VERDICT, seed).format(who=who), "HTML")
+    await _say(
+        bot,
+        db,
+        chat_id,
+        phrases.pick(phrases.VERDICT, seed).format(who=who),
+        "HTML",
+        reply_markup=donate.donate_keyboard(),
+    )
     log.info("підарас дня in %s is %s", chat_id, user_id)
 
 

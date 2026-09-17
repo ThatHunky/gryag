@@ -306,3 +306,55 @@ async def test_the_morning_post_does_not_talk_over_a_reply(db, _board):
 
     assert posted == 0
     assert bot.sent == []
+
+
+async def test_the_command_carries_the_donate_buttons_fresh_and_cached(db, _board, monkeypatch):
+    from tests.conftest import FakeMessage
+
+    monkeypatch.setenv("DONATE_JAR_URL", "https://send.monobank.ua/jar/3KMKUPJ4TP")
+    pidrahuika._last_asked.clear()
+    first, second = FakeMessage(text="/pidrahuika"), FakeMessage(text="/pidrahuika")
+
+    await pidrahuika.show_command(first, db)
+    await pidrahuika.show_command(second, db)
+
+    assert first.markups[0].inline_keyboard[0][0].url.endswith("3KMKUPJ4TP")
+    assert second.markups[0].inline_keyboard[0][0].url.endswith("3KMKUPJ4TP")
+
+
+async def test_a_board_that_does_not_answer_gets_no_buttons(db, monkeypatch):
+    from tests.conftest import FakeMessage
+
+    monkeypatch.setenv("DONATE_JAR_URL", "https://send.monobank.ua/jar/3KMKUPJ4TP")
+    pidrahuika._last_asked.clear()
+
+    async def no_answer(period_type, now=None):
+        return None
+
+    monkeypatch.setattr(pidrahuika, "fetch_report", no_answer)
+    message = FakeMessage(text="/pidrahuika")
+
+    await pidrahuika.show_command(message, db)
+
+    assert message.replies == ["табло не відповідає"]
+    assert message.markups == [None]
+
+
+class MarkupBot(FakeBot):
+    def __init__(self):
+        super().__init__()
+        self.markups: list = []
+
+    async def send_message(self, chat_id, text, reply_markup=None, **kwargs):
+        self.markups.append(reply_markup)
+        return await super().send_message(chat_id, text, **kwargs)
+
+
+async def test_the_morning_post_carries_the_donate_buttons(db, _board, monkeypatch):
+    monkeypatch.setenv("DONATE_JAR_URL", "https://send.monobank.ua/jar/3KMKUPJ4TP")
+    await admin.enable_chat(db, -100, "матсурі")
+    await config.set(db, "pidrahuika_enabled", "1", chat_id=-100)
+    bot = MarkupBot()
+
+    assert await pidrahuika.post_due(db, bot, datetime(2026, 8, 19, 6, 30, tzinfo=timezone.utc)) == 1
+    assert bot.markups[0].inline_keyboard[0][0].url.endswith("3KMKUPJ4TP")

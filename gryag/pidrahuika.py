@@ -20,7 +20,7 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from gryag import config, handlers, phrases, store
+from gryag import config, donate, handlers, phrases, store
 from gryag.handlers import LOCAL_TZ, kyiv_day
 
 log = logging.getLogger(__name__)
@@ -224,7 +224,7 @@ async def post_due(db, bot, now: datetime | None = None) -> int:
                 # Deliberately unmarked: the next tick is ten minutes away, and a board
                 # that was down at nine is usually up at ten past.
                 continue
-            sent = await bot.send_message(chat_id, text)
+            sent = await bot.send_message(chat_id, text, reply_markup=donate.donate_keyboard())
             await store.save_message(
                 db,
                 chat_id=chat_id,
@@ -261,14 +261,14 @@ async def show_command(message: Message, db) -> None:
         return
     cached = _last_asked.get(message.chat.id)
     if cached and time.monotonic() - cached[0] < COOLDOWN:
-        await handlers.answer(message, db, cached[1])
+        await handlers.answer(message, db, cached[1], reply_markup=donate.donate_keyboard())
         return
     text = await digest_text(db, "daily", datetime.now(timezone.utc))
     if text is None:
         await handlers.answer(message, db, "табло не відповідає")
         return
     _last_asked[message.chat.id] = (time.monotonic(), text)
-    await handlers.answer(message, db, text)
+    await handlers.answer(message, db, text, reply_markup=donate.donate_keyboard())
 
 
 def build_router() -> Router:

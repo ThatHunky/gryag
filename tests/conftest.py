@@ -50,6 +50,7 @@ class FakeMessage:
         self.documents: list[tuple[str, bytes, str]] = []
         self.parse_modes: list[str | None] = []
         self.markups: list = []
+        self.link_preview_options: list = []
 
     async def reply_photo(self, photo):
         self.photos.append(photo.data)
@@ -63,11 +64,12 @@ class FakeMessage:
         sent.document = pytypes.SimpleNamespace(file_id="lore.md")
         return sent
 
-    async def reply(self, text, parse_mode=None, reply_markup=None):
+    async def reply(self, text, parse_mode=None, reply_markup=None, link_preview_options=None):
         """The bot always answers as a Telegram reply, quoting what triggered it."""
         self.replies.append(text)
         self.parse_modes.append(parse_mode)
         self.markups.append(reply_markup)
+        self.link_preview_options.append(link_preview_options)
         sent = FakeMessage(text=text, message_id=self.message_id + 1000, is_bot=True)
         sent.reply_to_message = self
         return sent

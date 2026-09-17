@@ -224,10 +224,21 @@ async def accept_command(message, db) -> bool:
 
 
 async def answer(
-    message, db, text: str, *, parse_mode: str | None = None, reply_markup=None
+    message,
+    db,
+    text: str,
+    *,
+    parse_mode: str | None = None,
+    reply_markup=None,
+    link_preview_options=None,
 ) -> None:
     """Reply to a command, and store the reply like anything else the bot says."""
-    sent = await message.reply(text, parse_mode=parse_mode, reply_markup=reply_markup)
+    sent = await message.reply(
+        text,
+        parse_mode=parse_mode,
+        reply_markup=reply_markup,
+        link_preview_options=link_preview_options,
+    )
     await persist(db, sent, is_bot=True)
 
 

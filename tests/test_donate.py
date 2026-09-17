@@ -110,6 +110,37 @@ def test_with_nothing_configured_there_is_no_text():
     assert donate.donate_text() is None
 
 
+def test_a_jar_without_a_scheme_is_dropped_but_the_card_stays(monkeypatch):
+    # A url button with a bad scheme makes Telegram reject the whole message — the
+    # verdict or killboard post it rides on — so a malformed jar must vanish quietly.
+    _configure(monkeypatch, jar="send.monobank.ua/jar/x")
+
+    (row,) = donate.donate_keyboard().inline_keyboard
+
+    assert [b.copy_text.text for b in row] == [CARD]
+
+
+def test_a_card_over_the_copy_text_limit_is_dropped(monkeypatch):
+    _configure(monkeypatch, card="1" * 257)
+
+    (row,) = donate.donate_keyboard().inline_keyboard
+
+    assert [b.url for b in row] == [JAR]
+
+
+def test_an_invalid_site_is_left_out_of_the_text(monkeypatch):
+    _configure(monkeypatch, site="dobrovolskyi.com.ua")
+
+    assert "dobrovolskyi" not in donate.donate_text()
+
+
+def test_an_invalid_jar_with_no_card_leaves_nothing_at_all(monkeypatch):
+    _configure(monkeypatch, jar="not-a-url", card=None)
+
+    assert donate.donate_keyboard() is None
+    assert donate.donate_text() is None
+
+
 async def test_the_command_answers_with_the_details_and_the_buttons(db, monkeypatch):
     from tests.conftest import FakeMessage
 
@@ -121,6 +152,8 @@ async def test_the_command_answers_with_the_details_and_the_buttons(db, monkeypa
     assert CARD in message.replies[0]
     assert message.parse_modes[0] == "HTML"
     assert message.markups[0].inline_keyboard[0][0].url == JAR
+    # The jar link must not spawn a preview card under the message.
+    assert message.link_preview_options[0].is_disabled is True
 
 
 async def test_the_command_says_so_when_nothing_is_configured(db):

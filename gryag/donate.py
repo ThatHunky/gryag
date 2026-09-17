@@ -10,7 +10,11 @@ from __future__ import annotations
 import html
 import os
 
-from aiogram.types import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram import Router
+from aiogram.filters import Command
+from aiogram.types import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, Message
+
+from gryag import handlers
 
 
 def _env(name: str) -> str:
@@ -55,3 +59,22 @@ def donate_text() -> str | None:
         label = site.split("://", 1)[-1].rstrip("/")
         lines.append(f'🌐 <a href="{html.escape(site, quote=True)}">{html.escape(label)}</a>')
     return "\n".join(lines)
+
+
+async def show_command(message: Message, db) -> None:
+    """`/donate`. Answered everywhere, like every other typed command: see accept_command."""
+    if not await handlers.accept_command(message, db):
+        return
+    text = donate_text()
+    if text is None:
+        await handlers.answer(message, db, "реквізитів поки немає")
+        return
+    await handlers.answer(
+        message, db, text, parse_mode="HTML", reply_markup=donate_keyboard()
+    )
+
+
+def build_router() -> Router:
+    router = Router(name="donate")
+    router.message(Command("donate"))(show_command)
+    return router

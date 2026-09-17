@@ -223,9 +223,11 @@ async def accept_command(message, db) -> bool:
     return True
 
 
-async def answer(message, db, text: str) -> None:
+async def answer(
+    message, db, text: str, *, parse_mode: str | None = None, reply_markup=None
+) -> None:
     """Reply to a command, and store the reply like anything else the bot says."""
-    sent = await message.reply(text)
+    sent = await message.reply(text, parse_mode=parse_mode, reply_markup=reply_markup)
     await persist(db, sent, is_bot=True)
 
 

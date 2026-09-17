@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -106,3 +108,50 @@ def test_the_text_escapes_what_it_is_given(monkeypatch):
 
 def test_with_nothing_configured_there_is_no_text():
     assert donate.donate_text() is None
+
+
+async def test_the_command_answers_with_the_details_and_the_buttons(db, monkeypatch):
+    from tests.conftest import FakeMessage
+
+    _configure(monkeypatch, site="https://dobrovolskyi.com.ua")
+    message = FakeMessage(text="/donate")
+
+    await donate.show_command(message, db)
+
+    assert CARD in message.replies[0]
+    assert message.parse_modes[0] == "HTML"
+    assert message.markups[0].inline_keyboard[0][0].url == JAR
+
+
+async def test_the_command_says_so_when_nothing_is_configured(db):
+    from tests.conftest import FakeMessage
+
+    message = FakeMessage(text="/donate")
+
+    await donate.show_command(message, db)
+
+    assert message.replies == ["реквізитів поки немає"]
+
+
+async def test_the_commands_answer_is_stored(db, monkeypatch):
+    from tests.conftest import FakeMessage
+
+    _configure(monkeypatch)
+
+    await donate.show_command(FakeMessage(text="/donate"), db)
+
+    async with db.execute(
+        "SELECT COUNT(*) FROM messages WHERE chat_id = ? AND is_bot = 1", (-100,)
+    ) as cur:
+        assert (await cur.fetchone())[0] == 1
+
+
+async def test_a_replayed_command_is_not_answered(db, monkeypatch):
+    from tests.conftest import FakeMessage
+
+    _configure(monkeypatch)
+    message = FakeMessage(text="/donate", date=datetime.now(timezone.utc) - timedelta(hours=3))
+
+    await donate.show_command(message, db)
+
+    assert message.replies == []

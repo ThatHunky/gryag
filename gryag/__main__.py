@@ -24,6 +24,7 @@ from gryag import (
     admin,
     config,
     digest,
+    donate,
     handlers,
     llm,
     lore,
@@ -102,6 +103,7 @@ async def build(secrets: config.Secrets) -> "Runtime":
         BotCommand(command="pidorstats", description="підараси року"),
         BotCommand(command="pidrahuika", description="підрахуйка СБС за сьогодні"),
         BotCommand(command="lore", description="лор чату"),
+        BotCommand(command="donate", description="підтримати бота"),
     ])
 
     dispatcher = Dispatcher(db=db, client=client, persona=persona, bot_id=me.id)
@@ -117,6 +119,7 @@ async def build(secrets: config.Secrets) -> "Runtime":
     dispatcher.include_router(pidor.build_router())
     dispatcher.include_router(pidrahuika.build_router())
     dispatcher.include_router(lore.build_router())
+    dispatcher.include_router(donate.build_router())
     dispatcher.include_router(handlers.build_router())
     return Runtime(bot=bot, dispatcher=dispatcher, db=db, client=client, persona=persona)
 

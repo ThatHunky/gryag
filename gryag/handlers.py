@@ -613,6 +613,7 @@ async def handle_message(
             week_summary=await store.latest_summary(db, chat_id, "week"),
             today_summary=await store.latest_summary(db, chat_id, "day"),
             facts=facts,
+            bare_call=context.is_bare_call(text, keywords),
             quote=getattr(quote, "text", None),
             quote_author=(
                 context.BOT_ALIAS

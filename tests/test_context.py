@@ -255,3 +255,23 @@ def test_a_namesake_with_no_username_is_still_told_apart():
 
 def test_everybody_else_is_untouched():
     assert context.render_line({"alias": "oleh", "username": "oleh", "text": "привіт"}) == "oleh: привіт"
+
+
+def test_a_bare_call_is_just_the_name():
+    keywords = ("гряг",)
+    assert context.is_bare_call("гряг", keywords)
+    assert context.is_bare_call("Гряг!!", keywords)
+    assert context.is_bare_call("@gryag_bot 👀", keywords)
+    assert context.is_bare_call("грягу?", keywords)
+    assert not context.is_bare_call("гряг де шон", keywords)
+    assert not context.is_bare_call("шпаргалка", keywords)
+
+
+def test_a_bare_call_asks_the_bot_to_join_in_rather_than_ask():
+    trigger = {"message_id": 9, "text": "гряг", "alias": "vsevolod"}
+
+    called = context.build([], [], trigger, now="x", chat_title="t", bare_call=True)
+    asked = context.build([], [], trigger, now="x", chat_title="t")
+
+    assert called.endswith(context.BARE_CALL)
+    assert context.BARE_CALL not in asked

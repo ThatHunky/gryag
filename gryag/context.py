@@ -40,6 +40,24 @@ MEDIA_MARKERS = {
     "document": "[файл]",
 }
 
+BARE_CALL = (
+    "(Тебе просто гукнули, без питання. Не перепитуй «шо?» і не кажи «кажи вже» — "
+    "встрянь у те, про що вище говорять: підколи, відповідь, думка.)"
+)
+"""Measured in the chat on 2026-10-26: somebody mid-argument wrote just «гряг», and the
+bot answered «Та чую я тебе... Кажи вже.» A person called by name in a group joins the
+conversation; only a bot waits to be told what to do."""
+
+
+def is_bare_call(text: str, keywords: tuple[str, ...]) -> bool:
+    """True when the message is nothing but the bot's name: a mention, a keyword, and
+    punctuation or emoji around them."""
+    rest = re.sub(r"@\w+", " ", text or "")
+    for keyword in keywords:
+        rest = re.sub(rf"(?:^|(?<=\W)){re.escape(keyword)}\w*", " ", rest, flags=re.IGNORECASE)
+    return not re.search(r"\w", rest)
+
+
 OTHER_BOT_ALIASES = {"Пісюнбот", "Mafia UA Bot", "TikArchive | TikTok Downloader"}
 
 
@@ -158,6 +176,7 @@ def build(
     week_summary: str | None = None,
     today_summary: str | None = None,
     facts: list[tuple[str, str]] | None = None,
+    bare_call: bool = False,
 ) -> str:
     """Header, memory, then the reply chain, the recent window, and the boundary.
 
@@ -195,4 +214,6 @@ def build(
     if quoted is not None:
         tail.append(quoted)
     tail.append(render_line(trigger))
+    if bare_call:
+        tail.append(BARE_CALL)
     return "\n".join([header, *memory, "", *lines, *tail])

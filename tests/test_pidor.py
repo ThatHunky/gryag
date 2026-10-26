@@ -78,7 +78,10 @@ def _no_waiting(monkeypatch):
     monkeypatch.setattr(pidor, "SHOW_DELAY", 0)
 
 
-async def _populate(db, chat_id=-100, people=(1, 2, 3, 4)):
+async def _populate(db, chat_id=-100, people=(1, 2, 3, 4), ts="2026-08-19T10:00:00+00:00"):
+    """Players who spoke at `ts`. Tests that roll on the real clock must pass a recent
+    one: the draw only counts people seen within `pidor_window_days`, and the fixed
+    August date fell out of that window on 2026-09-18, failing two tests from then on."""
     await admin.enable_chat(db, chat_id, "матсурі")
     for user_id in people:
         await store.upsert_user(
@@ -94,13 +97,17 @@ async def _populate(db, chat_id=-100, people=(1, 2, 3, 4)):
             chat_id=chat_id,
             message_id=user_id,
             user_id=user_id,
-            ts="2026-08-19T10:00:00+00:00",
+            ts=ts,
             text="привіт",
             media_kind=None,
             file_id=None,
             reply_to=None,
             is_bot=False,
         )
+
+
+def _an_hour_ago() -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
 
 
 async def test_rolling_picks_somebody_and_says_it_is_new(db):
@@ -286,7 +293,7 @@ async def test_a_replayed_command_is_not_answered(db):
 async def test_a_fresh_command_rolls_for_today_not_for_the_moment_it_was_typed(db):
     from tests.conftest import FakeMessage
 
-    await _populate(db)
+    await _populate(db, ts=_an_hour_ago())
     message = FakeMessage(text="/pidor")
     message.bot = FakeBot()
 
@@ -334,7 +341,7 @@ async def test_pidor_works_in_a_chat_that_was_never_switched_on(db):
     """Commands run even if conversational replies are disabled (chats.enabled = 0)."""
     from tests.conftest import FakeMessage
 
-    await _populate(db, chat_id=-200)
+    await _populate(db, chat_id=-200, ts=_an_hour_ago())
     await admin.disable_chat(db, -200)
     message = FakeMessage(text="/pidor", chat_id=-200)
     message.bot = FakeBot()

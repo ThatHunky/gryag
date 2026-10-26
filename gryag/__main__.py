@@ -33,6 +33,7 @@ from gryag import (
     proactive,
     screens,
     store,
+    summary,
 )
 
 @dataclass
@@ -103,6 +104,7 @@ async def build(secrets: config.Secrets) -> "Runtime":
         BotCommand(command="pidorstats", description="підараси року"),
         BotCommand(command="pidrahuika", description="підрахуйка СБС за сьогодні"),
         BotCommand(command="lore", description="лор чату"),
+        BotCommand(command="summary", description="що я пропустив"),
         BotCommand(command="donate", description="підтримати бота"),
     ])
 
@@ -119,6 +121,7 @@ async def build(secrets: config.Secrets) -> "Runtime":
     dispatcher.include_router(pidor.build_router())
     dispatcher.include_router(pidrahuika.build_router())
     dispatcher.include_router(lore.build_router())
+    dispatcher.include_router(summary.build_router())
     dispatcher.include_router(donate.build_router())
     dispatcher.include_router(handlers.build_router())
     return Runtime(bot=bot, dispatcher=dispatcher, db=db, client=client, persona=persona)

@@ -44,6 +44,9 @@ PRICES: dict[str, tuple[float, float, float]] = {
     "gemini-3.7-flash": (0.75, 3.75, 0.075),
     "gemini-2.5-flash": (0.30, 2.50, 0.03),
     "gemini-2.5-flash-lite": (0.10, 0.40, 0.025),
+    # Checked on 2026-10-26; the alias pointed at 3.5 Flash-Lite that day.
+    "gemini-flash-lite-latest": (0.30, 2.50, 0.03),
+    "gemini-3.5-flash-lite": (0.30, 2.50, 0.03),
 }
 
 
@@ -157,16 +160,26 @@ async def generate(
     media: tuple[bytes, str] | None = None,
     use_tools: bool = True,
     tool_handler=None,
+    parts: list | None = None,
+    thinking_level: str | None = None,
 ) -> LlmResult | None:
     """Returns None on any failure or empty reply — silence is the correct behaviour.
 
     `media` is (bytes, mime_type) and is sent inline before the prompt, so the model sees
     the picture first and the conversation second — the same order a person would.
+    `parts`, when given, is the whole user turn as built by the caller, and replaces both
+    `media` and `user` — the summary hands over several pages and photos at once.
+    `thinking_level` replaces `thinking_budget` when given: 3.5 Flash-Lite answers a budget
+    of 0 with HTTP 400 and takes `minimal` instead.
     """
     config = types.GenerateContentConfig(
         system_instruction=system,
         max_output_tokens=max_output_tokens,
-        thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
+        thinking_config=(
+            types.ThinkingConfig(thinking_level=thinking_level)
+            if thinking_level
+            else types.ThinkingConfig(thinking_budget=thinking_budget)
+        ),
         safety_settings=safety_settings(),
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         tools=build_tools(has_media=media is not None) if use_tools else None,
@@ -179,11 +192,12 @@ async def generate(
         ),
     )
 
-    parts: list[object] = []
-    if media is not None:
-        payload, mime_type = media
-        parts.append(types.Part.from_bytes(data=payload, mime_type=mime_type))
-    parts.append(types.Part.from_text(text=user))
+    if parts is None:
+        parts = []
+        if media is not None:
+            payload, mime_type = media
+            parts.append(types.Part.from_bytes(data=payload, mime_type=mime_type))
+        parts.append(types.Part.from_text(text=user))
     history: list[types.Content] = [types.Content(role="user", parts=parts)]
 
     started = time.monotonic()

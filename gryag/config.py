@@ -105,6 +105,22 @@ DEFAULTS: dict[str, str] = {
     # /lore is a database read and an upload, so it cannot be made expensive by being
     # spammed — but it can be made annoying. Seconds.
     "lore_cooldown": "600",
+    # /summary: what the caller missed since they last wrote, or the last N.
+    "summary_enabled": "1",
+    "summary_model": "gemini-flash-lite-latest",
+    "summary_batch": "1000",
+    # "text" or "pages" (the transcript drawn onto images). Measured 2026-10-26 on the
+    # same 989 messages: text 21k tokens, ~$0.0065, links almost always on the right
+    # message; pages 4.9k tokens, ~$0.0017, about half the links one message off. The
+    # links are the point of the feature, so text it is until a model reads pages better.
+    "summary_input": "text",
+    "summary_resolution": "medium",
+    # Photos in the batch, newest first, tiled six to a contact sheet. 0 sends none.
+    "summary_photos": "12",
+    "summary_max_tokens": "2000",
+    # 3.5 Flash-Lite refuses a thinking budget of 0; `minimal` is its nearest.
+    "summary_thinking": "minimal",
+    "summary_cooldown": "60",
     # Retention, in days. Messages, their reactions and the service events older than
     # this are deleted on the background tick; the lore, summaries and facts built from
     # them stay. 0 keeps everything. Global only — the sweep covers every chat at once.

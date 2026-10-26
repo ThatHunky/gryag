@@ -1,3 +1,5 @@
+import re
+
 from gryag import phrases
 
 
@@ -47,3 +49,32 @@ def test_the_by_the_white_idiom_names_the_language_the_bot_speaks():
         for line in getattr(phrases, name):
             if "по білому" in line:
                 assert "українською по білому" in line, line
+
+
+# {who} is whoever won, women included, and a display name cannot be declined.
+_WINNER_PAST_AFTER = re.compile(r"\{who\},?\s+(?:вже\s+|уже\s+|сьогодні\s+|знову\s+|і\s+)?\w+(?:в|вся)\b")
+_WINNER_PAST_BEFORE = re.compile(r"\b\w+(?:ав|ив|ів|ов|вся|міг)\s+\{who\}")
+_ADDRESSED_PAST = re.compile(r"\bти\s+(?:\w+\s+)?\w+(?:ав|ив|ів|ов|ався|ився)\b")
+_PREPOSITION = re.compile(r"\b(?:до|для|від|у|в|на|руках|користувачу)\s+\{who\}", re.IGNORECASE)
+
+
+def test_no_line_puts_the_winner_in_the_masculine():
+    """«Vitalina, ти йшов до цього успіху» is what the draw produced for a woman."""
+    for line in phrases.VERDICT + phrases.ALREADY:
+        assert not _WINNER_PAST_AFTER.search(line), line
+        assert not _WINNER_PAST_BEFORE.search(line), line
+        assert not _ADDRESSED_PAST.search(line), line
+
+
+def test_no_line_declines_the_winners_name():
+    """«увага прикута до Надя»: the name lands where Ukrainian needs another case."""
+    for line in phrases.VERDICT + phrases.ALREADY:
+        assert not _PREPOSITION.search(line), line
+
+
+def test_no_two_repeats_share_a_punchline():
+    """Exact duplicates are caught above; this catches the same joke with a new opener."""
+    for pool in (phrases.VERDICT, phrases.ALREADY):
+        tails = [line.split("{who}", 1)[1].strip(" .,:—") for line in pool]
+        tails = [t for t in tails if len(t) > 15]
+        assert len(set(tails)) == len(tails)

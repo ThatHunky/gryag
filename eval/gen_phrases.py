@@ -6,7 +6,8 @@ again only to refresh the pool:
 
     .venv/bin/python eval/gen_phrases.py
 
-It overwrites gryag/phrases.py. Read the diff before committing it: this is the one place
+It overwrites gryag/phrases.py, and since 2026-10-27 that file is curated by hand, so it
+refuses to without --force. Read the diff before committing it: this is the one place
 where model output ships to a real chat without anybody reading it first.
 """
 
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -90,6 +92,10 @@ def valid(name: str, line: str) -> bool:
 
 
 def main() -> None:
+    if "--force" not in sys.argv[1:]:
+        raise SystemExit(
+            f"{TARGET} is curated by hand now; rerun with --force to replace it anyway"
+        )
     load_dotenv(ROOT / ".env")
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     persona = PERSONA.read_text()

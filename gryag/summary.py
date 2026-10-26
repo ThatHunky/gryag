@@ -1,9 +1,17 @@
 """`/summary`: what you missed, in gryag's voice, with every point linking to its message.
 
-"What you missed" is everything since the caller last wrote in the chat. Telegram does
-not tell a bot what anybody has read, and the caller's own last line is the nearest thing
-it does know. `/summary N` takes the last N instead. Either way one batch is at most
-`summary_batch` messages; anything older is left out and the reply says so.
+"What you missed" is what was said while the caller was last away. Telegram does not tell
+a bot what anybody has read, so absence is read off the caller's own lines: the last one
+followed by `summary_away_minutes` of their silence is where they left, the next one is
+where they came back, and the batch is what lies between. What came after their return
+they were there for. The first version took the caller's very last line, which for
+anybody actually chatting was a minute ago — five messages, or "nothing missed", while
+they had come back from three hours away. `/summary N` takes the last N instead. Either
+way one batch is at most `summary_batch` messages; anything older is left out and the
+reply says so.
+
+Earlier summaries and the commands that asked for them are left out of the batch, or the
+model summarises its own summary.
 
 The transcript goes to the model either as text or drawn onto pages (`gryag.pages`),
 chosen by `summary_input`. The pages exist for the token bill: see that module for the
@@ -23,6 +31,7 @@ import html
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 import aiosqlite
 from aiogram import F, Router
@@ -59,6 +68,11 @@ INSTRUCTIONS = (
     "посилання на різні слова. Більше нічого в круглих дужках після квадратних не пиши."
 )
 
+COMMAND = re.compile(r"^/(?:summary|підсумок|самарі)(?:@\w+)?(?:\s|$)", re.IGNORECASE)
+
+MIN_MESSAGES = 10
+"""Fewer than this and there is nothing to summarise, only something to make up."""
+
 LINK = re.compile(r"\[([^\[\]\n]{1,200})\]\(\s*(\d{1,5}(?:\s*[,;]\s*\d{1,5})*)\s*\)")
 """`[words](17)`, and `[words](1, 2)`: asked for one number, Flash-Lite still sometimes
 cites two, and the first live summary left four points as raw brackets because of it."""
@@ -69,6 +83,8 @@ class Batch:
     messages: list[dict]
     skipped: int
     """Unread messages older than the batch, left out of it."""
+    away_since: str | None = None
+    """When the caller left, if that is where the batch starts."""
 
 
 def numbered_lines(messages: list[dict]) -> list[str]:
@@ -103,6 +119,40 @@ def to_html(text: str, chat_id: int, messages: list[dict]) -> str:
     return "".join(out).strip()
 
 
+def _without_summaries(messages: list[dict]) -> list[dict]:
+    """Drop `/summary` commands and the bot's answers to them."""
+    commands = {
+        m["message_id"] for m in messages if COMMAND.match((m.get("text") or "").strip())
+    }
+    return [
+        m
+        for m in messages
+        if m["message_id"] not in commands
+        and not (m.get("is_bot") and m.get("reply_to") in commands)
+    ]
+
+
+def missed_span(
+    messages: list[dict], user_id: int, now: datetime, away: timedelta
+) -> tuple[int, int, str | None]:
+    """`messages[start:end]` is what the caller missed, plus when they left (or None).
+
+    Walks the caller's own lines from the newest, pairing each with the moment they next
+    spoke (the command itself, for the newest). The first pair far enough apart is the
+    absence: it starts after the earlier line and ends at the later one. With no such
+    pair the caller was here all along, and missed only what came before their first
+    line in the window — all of it, if they never wrote there.
+    """
+    own = [i for i, m in enumerate(messages) if m.get("user_id") == user_id]
+    returned, next_spoke = len(messages), now
+    for i in reversed(own):
+        said = datetime.fromisoformat(messages[i]["ts"])
+        if next_spoke - said >= away:
+            return i + 1, returned, messages[i]["ts"]
+        returned, next_spoke = i, said
+    return 0, own[0] if own else len(messages), None
+
+
 async def select(
     db: aiosqlite.Connection,
     chat_id: int,
@@ -110,6 +160,9 @@ async def select(
     before_message_id: int,
     count: int | None,
     batch: int,
+    *,
+    now: datetime,
+    away: timedelta,
 ) -> Batch:
     """The messages to summarise, oldest first, never including the command itself."""
     recent = [
@@ -118,20 +171,16 @@ async def select(
         if m["message_id"] != before_message_id
     ]
     if count:
-        chosen = recent[-min(count, batch) :]
+        chosen = _without_summaries(recent)[-min(count, batch) :]
         return Batch([m for m in chosen if context.is_context_worthy(m)], 0)
 
-    # Everything after the caller's own last line. Scanned in memory over a bounded
-    # window: a person who has not written in five batches' worth gets the last batch.
-    last_own = max(
-        (i for i, m in enumerate(recent) if m.get("user_id") == user_id), default=-1
-    )
-    unread = recent[last_own + 1 :]
+    start, end, away_since = missed_span(recent, user_id, now, away)
+    unread = _without_summaries(recent[start:end])
     if len(unread) > batch:
         skipped, unread = len(unread) - batch, unread[-batch:]
     else:
         skipped = 0
-    return Batch([m for m in unread if context.is_context_worthy(m)], skipped)
+    return Batch([m for m in unread if context.is_context_worthy(m)], skipped, away_since)
 
 
 async def _photo_sheets(bot, messages: list[dict], limit: int) -> list[bytes]:
@@ -256,6 +305,34 @@ def fit(text: str, chat_id: int, messages: list[dict], note: str = "") -> str:
             lines = [lines[0][: len(lines[0]) * 3 // 4]]
 
 
+def messages_word(n: int) -> str:
+    """1, 2-4 and 22 take «повідомлення»; 5-20, 11-14 and 25 take «повідомлень»."""
+    if n % 10 in (1, 2, 3, 4) and n % 100 not in (11, 12, 13, 14):
+        return "повідомлення"
+    return "повідомлень"
+
+
+def scope(chosen: Batch, count: int | None) -> str:
+    """One line saying what the summary covers, so a short one is not a mystery."""
+    n = len(chosen.messages)
+    if count:
+        line = f"останні {n} {messages_word(n)}"
+    elif chosen.away_since:
+        # Gender-neutral on purpose: "поки тебе не було", not "як ти пішов".
+        left = datetime.fromisoformat(chosen.away_since).astimezone(handlers.LOCAL_TZ)
+        when = (
+            f"{left:%H:%M}"
+            if left.date() == datetime.now(handlers.LOCAL_TZ).date()
+            else f"{left:%d.%m %H:%M}"
+        )
+        line = f"{n} {messages_word(n)} з {when}, поки тебе не було"
+    else:
+        line = f"останні {n} {messages_word(n)}"
+    if chosen.skipped:
+        line += f", ще {chosen.skipped} старіших не влізло"
+    return f"({line})"
+
+
 _last_run: dict[int, float] = {}
 
 
@@ -287,12 +364,20 @@ async def send_command(
     raw = (command.args if command else None) or (message.text or "").partition(" ")[2]
     count = int(raw.strip()) if raw.strip().isdigit() else None
     batch = await config.get_int(db, "summary_batch", chat_id)
+    away = timedelta(minutes=await config.get_int(db, "summary_away_minutes", chat_id))
     chosen = await select(
-        db, chat_id, message.from_user.id, message.message_id, count, batch
+        db, chat_id, message.from_user.id, message.message_id, count, batch,
+        now=message.date, away=away,
     )
-    if len(chosen.messages) < 3:
+    if len(chosen.messages) < MIN_MESSAGES:
         _last_run.pop(chat_id, None)
-        await handlers.answer(message, db, "та ти нічого не пропустив")
+        await handlers.answer(
+            message,
+            db,
+            "там нічого підсумовувати"
+            if count
+            else "ти нічого не пропустив, ти ж тут сидиш. останні 300 — /summary 300",
+        )
         return
 
     done = await summarise(db, client, message.bot, persona, chat_id, chosen.messages)
@@ -301,7 +386,7 @@ async def send_command(
         await handlers.answer(message, db, "щось не склалось, спробуй пізніше")
         return
     text, _ = done
-    note = f"\n\n<i>(ще {chosen.skipped} старіших не влізло)</i>" if chosen.skipped else ""
+    note = f"\n\n<i>{html.escape(scope(chosen, count))}</i>"
     await handlers.answer(
         message,
         db,

@@ -109,6 +109,8 @@ DEFAULTS: dict[str, str] = {
     "summary_enabled": "1",
     "summary_model": "gemini-flash-lite-latest",
     "summary_batch": "1000",
+    # How long somebody must have been quiet for /summary to count it as having left.
+    "summary_away_minutes": "30",
     # "text" or "pages" (the transcript drawn onto images). Measured 2026-10-26 on the
     # same 989 messages: text 21k tokens, ~$0.0065, links almost always on the right
     # message; pages 4.9k tokens, ~$0.0017, about half the links one message off. The

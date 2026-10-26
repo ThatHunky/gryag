@@ -150,3 +150,45 @@ async def test_one_failing_job_does_not_stop_the_others():
     await proactive._run_safely("fine", fine())
 
     assert ran == ["fine"]
+
+
+async def _history(db, message_id, ts):
+    await store.save_message(
+        db, chat_id=-100, message_id=message_id, user_id=1, ts=ts, text="x",
+        media_kind=None, file_id=None, reply_to=None, is_bot=False,
+    )
+    await store.set_reaction_count(
+        db, chat_id=-100, message_id=message_id, emoji="👍", count=2, ts=ts
+    )
+    await store.save_event(
+        db, chat_id=-100, message_id=message_id + 1000, ts=ts, action="join",
+        actor_id=1, payload={},
+    )
+
+
+async def _count(db, table):
+    async with db.execute(f"SELECT COUNT(*) FROM {table}") as cur:
+        return (await cur.fetchone())[0]
+
+
+async def test_history_past_the_retention_window_is_deleted(db):
+    now = datetime(2026, 10, 26, 12, tzinfo=timezone.utc)
+    await _history(db, 1, (now - timedelta(days=200)).isoformat(timespec="seconds"))
+    await _history(db, 2, (now - timedelta(days=10)).isoformat(timespec="seconds"))
+
+    removed = await proactive.prune_due(db, now)
+
+    assert removed == {"messages": 1, "reactions": 1, "events": 1}
+    async with db.execute("SELECT message_id FROM messages") as cur:
+        assert [r[0] for r in await cur.fetchall()] == [2]
+    assert await _count(db, "reactions") == 1
+    assert await _count(db, "events") == 1
+
+
+async def test_zero_retention_keeps_everything(db):
+    now = datetime(2026, 10, 26, 12, tzinfo=timezone.utc)
+    await _history(db, 1, (now - timedelta(days=2000)).isoformat(timespec="seconds"))
+    await config.set(db, "history_days", "0")
+
+    assert await proactive.prune_due(db, now) == {}
+    assert await _count(db, "messages") == 1

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 
@@ -137,6 +137,21 @@ async def _speak_into(db, client, bot, persona, chat_id: int, now) -> int:
     return 1
 
 
+async def prune_due(db: aiosqlite.Connection, now: datetime | None = None) -> dict[str, int]:
+    """Drop the raw history past the retention window. Riding the tick costs one indexed
+    DELETE every ten minutes, which finds nothing almost every time."""
+    days = await config.get_int(db, "history_days")
+    if days <= 0:
+        return {}
+    now = now or datetime.now(timezone.utc)
+    removed = await store.prune_history(
+        db, (now - timedelta(days=days)).isoformat(timespec="seconds")
+    )
+    if removed:
+        log.info("pruned history older than %s days: %s", days, removed)
+    return removed
+
+
 async def _run_safely(what: str, coro) -> None:
     """One failing job must not stop the others, or the loop.
 
@@ -155,4 +170,5 @@ async def loop(db: aiosqlite.Connection, client, bot, persona) -> None:
         await _run_safely("proactive pass", run_once(db, client, bot, persona))
         await _run_safely("pidor announcement", pidor.announce_due(db, bot))
         await _run_safely("pidrahuika digest", pidrahuika.post_due(db, bot))
+        await _run_safely("history pruning", prune_due(db))
         await asyncio.sleep(TICK_SECONDS)

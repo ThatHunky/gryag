@@ -105,6 +105,10 @@ DEFAULTS: dict[str, str] = {
     # /lore is a database read and an upload, so it cannot be made expensive by being
     # spammed — but it can be made annoying. Seconds.
     "lore_cooldown": "600",
+    # Retention, in days. Messages, their reactions and the service events older than
+    # this are deleted on the background tick; the lore, summaries and facts built from
+    # them stay. 0 keeps everything. Global only — the sweep covers every chat at once.
+    "history_days": "183",
 }
 
 

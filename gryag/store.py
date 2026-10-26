@@ -900,6 +900,32 @@ async def forget_chat(db: aiosqlite.Connection, chat_id: int) -> dict[str, int]:
     return {k: v for k, v in removed.items() if v}
 
 
+async def prune_history(db: aiosqlite.Connection, before: str) -> dict[str, int]:
+    """Delete the raw history older than `before`, in every chat.
+
+    Reactions go with the messages they were on, so they are swept first, while the
+    join to the message's timestamp still exists. Derived tables — lore, summaries,
+    facts — are left alone: they are what the history was kept for.
+    """
+    removed: dict[str, int] = {}
+    cur = await db.execute(
+        """
+        DELETE FROM reactions WHERE EXISTS (
+            SELECT 1 FROM messages m
+            WHERE m.chat_id = reactions.chat_id AND m.message_id = reactions.message_id
+              AND m.ts < ?
+        )
+        """,
+        (before,),
+    )
+    removed["reactions"] = cur.rowcount
+    for table in ("events", "messages"):
+        cur = await db.execute(f"DELETE FROM {table} WHERE ts < ?", (before,))
+        removed[table] = cur.rowcount
+    await db.commit()
+    return {k: v for k, v in removed.items() if v}
+
+
 async def ensure_chat(db: aiosqlite.Connection, chat_id: int, title: str) -> None:
     """Record that the chat exists, without switching it on.
 

@@ -101,3 +101,14 @@ def test_contact_sheet_skips_what_it_cannot_open():
     sheets = pages.contact_sheet([("[1]", buffer.getvalue()), ("[2]", b"not an image")])
 
     assert len(sheets) == 1
+
+
+def test_several_numbers_link_to_the_first_one_in_the_batch():
+    messages = [{"message_id": 500}, {"message_id": 501}]
+
+    out = summary.to_html("[Лобстер про стікери](99, 2) і [ще](1 ; 2)", CHAT, messages)
+
+    assert out == (
+        '<a href="https://t.me/c/4291515714/501">Лобстер про стікери</a> і '
+        '<a href="https://t.me/c/4291515714/500">ще</a>'
+    )

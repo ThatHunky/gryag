@@ -53,11 +53,14 @@ INSTRUCTIONS = (
     "Без заголовків, без markdown, без жирного. Тут можна довше, ніж зазвичай.\n"
     "У кожному пункті зроби посилання на повідомлення, звідки це взялося: "
     "візьми кілька слів пункту в квадратні дужки, а номер повідомлення — у круглі, "
-    "ось так: [Олег знову про крипту](17). Номер — того самого повідомлення, де це "
-    "сказано, а не сусіднього. Більше нічого в круглих дужках після квадратних не пиши."
+    "ось так: [Олег знову про крипту](17). Один номер на посилання — того самого "
+    "повідомлення, де це сказано, а не сусіднього. Треба два повідомлення — зроби два "
+    "посилання на різні слова. Більше нічого в круглих дужках після квадратних не пиши."
 )
 
-LINK = re.compile(r"\[([^\[\]\n]{1,200})\]\((\d{1,5})\)")
+LINK = re.compile(r"\[([^\[\]\n]{1,200})\]\(\s*(\d{1,5}(?:\s*[,;]\s*\d{1,5})*)\s*\)")
+"""`[words](17)`, and `[words](1, 2)`: asked for one number, Flash-Lite still sometimes
+cites two, and the first live summary left four points as raw brackets because of it."""
 
 
 @dataclass(frozen=True)
@@ -76,7 +79,8 @@ def numbered_lines(messages: list[dict]) -> list[str]:
 
 
 def to_html(text: str, chat_id: int, messages: list[dict]) -> str:
-    """The model's `[words](n)` become links; everything else is escaped.
+    """The model's `[words](n)` become links; everything else is escaped. Of several
+    numbers the first one that is in the batch wins.
 
     Escaping happens per piece, between the matches, so a `<` somebody typed into the
     chat and the model quoted cannot open a tag.
@@ -85,10 +89,10 @@ def to_html(text: str, chat_id: int, messages: list[dict]) -> str:
     cursor = 0
     for match in LINK.finditer(text):
         out.append(html.escape(text[cursor : match.start()], quote=False))
-        words, position = match.group(1), int(match.group(2))
-        url = None
-        if 1 <= position <= len(messages):
-            url = lore.message_link(chat_id, messages[position - 1]["message_id"])
+        words = match.group(1)
+        positions = [int(n) for n in re.findall(r"\d+", match.group(2))]
+        valid = [p for p in positions if 1 <= p <= len(messages)]
+        url = lore.message_link(chat_id, messages[valid[0] - 1]["message_id"]) if valid else None
         if url:
             out.append(f'<a href="{url}">{html.escape(words, quote=False)}</a>')
         else:

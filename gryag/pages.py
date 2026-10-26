@@ -166,21 +166,35 @@ class Typesetter:
     def wrap(self, line: str, width: float) -> list[str]:
         """Word wrap, with continuation lines indented so a message's start stays visible."""
         out: list[str] = []
-        current = ""
+        current, used = "", 0.0
+        space = self.width(" ")
         for word in line.split(" "):
-            candidate = f"{current} {word}" if current else word
-            if not current or self.width(candidate) <= width:
-                current = candidate
+            # Summed per word rather than re-measured per candidate line: measuring the
+            # whole line again for every word made long captions quadratic.
+            cost = self.width(word)
+            if not current:
+                current, used = word, cost
+            elif used + space + cost <= width:
+                current, used = f"{current} {word}", used + space + cost
             else:
                 out.append(current)
-                current = "   " + word
+                current, used = "   " + word, self.width("   ") + cost
         out.append(current)
         return out
 
 
 def _png(image: Image.Image) -> bytes:
+    """Fast, not small. A page costs the same tokens at any file size, and `optimize`
+    spent 2.8 of the 3.5 seconds it took to draw a thousand messages."""
     buffer = io.BytesIO()
-    image.save(buffer, "PNG", optimize=True)
+    image.save(buffer, "PNG", compress_level=1)
+    return buffer.getvalue()
+
+
+def _jpeg(image: Image.Image) -> bytes:
+    """Photos are photos: PNG of a contact sheet is several megabytes of nothing."""
+    buffer = io.BytesIO()
+    image.save(buffer, "JPEG", quality=85)
     return buffer.getvalue()
 
 
@@ -225,8 +239,8 @@ def contact_sheet(
     grid: tuple[int, int] = (2, 3),
     size: int = 28,
 ) -> list[bytes]:
-    """Photos tiled several to a page, each under its label, so one page's flat token
-    price covers several of them. Unreadable files are skipped, not fatal."""
+    """JPEG pages of photos tiled several to a page, each under its label, so one page's
+    flat token price covers several of them. Unreadable files are skipped, not fatal."""
     columns, rows = grid
     label_height = int(size * 1.4)
     cell_w, cell_h = width // columns, height // rows
@@ -246,5 +260,5 @@ def contact_sheet(
             photo.thumbnail((cell_w - 12, cell_h - label_height - 12))
             sheet.paste(photo, (x + 6, y + label_height + 4))
             setter.draw(sheet, (x + 6, y + 4), label)
-        pages.append(_png(sheet))
+        pages.append(_jpeg(sheet))
     return pages

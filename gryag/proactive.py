@@ -137,13 +137,25 @@ async def _speak_into(db, client, bot, persona, chat_id: int, now) -> int:
     return 1
 
 
+PRUNE_EVERY = timedelta(hours=6)
+_last_prune: datetime | None = None
+
+
 async def prune_due(db: aiosqlite.Connection, now: datetime | None = None) -> dict[str, int]:
-    """Drop the raw history past the retention window. Riding the tick costs one indexed
-    DELETE every ten minutes, which finds nothing almost every time."""
+    """Drop the raw history past the retention window.
+
+    The deletes filter on `ts` alone, which no index leads with, so each pass scans the
+    messages and reactions tables. A few times a day is plenty for a six-month window;
+    every ten-minute tick was 144 full scans a day that found nothing.
+    """
+    global _last_prune
+    now = now or datetime.now(timezone.utc)
+    if _last_prune is not None and now - _last_prune < PRUNE_EVERY:
+        return {}
+    _last_prune = now
     days = await config.get_int(db, "history_days")
     if days <= 0:
         return {}
-    now = now or datetime.now(timezone.utc)
     removed = await store.prune_history(
         db, (now - timedelta(days=days)).isoformat(timespec="seconds")
     )

@@ -904,19 +904,20 @@ async def prune_history(db: aiosqlite.Connection, before: str) -> dict[str, int]
     """Delete the raw history older than `before`, in every chat.
 
     Reactions go with the messages they were on, so they are swept first, while the
-    join to the message's timestamp still exists. Derived tables — lore, summaries,
+    join to the message's timestamp still exists; one last touched before the cutoff goes
+    too, which catches reactions on messages that were never stored. Derived tables — lore, summaries,
     facts — are left alone: they are what the history was kept for.
     """
     removed: dict[str, int] = {}
     cur = await db.execute(
         """
-        DELETE FROM reactions WHERE EXISTS (
+        DELETE FROM reactions WHERE updated_at < ? OR EXISTS (
             SELECT 1 FROM messages m
             WHERE m.chat_id = reactions.chat_id AND m.message_id = reactions.message_id
               AND m.ts < ?
         )
         """,
-        (before,),
+        (before, before),
     )
     removed["reactions"] = cur.rowcount
     for table in ("events", "messages"):

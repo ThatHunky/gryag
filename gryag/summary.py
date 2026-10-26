@@ -18,6 +18,7 @@ outside the batch loses its link and keeps its words.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import re
@@ -134,16 +135,21 @@ async def select(
 
 
 async def _photo_sheets(bot, messages: list[dict], limit: int) -> list[bytes]:
-    photos: list[tuple[str, bytes]] = []
+    if limit <= 0:
+        return []
     candidates = [
         (n, m) for n, m in enumerate(messages, 1)
         if m.get("media_kind") == "photo" and m.get("file_id")
+    ][-limit:]
+    fetched = await asyncio.gather(
+        *(media.fetch(bot, m["file_id"], media.MIME_BY_KIND["photo"]) for _, m in candidates)
+    )
+    photos = [
+        (f"[{n}]", got[0]) for (n, _), got in zip(candidates, fetched) if got is not None
     ]
-    for n, message in candidates[-limit:] if limit > 0 else []:
-        fetched = await media.fetch(bot, message["file_id"], "image/jpeg")
-        if fetched is not None:
-            photos.append((f"[{n}]", fetched[0]))
-    return pages.contact_sheet(photos) if photos else []
+    # Decoding and tiling a dozen photos is CPU work; on the loop it would stall every
+    # other chat while a summary is prepared.
+    return await asyncio.to_thread(pages.contact_sheet, photos) if photos else []
 
 
 async def build_parts(
@@ -156,20 +162,21 @@ async def build_parts(
     """Everything the model is handed, in reading order: transcript, photos, the ask."""
     level = RESOLUTIONS.get(resolution, RESOLUTIONS["medium"])
 
-    def image(png: bytes) -> types.Part:
+    def image(data: bytes, mime_type: str) -> types.Part:
         return types.Part(
-            inline_data=types.Blob(data=png, mime_type="image/png"),
+            inline_data=types.Blob(data=data, mime_type=mime_type),
             media_resolution={"level": level},
         )
 
     parts: list[types.Part] = []
     if mode == "pages":
-        parts.extend(image(p) for p in pages.render(lines))
+        rendered = await asyncio.to_thread(pages.render, lines)
+        parts.extend(image(p, "image/png") for p in rendered)
         source = ", намальована на сторінках по дві колонки"
     else:
         parts.append(types.Part.from_text(text="\n".join(lines)))
         source = ""
-    parts.extend(image(s) for s in sheets)
+    parts.extend(image(s, "image/jpeg") for s in sheets)
     photos = (
         " Далі — фото з цієї переписки, підписані номерами повідомлень; "
         "кажи, що на них, якщо це важливо."
@@ -190,7 +197,8 @@ async def summarise(
     chat_id: int,
     messages: list[dict],
 ) -> tuple[str, llm.LlmResult] | None:
-    """HTML ready to send, and the call it cost. None if the model gave nothing back."""
+    """The model's text, still with `[words](n)` links, and the call it cost. None if the
+    model gave nothing back."""
     model = await config.get(db, "summary_model", chat_id)
     sheets = await _photo_sheets(
         bot, messages, await config.get_int(db, "summary_photos", chat_id)
@@ -226,7 +234,26 @@ async def summarise(
         latency_ms=result.latency_ms,
         cost_usd=result.cost_usd,
     )
-    return to_html(result.text, chat_id, messages), result
+    return result.text, result
+
+
+def fit(text: str, chat_id: int, messages: list[dict], note: str = "") -> str:
+    """HTML that fits one Telegram message, cut at whole points.
+
+    Cut before conversion, never after: cutting the HTML can end inside a tag or an
+    entity, and Telegram rejects the whole message for it. A single point too long for
+    the limit is cut in the raw text, where the worst case is a link that loses its
+    closing bracket and stays plain words.
+    """
+    lines = text.split("\n")
+    while True:
+        body = to_html("\n".join(lines), chat_id, messages) + note
+        if len(body) <= TELEGRAM_LIMIT:
+            return body
+        if len(lines) > 1:
+            lines.pop()
+        else:
+            lines = [lines[0][: len(lines[0]) * 3 // 4]]
 
 
 _last_run: dict[int, float] = {}
@@ -253,6 +280,9 @@ async def send_command(
     if waited < cooldown:
         await handlers.answer(message, db, f"почекай ще {round(cooldown - waited)} с")
         return
+    # Claimed before the first await below, so two commands arriving together cannot
+    # both get past the check above. Released again when nothing was spent.
+    _last_run[chat_id] = now
 
     raw = (command.args if command else None) or (message.text or "").partition(" ")[2]
     count = int(raw.strip()) if raw.strip().isdigit() else None
@@ -261,24 +291,21 @@ async def send_command(
         db, chat_id, message.from_user.id, message.message_id, count, batch
     )
     if len(chosen.messages) < 3:
+        _last_run.pop(chat_id, None)
         await handlers.answer(message, db, "та ти нічого не пропустив")
         return
 
-    _last_run[chat_id] = now
     done = await summarise(db, client, message.bot, persona, chat_id, chosen.messages)
     if done is None:
         _last_run.pop(chat_id, None)
         await handlers.answer(message, db, "щось не склалось, спробуй пізніше")
         return
-    body, _ = done
-    if chosen.skipped:
-        body += f"\n\n<i>(ще {chosen.skipped} старіших не влізло)</i>"
-    if len(body) > TELEGRAM_LIMIT:
-        body = body[: TELEGRAM_LIMIT - 1].rsplit("\n", 1)[0]
+    text, _ = done
+    note = f"\n\n<i>(ще {chosen.skipped} старіших не влізло)</i>" if chosen.skipped else ""
     await handlers.answer(
         message,
         db,
-        body,
+        fit(text, chat_id, chosen.messages, note),
         parse_mode="HTML",
         link_preview_options=LinkPreviewOptions(is_disabled=True),
     )

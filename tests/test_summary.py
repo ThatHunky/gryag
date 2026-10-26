@@ -112,3 +112,24 @@ def test_several_numbers_link_to_the_first_one_in_the_batch():
         '<a href="https://t.me/c/4291515714/501">Лобстер про стікери</a> і '
         '<a href="https://t.me/c/4291515714/500">ще</a>'
     )
+
+
+def test_an_overlong_summary_is_cut_at_whole_points():
+    messages = [{"message_id": 1}]
+    text = "\n".join(f"• [пункт {n}](1) " + "х" * 300 for n in range(30))
+
+    out = summary.fit(text, CHAT, messages, note="\n\n<i>(ще 5)</i>")
+
+    assert len(out) <= summary.TELEGRAM_LIMIT
+    assert out.endswith("<i>(ще 5)</i>")
+    assert out.count("<a ") == out.count("</a>")
+
+
+def test_one_endless_point_is_cut_without_breaking_a_tag():
+    text = " ".join(f"[слово](1) &" for _ in range(800))
+
+    out = summary.fit(text, CHAT, [{"message_id": 1}])
+
+    assert len(out) <= summary.TELEGRAM_LIMIT
+    assert out.count("<a ") == out.count("</a>")
+    assert not out.rstrip().endswith(("&am", "<a", "&"))

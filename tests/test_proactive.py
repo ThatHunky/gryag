@@ -171,7 +171,8 @@ async def _count(db, table):
         return (await cur.fetchone())[0]
 
 
-async def test_history_past_the_retention_window_is_deleted(db):
+async def test_history_past_the_retention_window_is_deleted(db, monkeypatch):
+    monkeypatch.setattr(proactive, "_last_prune", None)
     now = datetime(2026, 10, 26, 12, tzinfo=timezone.utc)
     await _history(db, 1, (now - timedelta(days=200)).isoformat(timespec="seconds"))
     await _history(db, 2, (now - timedelta(days=10)).isoformat(timespec="seconds"))
@@ -185,10 +186,32 @@ async def test_history_past_the_retention_window_is_deleted(db):
     assert await _count(db, "events") == 1
 
 
-async def test_zero_retention_keeps_everything(db):
+async def test_zero_retention_keeps_everything(db, monkeypatch):
+    monkeypatch.setattr(proactive, "_last_prune", None)
     now = datetime(2026, 10, 26, 12, tzinfo=timezone.utc)
     await _history(db, 1, (now - timedelta(days=2000)).isoformat(timespec="seconds"))
     await config.set(db, "history_days", "0")
 
     assert await proactive.prune_due(db, now) == {}
     assert await _count(db, "messages") == 1
+
+
+async def test_a_reaction_on_a_message_never_stored_is_pruned_too(db, monkeypatch):
+    monkeypatch.setattr(proactive, "_last_prune", None)
+    now = datetime(2026, 10, 26, 12, tzinfo=timezone.utc)
+    await store.set_reaction_count(
+        db, chat_id=-100, message_id=5, emoji="👍", count=1,
+        ts=(now - timedelta(days=200)).isoformat(timespec="seconds"),
+    )
+
+    assert await proactive.prune_due(db, now) == {"reactions": 1}
+
+
+async def test_pruning_runs_a_few_times_a_day_not_every_tick(db, monkeypatch):
+    monkeypatch.setattr(proactive, "_last_prune", None)
+    now = datetime(2026, 10, 26, 12, tzinfo=timezone.utc)
+    await proactive.prune_due(db, now)
+    await _history(db, 1, (now - timedelta(days=200)).isoformat(timespec="seconds"))
+
+    assert await proactive.prune_due(db, now + timedelta(minutes=10)) == {}
+    assert await proactive.prune_due(db, now + proactive.PRUNE_EVERY) != {}

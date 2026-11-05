@@ -608,6 +608,10 @@ async def handle_message(
             # A channel post or automatic forward carries no from_user; the same guard
             # is applied three lines down and was missed here.
             "alias": context.alias_for(sender.full_name) if sender else "хтось",
+            # The window renders a name clash as "name(@username)"; without these the
+            # trigger came out as "name(не бот)" and read as somebody else.
+            "username": getattr(sender, "username", None) if sender else None,
+            "sender_is_bot": bool(sender and getattr(sender, "is_bot", False)),
         }
         present = {m["user_id"] for m in messages if m.get("user_id")}
         if sender is not None:

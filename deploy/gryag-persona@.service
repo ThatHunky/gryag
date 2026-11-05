@@ -14,6 +14,9 @@ EnvironmentFile=/home/thathunky/bots/gryag-v2/instances/%i.env
 ExecStart=/home/thathunky/bots/gryag-v2/.venv/bin/python -m gryag
 Restart=always
 RestartSec=5
+# Polling stops at once on SIGTERM, but the process then lingered until systemd's 90s
+# default ran out, so every restart left the bot deaf for a minute and a half.
+TimeoutStopSec=15
 StandardOutput=journal
 StandardError=journal
 

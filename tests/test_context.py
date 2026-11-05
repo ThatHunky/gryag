@@ -101,6 +101,26 @@ def test_build_puts_the_reply_chain_before_the_window_without_duplicating():
     assert prompt.index("корінь") < prompt.index("вікно")
 
 
+def test_a_live_exchange_stays_at_the_bottom_in_time_order():
+    """Regression: the whole reply chain was hoisted above the window, so the line right
+    before the trigger was an unrelated older one, and a persona bot answered a person by
+    the name of whoever had written it."""
+    window = [msg(message_id=i, text=f"рядок {i}", alias="vsevolod") for i in range(1, 5)]
+    window.append(msg(message_id=5, text="та не ний", is_bot=True))
+    prompt = context.build(
+        messages=window,
+        chain=[msg(message_id=0, text="давній корінь"), window[-1]],
+        trigger=msg(message_id=6, text="чим же", alias="андрій", username="binihit"),
+        now="n",
+        chat_title="c",
+    )
+    lines = prompt.splitlines()
+
+    assert lines.index("гряг: та не ний") == lines.index(context.BOUNDARY.splitlines()[0]) - 1
+    assert prompt.index("давній корінь") < prompt.index("рядок 1")
+    assert prompt.count("та не ний") == 1
+
+
 def test_build_includes_the_header():
     prompt = context.build(
         messages=[],

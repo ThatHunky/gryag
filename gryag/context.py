@@ -213,9 +213,16 @@ def build(
     if phrases:
         memory.append(PHRASES_INTRO + "\n" + clamp("\n".join(phrases), PHRASES_TOKENS))
 
+    # Only the part of the reply chain that has scrolled out of the window goes first.
+    # Hoisting all of it put the last few turns of a live exchange above sixty older
+    # lines, so the line just before the trigger was somebody else entirely, and a bot
+    # answered a person by the name of whoever had spoken there.
+    in_window = {m.get("message_id") for m in messages}
+    earlier = [m for m in chain if m.get("message_id") not in in_window]
+
     seen: set[int] = set()
     lines: list[str] = []
-    for msg in [*chain, *messages]:
+    for msg in [*earlier, *messages]:
         message_id = msg.get("message_id")
         if message_id in seen or message_id == trigger.get("message_id"):
             continue

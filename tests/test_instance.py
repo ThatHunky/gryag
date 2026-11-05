@@ -60,6 +60,25 @@ def test_the_copied_person_and_the_bot_read_as_different_speakers(monkeypatch):
     assert human == "андрій(@real): бля"
 
 
+async def test_the_trigger_is_labelled_like_the_log(db, monkeypatch):
+    """Regression: the real андрій showed as "андрій(@binihit)" in the window but as
+    "андрій(не бот)" on the trigger line, and the bot answered him as somebody else."""
+    monkeypatch.setattr(context, "BOT_ALIAS", "андрій")
+    await _enable(db)
+    prompts = []
+
+    async def generate(client, **kwargs):
+        prompts.append(kwargs["user"])
+        return await Reply().generate(client, **kwargs)
+
+    monkeypatch.setattr(handlers.llm, "generate", generate)
+    message = FakeMessage(text="гряг чим же", full_name="андрій", user_id=5)
+    message.from_user.username = "binihit"
+    await handlers.handle_message(message, db, client=None, persona="p", bot_id=77)
+
+    assert prompts[0].rstrip().endswith("андрій(@binihit): гряг чим же")
+
+
 def test_another_bot_is_marked_so_it_is_not_taken_for_its_original():
     line = context.render_line({"alias": "андрій", "sender_is_bot": 1, "text": "ідк"})
 

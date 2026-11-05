@@ -92,6 +92,59 @@ def test_bot_to_bot_exchange_is_allowed_below_the_limit():
     assert decision.speak is True
 
 
+def test_an_exchange_can_end_before_the_limit():
+    decision = should_speak(make(is_bot=True, mentions_bot=True, bot_reply_chance=60,
+                                 bot_roll=0.7))
+
+    assert decision.speak is False
+    assert decision.reason == "bot_lost_interest"
+
+
+def test_a_lucky_roll_keeps_the_exchange_going():
+    decision = should_speak(make(is_bot=True, mentions_bot=True, bot_reply_chance=60,
+                                 bot_roll=0.3))
+
+    assert decision.speak is True
+
+
+def test_the_reply_chance_never_applies_to_people():
+    decision = should_speak(make(mentions_bot=True, bot_reply_chance=0, bot_roll=0.99))
+
+    assert decision.speak is True
+
+
+def test_may_join_another_bot_unaddressed():
+    decision = should_speak(make(is_bot=True, text="ідк", bot_ambient_chance=40,
+                                 ambient_roll=0.2, is_reply_to_other=True))
+
+    assert decision.speak is True
+    assert decision.reason == "bot_ambient"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        dict(ambient_roll=0.5),
+        dict(ambient_roll=0.2, seconds_since_bot_spoke=60),
+        dict(ambient_roll=0.2, local_hour=4),
+        dict(ambient_roll=0.2, bot_streak=3),
+        dict(ambient_roll=0.2, text="", media_only=True),
+    ],
+    ids=["unlucky", "cooldown", "quiet_hours", "limit", "media_only"],
+)
+def test_joining_another_bot_is_held_back(overrides):
+    decision = should_speak(make(**{"is_bot": True, "text": "ідк", "bot_ambient_chance": 40,
+                                    **overrides}))
+
+    assert decision.speak is False
+
+
+def test_joining_bots_is_off_by_default():
+    decision = should_speak(make(is_bot=True, text="ідк", ambient_roll=0.0))
+
+    assert decision.reason == "bot_not_addressed"
+
+
 def test_the_streak_does_not_restrain_humans():
     decision = should_speak(make(mentions_bot=True, bot_streak=99, bot_exchange_limit=3))
 

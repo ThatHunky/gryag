@@ -32,6 +32,10 @@ class GateInput:
     hourly_cap: int
     bot_streak: int
     bot_exchange_limit: int
+    # Percentages. 100 and 0 are the behaviour from before they existed.
+    bot_reply_chance: int = 100
+    bot_ambient_chance: int = 0
+    bot_roll: float = 0.0
     age_seconds: float = 0.0
     max_reply_age: int = 300
     busy: bool = False
@@ -128,6 +132,23 @@ def is_ambient_candidate(g: GateInput) -> bool:
     return True
 
 
+def joins_other_bot(g: GateInput) -> bool:
+    """Whether to answer another bot that did not address this one.
+
+    This is what lets two persona bots start talking to each other. Unlike
+    `is_ambient_candidate` it takes short lines and replies to somebody else: persona bots
+    write a median of 14-24 characters, and a line one of them aimed at a person is the
+    natural place for the other to cut in.
+    """
+    if g.bot_ambient_chance <= 0 or g.media_only or not g.text.strip():
+        return False
+    if in_quiet_hours(g.local_hour, g.quiet_from, g.quiet_to):
+        return False
+    if g.seconds_since_bot_spoke < g.ambient_cooldown:
+        return False
+    return g.ambient_roll * 100 < g.bot_ambient_chance
+
+
 def should_speak(g: GateInput) -> GateDecision:
     if not g.chat_enabled:
         return GateDecision(False, "chat_disabled")
@@ -163,14 +184,21 @@ def should_speak(g: GateInput) -> GateDecision:
         # Другий бот may be talked to, but only when it speaks first and only for a few
         # turns. `bot_streak` counts messages since the last human said anything, so two
         # bots left alone run down the limit and stop; any human line resets it to zero.
-        if not addressed:
+        if not addressed and not joins_other_bot(g):
             return GateDecision(False, "bot_not_addressed")
         if g.bot_streak >= g.bot_exchange_limit:
             return GateDecision(False, "bot_exchange_limit")
+        # Rolled every turn, so an exchange usually ends on its own well before the
+        # limit, and never at the same length twice.
+        if addressed and g.bot_roll * 100 >= g.bot_reply_chance:
+            return GateDecision(False, "bot_lost_interest")
 
     gap = required_gap(g.user_recent_replies, g.throttle_after, g.throttle_step)
     if gap and g.seconds_since_user_reply < gap:
         return GateDecision(False, "throttled")
+
+    if g.is_bot and not addressed:
+        return GateDecision(True, "bot_ambient")
 
     if g.mentions_bot:
         return GateDecision(True, "mention")

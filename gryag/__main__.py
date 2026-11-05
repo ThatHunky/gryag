@@ -34,6 +34,7 @@ from gryag import (
     screens,
     store,
     summary,
+    vocabulary,
 )
 
 @dataclass
@@ -54,7 +55,27 @@ named here — the default list leaves it out. Where it never arrives, the lore 
 without reactions and nothing else changes."""
 
 WEBHOOK_PATH = "/webhook"
-PERSONA_PATH = Path(__file__).resolve().parent.parent / "eval" / "persona-v3.txt"
+ROOT = Path(__file__).resolve().parent.parent
+PERSONA_PATH = ROOT / (os.environ.get("PERSONA_PATH") or "eval/persona-v3.txt")
+PHRASES_PATH = os.environ.get("PHRASES_PATH") and ROOT / os.environ["PHRASES_PATH"]
+CHAT_ONLY = os.environ.get("CHAT_ONLY") == "1"
+"""A persona instance only talks: the commands and daily posts stay with the main bot, or
+every bot in the chat would answer `/pidor` and post its own winner."""
+
+
+def apply_instance_env() -> None:
+    """Point this process at its own bot.
+
+    TELEGRAM_BOT_TOKEN_VAR names the variable holding the token, so tokens stay in `.env`
+    alone. A missing one raises rather than falling back: `.env` also holds the main bot's
+    token, and a persona instance polling with it would take over gryag's updates.
+    """
+    token_var = os.environ.get("TELEGRAM_BOT_TOKEN_VAR")
+    if token_var:
+        os.environ["TELEGRAM_BOT_TOKEN"] = os.environ[token_var]
+    keywords = os.environ.get("BOT_KEYWORDS")
+    if keywords:
+        config.DEFAULTS["keywords"] = keywords
 
 
 async def build(secrets: config.Secrets) -> "Runtime":
@@ -69,10 +90,11 @@ async def build(secrets: config.Secrets) -> "Runtime":
 
     # The persona lives in a mutable box so the menu can swap it without a restart.
     # Editing it and waiting for a deploy is how a voice never gets tuned.
-    persona = {"text": PERSONA_PATH.read_text()}
+    persona = {"text": PERSONA_PATH.read_text(), "phrases": vocabulary.load(PHRASES_PATH)}
 
     def reload_persona() -> int:
         persona["text"] = PERSONA_PATH.read_text()
+        persona["phrases"] = vocabulary.load(PHRASES_PATH)
         screens._persona_size_hint["chars"] = len(persona["text"])
         logging.info("persona reloaded, %s characters", len(persona["text"]))
         return len(persona["text"]) // 3
@@ -99,7 +121,7 @@ async def build(secrets: config.Secrets) -> "Runtime":
 
     # Only the public ones. /gryag, /nb and /unban stay off this list on purpose — a menu
     # entry nobody but the admin can use is an invitation to try it.
-    await bot.set_my_commands([
+    await bot.set_my_commands([] if CHAT_ONLY else [
         BotCommand(command="pidor", description="хто сьогодні підарас дня"),
         BotCommand(command="pidorstats", description="підараси року"),
         BotCommand(command="pidrahuika", description="підрахуйка СБС за сьогодні"),
@@ -108,7 +130,9 @@ async def build(secrets: config.Secrets) -> "Runtime":
         BotCommand(command="donate", description="підтримати бота"),
     ])
 
-    dispatcher = Dispatcher(db=db, client=client, persona=persona, bot_id=me.id)
+    dispatcher = Dispatcher(
+        db=db, client=client, persona=persona, bot_id=me.id, bot_username=me.username
+    )
     dispatcher.include_router(
         admin.build_router(
             secrets.admin_ids,
@@ -118,11 +142,12 @@ async def build(secrets: config.Secrets) -> "Runtime":
             persona=persona,
         )
     )
-    dispatcher.include_router(pidor.build_router())
-    dispatcher.include_router(pidrahuika.build_router())
-    dispatcher.include_router(lore.build_router())
-    dispatcher.include_router(summary.build_router())
-    dispatcher.include_router(donate.build_router())
+    if not CHAT_ONLY:
+        dispatcher.include_router(pidor.build_router())
+        dispatcher.include_router(pidrahuika.build_router())
+        dispatcher.include_router(lore.build_router())
+        dispatcher.include_router(summary.build_router())
+        dispatcher.include_router(donate.build_router())
     dispatcher.include_router(handlers.build_router())
     return Runtime(bot=bot, dispatcher=dispatcher, db=db, client=client, persona=persona)
 
@@ -138,7 +163,9 @@ async def start(secrets: config.Secrets) -> "Runtime":
     dataclass as a tuple, so the default MODE could not start at all.
     """
     rt = await build(secrets)
-    task = asyncio.create_task(proactive.loop(rt.db, rt.client, rt.bot, rt.persona))
+    task = asyncio.create_task(
+        proactive.loop(rt.db, rt.client, rt.bot, rt.persona, chat_only=CHAT_ONLY)
+    )
     # Keep a reference: asyncio only holds a weak one, and a bare task can be collected
     # mid-flight.
     _background.add(task)
@@ -184,6 +211,7 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
+    apply_instance_env()
     secrets = config.secrets()
     mode = os.environ.get("MODE", "polling")
     asyncio.run(serve_webhook(secrets) if mode == "webhook" else serve_polling(secrets))

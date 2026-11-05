@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 
-from gryag import config, context, gate, handlers, llm, pidor, pidrahuika, store
+from gryag import config, context, gate, handlers, llm, pidor, pidrahuika, store, vocabulary
 from gryag.handlers import _render_now
 
 log = logging.getLogger(__name__)
@@ -91,6 +91,7 @@ async def _speak_into(db, client, bot, persona, chat_id: int, now) -> int:
         chat_title="",
         week_summary=await store.latest_summary(db, chat_id, "week"),
         today_summary=await store.latest_summary(db, chat_id, "day"),
+        phrases=await vocabulary.draw(db, chat_id, persona),
     ).rsplit("---", 1)[0] + PROMPT_SUFFIX
 
     model = await config.get(db, "speak_model", chat_id)
@@ -177,10 +178,16 @@ async def _run_safely(what: str, coro) -> None:
         log.exception("%s failed", what)
 
 
-async def loop(db: aiosqlite.Connection, client, bot, persona) -> None:
-    while True:
-        await _run_safely("proactive pass", run_once(db, client, bot, persona))
+async def tick(db: aiosqlite.Connection, client, bot, persona, chat_only: bool = False) -> None:
+    await _run_safely("proactive pass", run_once(db, client, bot, persona))
+    # One game per chat: a persona instance leaves the daily posts to the main bot.
+    if not chat_only:
         await _run_safely("pidor announcement", pidor.announce_due(db, bot))
         await _run_safely("pidrahuika digest", pidrahuika.post_due(db, bot))
-        await _run_safely("history pruning", prune_due(db))
+    await _run_safely("history pruning", prune_due(db))
+
+
+async def loop(db: aiosqlite.Connection, client, bot, persona, chat_only: bool = False) -> None:
+    while True:
+        await tick(db, client, bot, persona, chat_only)
         await asyncio.sleep(TICK_SECONDS)

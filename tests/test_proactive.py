@@ -131,7 +131,7 @@ def test_the_entrypoint_hands_the_loop_everything_it_needs():
     from gryag import __main__ as entry
 
     source = inspect.getsource(entry)
-    assert "proactive.loop(rt.db, rt.client, rt.bot, rt.persona)" in source
+    assert "proactive.loop(rt.db, rt.client, rt.bot, rt.persona, chat_only=CHAT_ONLY)" in source
     assert set(entry.Runtime.__dataclass_fields__) >= {"db", "client", "persona", "bot"}
 
 

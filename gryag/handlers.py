@@ -20,7 +20,7 @@ from aiogram import Router
 from aiogram.types import BufferedInputFile, Message
 from aiogram.utils.chat_action import ChatActionSender
 
-from gryag import config, context, events, gate, images, llm, media, store
+from gryag import config, context, events, gate, images, llm, media, store, vocabulary
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +28,9 @@ OWN_COMMANDS = (
     "gryag", "nb", "unban", "pidor", "pidorstats", "pidrahuika", "sbs", "lore", "лор"
 )
 """Everything else starting with a slash belongs to another bot; see gate.foreign_command."""
+
+DEFAULT_USERNAME = "gryag_bot"
+"""The real one comes from `get_me` at startup; a persona instance has its own."""
 
 
 try:
@@ -381,7 +384,9 @@ async def _typing(message) -> AsyncIterator[None]:
         yield
 
 
-async def _maybe_answer_missed(message, db, client, persona, bot_id, chat_id: int) -> None:
+async def _maybe_answer_missed(
+    message, db, client, persona, bot_id, chat_id: int, bot_username: str = DEFAULT_USERNAME
+) -> None:
     """Sometimes go back to whoever was skipped while the bot was busy.
 
     Sometimes is the point. Always coming back turns the bot into a queue that services
@@ -396,7 +401,9 @@ async def _maybe_answer_missed(message, db, client, persona, bot_id, chat_id: in
     if missed is None:
         return
     log.info("going back to a message that was skipped in %s", chat_id)
-    await handle_message(missed, db, client, persona, bot_id, deferred=True)
+    await handle_message(
+        missed, db, client, persona, bot_id, deferred=True, bot_username=bot_username
+    )
 
 
 async def handle_message(
@@ -406,6 +413,7 @@ async def handle_message(
     persona: str,
     bot_id: int,
     deferred: bool = False,
+    bot_username: str = DEFAULT_USERNAME,
 ) -> str | None:
     chat_id = message.chat.id
 
@@ -477,7 +485,7 @@ async def handle_message(
     # "gryag_bot " and the bot ignored a direct address. aiogram ships extract_from for
     # exactly this.
     mentions_bot = any(
-        e.extract_from(text).lstrip("@").lower().endswith("gryag_bot")
+        e.extract_from(text).lstrip("@").lower() == bot_username.lower()
         for e in (message.entities or [])
         if e.type == "mention"
     )
@@ -614,6 +622,7 @@ async def handle_message(
             today_summary=await store.latest_summary(db, chat_id, "day"),
             facts=facts,
             bare_call=context.is_bare_call(text, keywords),
+            phrases=await vocabulary.draw(db, chat_id, persona),
             quote=getattr(quote, "text", None),
             quote_author=(
                 context.BOT_ALIAS
@@ -672,7 +681,11 @@ async def handle_message(
             # replaced any propagating exception with the deferred one, and held the
             # webhook request open for both replies — long enough for Telegram to time
             # out, redeliver, and get answered twice.
-            _spawn(_maybe_answer_missed(message, db, client, persona, bot_id, chat_id))
+            _spawn(
+                _maybe_answer_missed(
+                    message, db, client, persona, bot_id, chat_id, bot_username
+                )
+            )
 
 
 async def handle_edit(message, db) -> bool:
@@ -734,8 +747,8 @@ def build_router() -> Router:
     # video notes, documents and audio — they never reached the database at all, so the
     # conversation had holes the bot could not see.
     @router.message()
-    async def on_message(message: Message, db, client, persona, bot_id) -> None:
-        await handle_message(message, db, client, persona, bot_id)
+    async def on_message(message: Message, db, client, persona, bot_id, bot_username) -> None:
+        await handle_message(message, db, client, persona, bot_id, bot_username=bot_username)
 
     @router.edited_message()
     async def on_edit(message: Message, db) -> None:

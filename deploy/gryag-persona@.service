@@ -1,0 +1,21 @@
+# A persona instance: the same code as gryag-bot, another bot account and its own database.
+# One env file per instance in instances/<name>.env; see deploy/persona-instance.env.example.
+#   sudo systemctl enable --now gryag-persona@<name>
+[Unit]
+Description=gryag persona instance %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=thathunky
+WorkingDirectory=/home/thathunky/bots/gryag-v2
+EnvironmentFile=/home/thathunky/bots/gryag-v2/instances/%i.env
+ExecStart=/home/thathunky/bots/gryag-v2/.venv/bin/python -m gryag
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

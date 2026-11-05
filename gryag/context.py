@@ -10,16 +10,25 @@ window in phase 2, under the caps recorded in the spec.
 
 from __future__ import annotations
 
+import os
 import re
 
 CHARS_PER_TOKEN = 2.5
 """Measured on 142,773 characters of this chat's Ukrainian text (57,109 tokens)."""
 
-BOT_ALIAS = "гряг"
+BOT_ALIAS = os.environ.get("BOT_ALIAS") or "гряг"
+"""How this instance's own lines are labelled. Read from the real environment, which is
+where a systemd EnvironmentFile puts it, so a second instance is one variable away."""
 
 WEEK_SUMMARY_TOKENS = 400
 DAY_SUMMARY_TOKENS = 300
 FACTS_TOKENS = 150
+PHRASES_TOKENS = 250
+
+PHRASES_INTRO = (
+    "Так ти зазвичай говориш. Це лише для голосу: дослівно не повторюй, "
+    "бери зворот, тільки якщо він справді лягає:"
+)
 
 BOUNDARY = (
     "---\n"
@@ -127,11 +136,14 @@ def disambiguate(name: str, msg: dict) -> str:
 
 
 def render_line(msg: dict) -> str:
-    name = (
-        BOT_ALIAS
-        if msg.get("is_bot")
-        else disambiguate(msg.get("alias") or "хтось", msg)
-    )
+    if msg.get("is_bot"):
+        name = BOT_ALIAS
+    else:
+        name = disambiguate(msg.get("alias") or "хтось", msg)
+        # A persona bot shares its first name with the person it copies, so another
+        # instance would otherwise read the bot and the human as one speaker.
+        if msg.get("sender_is_bot"):
+            name = f"{name}(бот)"
     marker = MEDIA_MARKERS.get(msg.get("media_kind") or "", "")
     text = (msg.get("text") or "").strip()
     body = f"{marker} {text}".strip() if marker else text
@@ -177,6 +189,7 @@ def build(
     today_summary: str | None = None,
     facts: list[tuple[str, str]] | None = None,
     bare_call: bool = False,
+    phrases: list[str] | None = None,
 ) -> str:
     """Header, memory, then the reply chain, the recent window, and the boundary.
 
@@ -197,6 +210,8 @@ def build(
     if facts:
         rendered = "; ".join(f"{who} — {fact}" for who, fact in facts)
         memory.append("Про присутніх: " + clamp(rendered, FACTS_TOKENS))
+    if phrases:
+        memory.append(PHRASES_INTRO + "\n" + clamp("\n".join(phrases), PHRASES_TOKENS))
 
     seen: set[int] = set()
     lines: list[str] = []

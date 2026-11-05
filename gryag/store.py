@@ -155,6 +155,12 @@ CREATE TABLE IF NOT EXISTS lore (
     PRIMARY KEY (chat_id, version)
 );
 
+CREATE TABLE IF NOT EXISTS phrase_uses (
+    chat_id INTEGER NOT NULL,
+    phrase  TEXT    NOT NULL,
+    PRIMARY KEY (chat_id, phrase)
+);
+
 CREATE INDEX IF NOT EXISTS idx_reactions_chat ON reactions (chat_id, count DESC);
 CREATE INDEX IF NOT EXISTS idx_events_chat_ts ON events (chat_id, ts);
 """
@@ -1014,6 +1020,28 @@ async def chat_title(db: aiosqlite.Connection, chat_id: int) -> str:
 async def enabled_chats(db: aiosqlite.Connection) -> list[int]:
     async with db.execute("SELECT chat_id FROM chats WHERE enabled = 1") as cur:
         return [r[0] for r in await cur.fetchall()]
+
+
+async def used_phrases(db: aiosqlite.Connection, chat_id: int) -> set[str]:
+    async with db.execute(
+        "SELECT phrase FROM phrase_uses WHERE chat_id = ?", (chat_id,)
+    ) as cur:
+        return {r[0] for r in await cur.fetchall()}
+
+
+async def mark_phrases_used(
+    db: aiosqlite.Connection, chat_id: int, phrases: list[str]
+) -> None:
+    await db.executemany(
+        "INSERT OR IGNORE INTO phrase_uses (chat_id, phrase) VALUES (?, ?)",
+        [(chat_id, phrase) for phrase in phrases],
+    )
+    await db.commit()
+
+
+async def forget_used_phrases(db: aiosqlite.Connection, chat_id: int) -> None:
+    await db.execute("DELETE FROM phrase_uses WHERE chat_id = ?", (chat_id,))
+    await db.commit()
 
 
 async def ban_user(

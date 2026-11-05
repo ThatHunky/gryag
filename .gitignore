@@ -30,3 +30,5 @@ eval/persona.txt
 
 # Local-only persona drafts and their source text.
 eval/personas/
+# Per-instance settings and databases; see deploy/persona-instance.env.example.
+instances/

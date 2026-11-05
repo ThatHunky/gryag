@@ -27,3 +27,6 @@ eval/reference/
 # superseded by persona-v3. Both are kept locally; neither belongs in a public repo.
 eval/cases.yaml
 eval/persona.txt
+
+# Local-only persona drafts and their source text.
+eval/personas/
